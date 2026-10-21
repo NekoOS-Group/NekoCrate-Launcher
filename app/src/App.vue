@@ -11,7 +11,6 @@ import {
   Download,
   Settings2,
   UsersRound,
-  ArrowUpRight,
   ArrowDownToLine,
   FolderOpen,
   Play,
@@ -29,12 +28,14 @@ import {
   LoaderCircle,
   CircleAlert,
   Cat,
-  Sparkles,
   HardDrive,
   Layers,
   CheckCircle2,
-  CloudDownload,
   SlidersHorizontal,
+  ChevronDown,
+  Cpu,
+  MemoryStick,
+  Clock3,
 } from "lucide-vue-next";
 import type {
   Settings,
@@ -67,6 +68,7 @@ const snapshot = ref<Snapshot>({
 const settings = reactive<Settings>({ ...snapshot.value.database.settings });
 const manifest = ref<VersionManifest | null>(null);
 const filter = ref("");
+const selectedInstanceId = ref("");
 const busy = ref(false);
 const current = ref<Task | null>(null);
 const tasks = ref<Task[]>([]);
@@ -96,32 +98,76 @@ const selectedAccount = computed(() =>
     (a) => a.id === snapshot.value.database.selected_account,
   ),
 );
-const readyCount = computed(
-  () => snapshot.value.database.instances.filter((i) => i.installed).length,
+const selectedInstance = computed(
+  () =>
+    snapshot.value.database.instances.find(
+      (i) => i.id === selectedInstanceId.value,
+    ) || snapshot.value.database.instances[0],
+);
+const selectedRunning = computed(
+  () =>
+    !!selectedInstance.value &&
+    snapshot.value.running.includes(selectedInstance.value.id),
+);
+const selectedDirectory = computed(() =>
+  selectedInstance.value
+    ? `${snapshot.value.root}/instances/${selectedInstance.value.id}/game`
+    : "",
+);
+const downloadSource = computed(
+  () =>
+    ({ official: "Minecraft 官方", auto: "官方优先", bmclapi: "BMCLAPI 优先" })[
+      snapshot.value.database.settings.download_source
+    ] || "Minecraft 官方",
 );
 const nav = [
-  { id: "library", label: "我的猫匣", en: "Library", icon: Boxes },
-  { id: "accounts", label: "账户", en: "Accounts", icon: UsersRound },
+  { id: "library", label: "游戏实例", icon: Boxes },
+  { id: "accounts", label: "账户管理", icon: UsersRound },
   {
     id: "downloads",
     label: "下载与修复",
-    en: "Downloads",
     icon: ArrowDownToLine,
   },
-  { id: "settings", label: "设置", en: "Settings", icon: Settings2 },
+  { id: "settings", label: "启动器设置", icon: Settings2 },
 ] as const;
 const titles = {
-  library: "我的猫匣",
-  accounts: "游戏账户",
+  library: "游戏实例",
+  accounts: "账户管理",
   downloads: "下载与修复",
   settings: "启动器设置",
 };
-const subtitles = {
-  library: "每一个世界，都有自己的位置。",
-  accounts: "连接你的微软账户，准备下一段冒险。",
-  downloads: "下载进度、文件校验与修复，一目了然。",
-  settings: "让猫匣适应你的游玩方式。",
-};
+function selectInstance(id: string) {
+  selectedInstanceId.value = id;
+  try {
+    localStorage.setItem("nekocrate.selected-instance", id);
+  } catch {
+    /* Storage may be unavailable in a restricted webview. */
+  }
+}
+function lastPlayed(value: number | null) {
+  return value
+    ? new Date(value * 1000).toLocaleString("zh-CN", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      })
+    : "尚未启动";
+}
+async function copyInstance(instance: Instance) {
+  const result = await action<Instance>(
+    "复制实例",
+    "clone",
+    { id: instance.id },
+    true,
+  );
+  if (result) {
+    selectInstance(result.id);
+    modal.value = null;
+  }
+}
 const stamp = () => new Date().toLocaleTimeString("zh-CN", { hour12: false });
 async function rpc<T = unknown>(
   op: string,
@@ -249,27 +295,30 @@ async function chooseJava() {
   }
 }
 async function submit() {
-  let result: unknown;
+  let result: Instance | boolean | undefined;
   if (modal.value === "create")
-    result = await action("创建实例", "create", {
+    result = await action<Instance>("创建实例", "create", {
       name: form.name,
       version: form.version,
     });
   else if (modal.value === "import")
-    result = await action(
+    result = await action<Instance>(
       "迁移实例",
       "import",
       { source: form.source, name: form.name, version: form.version },
       true,
     );
   else if (modal.value === "edit" && editing.value)
-    result = await action("保存实例", "update", {
+    result = await action<boolean>("保存实例", "update", {
       id: editing.value.id,
       name: form.name,
       memory_mb: form.memory_mb,
       java_path: form.java_path || null,
     });
-  if (result !== undefined) modal.value = null;
+  if (result !== undefined) {
+    if (typeof result === "object") selectInstance(result.id);
+    modal.value = null;
+  }
 }
 async function install(i: Instance) {
   await action(
@@ -368,6 +417,12 @@ function onEvent(e: LauncherEvent) {
   if (e.kind === "game_started" || e.kind === "game_exit") void sync();
 }
 onMounted(async () => {
+  try {
+    selectedInstanceId.value =
+      localStorage.getItem("nekocrate.selected-instance") || "";
+  } catch {
+    /* Fall back to the first instance. */
+  }
   if (!desktop) return;
   try {
     unlisten = await listen<LauncherEvent>("launcher-event", (e) =>
@@ -388,314 +443,322 @@ onUnmounted(() => unlisten?.());
       <a
         class="brand"
         href="#"
-        @click.prevent="page = 'library'"
         aria-label="NekoCrate 主页"
-        ><span class="brand-mark"><Cat :size="25" :stroke-width="1.9" /></span
-        ><span>NekoCrate<small>LAUNCHER</small></span></a
+        @click.prevent="page = 'library'"
       >
-      <div class="sidebar-caption">你的冒险空间</div>
-      <nav>
+        <span class="brand-mark"><Cat :size="23" :stroke-width="1.8" /></span>
+        <span><strong>NekoCrate</strong><small>Launcher</small></span>
+      </a>
+      <button class="account-shortcut" @click="page = 'accounts'">
+        <span class="avatar"><UsersRound :size="20" /></span>
+        <span class="account-label"
+          ><strong>{{ selectedAccount?.username || "未登录" }}</strong
+          ><small>{{
+            selectedAccount ? "Microsoft 账户" : "添加微软账户"
+          }}</small></span
+        >
+        <ChevronRight :size="14" />
+      </button>
+      <nav aria-label="主导航">
         <button
           v-for="item in nav"
           :key="item.id"
           :class="['nav-item', { active: page === item.id }]"
+          :aria-current="page === item.id ? 'page' : undefined"
           @click="page = item.id"
         >
-          <component :is="item.icon" :size="19" /><span>{{ item.label }}</span
-          ><span v-if="item.id === 'library'" class="nav-count">{{
+          <component :is="item.icon" :size="18" /><span>{{ item.label }}</span>
+          <span v-if="item.id === 'library'" class="nav-count">{{
             snapshot.database.instances.length
-          }}</span
-          ><span v-if="item.id === 'downloads' && busy" class="activity-dot" />
+          }}</span>
+          <span
+            v-if="item.id === 'downloads' && current"
+            class="activity-dot"
+          />
         </button>
       </nav>
-      <div class="sidebar-note">
-        <span class="note-icon"><Sparkles :size="17" /></span
-        ><strong>小小猫匣，无限世界</strong>
-        <p>版本、存档和设置独立保存，<br />放心开始新的冒险。</p>
-      </div>
       <div class="sidebar-bottom">
-        <button class="account-shortcut" @click="page = 'accounts'">
-          <span class="avatar"><Cat :size="20" /></span
-          ><span
-            ><strong>{{ selectedAccount?.username || "尚未登录" }}</strong
-            ><small>{{
-              selectedAccount ? "Microsoft 账户" : "连接你的游戏账户"
-            }}</small></span
-          ><ChevronRight :size="16" />
+        <button
+          class="nav-item"
+          :class="{ active: showLogs }"
+          @click="showLogs = !showLogs"
+        >
+          <Terminal :size="18" /><span>运行日志</span>
+        </button>
+        <button class="nav-item" @click="openFolder()">
+          <FolderOpen :size="18" /><span>数据目录</span>
         </button>
         <div class="build-label">
-          <span class="tiny-dot" /> 开发预览版 <span>0.1.0</span>
+          <span>NekoCrate</span><span>0.1.0 · 开发版</span>
         </div>
       </div>
     </aside>
+
     <div class="workspace">
       <header class="topbar">
-        <div class="breadcrumb">
-          工作空间 <ChevronRight :size="13" /><strong>{{
-            titles[page]
-          }}</strong>
-        </div>
-        <div class="topbar-right">
-          <span class="branch-badge">neko_dev</span
-          ><button
-            class="icon-button"
-            :class="{ selected: showLogs }"
-            title="查看运行日志"
-            aria-label="查看运行日志"
-            @click="showLogs = !showLogs"
-          >
-            <Terminal :size="18" />
-          </button>
-        </div>
-      </header>
-      <main>
-        <div v-if="!desktop" class="preview-note">
-          <CircleAlert :size="17" /> 浏览器界面预览 ·
-          运行桌面版后可使用真实安装、账户和启动功能。
-        </div>
-        <div class="page-heading">
-          <div>
-            <p class="eyebrow">
-              {{ nav.find((n) => n.id === page)?.en.toUpperCase() }}
-            </p>
-            <h1>{{ titles[page] }}</h1>
-            <p class="subtitle">{{ subtitles[page] }}</p>
-          </div>
-          <div v-if="page === 'library'" class="heading-actions">
+        <h1>{{ titles[page] }}</h1>
+        <div class="toolbar-actions">
+          <template v-if="page === 'library'">
             <button
               class="button secondary"
               :disabled="busy"
               @click="newInstance(true)"
             >
-              <Download :size="16" />迁移导入</button
-            ><button
+              <Download :size="15" />导入
+            </button>
+            <button
               class="button primary"
               :disabled="busy"
               @click="newInstance()"
             >
-              <Plus :size="17" />新建实例
+              <Plus :size="16" />新建实例
             </button>
-          </div>
-        </div>
-        <div v-if="error" class="error-banner" role="alert">
-          <CircleAlert :size="19" />
-          <div>
-            <strong>这一步没有完成</strong>
-            <p>{{ error }}</p>
-          </div>
+          </template>
           <button
-            class="icon-button"
-            aria-label="关闭错误提示"
-            @click="error = ''"
+            v-else-if="page === 'accounts'"
+            class="button primary"
+            :disabled="busy"
+            @click="login"
           >
-            <X :size="16" />
+            <Plus :size="16" />添加账户
+          </button>
+          <button
+            v-else-if="page === 'downloads'"
+            class="button secondary"
+            :disabled="busy"
+            @click="loadVersions"
+          >
+            <RefreshCw :size="15" />同步版本目录
+          </button>
+          <button
+            v-else
+            class="button primary"
+            :disabled="busy"
+            @click="saveSettings"
+          >
+            <Check :size="16" />保存设置
           </button>
         </div>
+      </header>
+
+      <div v-if="!desktop" class="preview-note">
+        <CircleAlert :size="15" />浏览器预览；安装和启动请使用桌面版。
+      </div>
+      <div v-if="error && !modal" class="error-banner" role="alert">
+        <CircleAlert :size="17" />
+        <p>{{ error }}</p>
+        <button
+          class="icon-button"
+          aria-label="关闭错误提示"
+          @click="error = ''"
+        >
+          <X :size="16" />
+        </button>
+      </div>
+
+      <main :class="['page-content', { 'library-page': page === 'library' }]">
         <template v-if="page === 'library'">
-          <section class="hero">
-            <div class="hero-content">
-              <span class="hero-tag"><span /> YOUR NEXT ADVENTURE</span>
-              <h2>把下一段冒险，<br />装进猫匣。</h2>
-              <p>
-                一个实例，一个独立的世界。<br />从喜欢的 Minecraft 版本开始。
-              </p>
+          <section class="instance-list" aria-label="游戏实例列表">
+            <div class="list-toolbar">
+              <label class="search"
+                ><Search :size="16" /><input
+                  v-model="filter"
+                  placeholder="搜索实例"
+                  aria-label="搜索实例"
+              /></label>
+            </div>
+            <div class="list-heading">
+              <span>已添加的实例</span><span>{{ instances.length }}</span>
+            </div>
+            <div class="instance-items">
               <button
-                class="text-button"
-                :disabled="busy"
-                @click="newInstance()"
+                v-for="i in instances"
+                :key="i.id"
+                :class="[
+                  'instance-item',
+                  { selected: selectedInstance?.id === i.id },
+                ]"
+                :aria-pressed="selectedInstance?.id === i.id"
+                @click="selectInstance(i.id)"
               >
-                创建你的世界 <ArrowUpRight :size="18" />
+                <span class="instance-icon"
+                  ><Box :size="23" :stroke-width="1.5"
+                /></span>
+                <span class="instance-label"
+                  ><strong>{{ i.name }}</strong
+                  ><small
+                    >{{ i.version }}<span class="dot-separator">·</span
+                    >{{
+                      snapshot.running.includes(i.id)
+                        ? "运行中"
+                        : i.installed
+                          ? "已安装"
+                          : "待安装"
+                    }}</small
+                  ></span
+                >
+                <span
+                  v-if="snapshot.running.includes(i.id)"
+                  class="running-indicator"
+                /><Check
+                  v-else-if="selectedInstance?.id === i.id"
+                  class="selection-check"
+                  :size="16"
+                />
+              </button>
+              <div v-if="!instances.length" class="list-empty">
+                <Box :size="24" />
+                <p>{{ filter ? "未找到匹配实例" : "暂无实例" }}</p>
+                <button v-if="filter" class="text-button" @click="filter = ''">
+                  清除搜索
+                </button>
+              </div>
+            </div>
+            <button class="list-add" :disabled="busy" @click="newInstance()">
+              <Plus :size="16" />添加游戏版本
+            </button>
+          </section>
+
+          <section
+            v-if="selectedInstance"
+            class="instance-detail"
+            aria-label="当前实例"
+          >
+            <div class="detail-heading">
+              <span class="detail-icon"
+                ><Box :size="30" :stroke-width="1.5"
+              /></span>
+              <div class="grow">
+                <h2>{{ selectedInstance.name }}</h2>
+                <p>
+                  Minecraft {{ selectedInstance.version
+                  }}<span class="dot-separator">·</span>Java Edition
+                </p>
+              </div>
+              <span
+                :class="[
+                  'status-tag',
+                  {
+                    ready: selectedInstance.installed,
+                    running: selectedRunning,
+                  },
+                ]"
+                ><span />{{
+                  selectedRunning
+                    ? "运行中"
+                    : selectedInstance.installed
+                      ? "已安装"
+                      : "待安装"
+                }}</span
+              >
+            </div>
+            <div class="detail-toolbar">
+              <button
+                class="button secondary"
+                :disabled="busy || selectedRunning"
+                @click="edit(selectedInstance)"
+              >
+                <SlidersHorizontal :size="15" />实例设置
+              </button>
+              <button
+                class="button subtle"
+                @click="openFolder(selectedInstance.id)"
+              >
+                <FolderOpen :size="15" />游戏目录
+              </button>
+              <button
+                class="button subtle"
+                :disabled="busy || selectedRunning"
+                @click="copyInstance(selectedInstance)"
+              >
+                <Copy :size="15" />复制
+              </button>
+              <button
+                class="button subtle"
+                :disabled="busy || selectedRunning"
+                @click="install(selectedInstance)"
+              >
+                <RefreshCw :size="15" />修复
               </button>
             </div>
-            <div class="voxel-scene" aria-hidden="true">
-              <div class="sun" />
-              <div class="cloud cloud-one" />
-              <div class="cloud cloud-two" />
-              <div class="hill hill-back" />
-              <div class="hill hill-front" />
-              <div class="voxel-island">
-                <div class="grass-top" />
-                <div class="dirt-front" />
-                <div class="dirt-side" />
-                <div class="tree trunk-one"><i /><b /></div>
-                <div class="tree trunk-two"><i /><b /></div>
-                <div class="pixel-cat">
-                  <i class="ear left" /><i class="ear right" /><i
-                    class="eye left"
-                  /><i class="eye right" /><i class="tail" />
+            <section class="config-section">
+              <h3>运行配置</h3>
+              <dl class="config-list">
+                <div>
+                  <dt><Layers :size="17" />游戏版本</dt>
+                  <dd>
+                    {{ selectedInstance.version }}
+                    <span class="inline-label">原版</span>
+                  </dd>
                 </div>
-                <span class="flower flower-one" /><span
-                  class="flower flower-two"
-                />
-              </div>
-              <div class="floating-block" />
-            </div>
-          </section>
-          <div class="stats-row">
-            <div>
-              <span class="stat-icon"><Boxes :size="20" /></span
-              ><strong>{{ snapshot.database.instances.length }}</strong
-              ><span>游戏实例</span>
-            </div>
-            <div>
-              <span class="stat-icon"><CheckCircle2 :size="20" /></span
-              ><strong>{{ readyCount }}</strong
-              ><span>准备就绪</span>
-            </div>
-            <div>
-              <span class="stat-icon"><ShieldCheck :size="20" /></span
-              ><span><b>独立保存</b><small>存档与配置互不干扰</small></span>
-            </div>
-          </div>
-          <div class="section-heading">
-            <h3>
-              全部实例 <span>{{ snapshot.database.instances.length }}</span>
-            </h3>
-            <label class="search"
-              ><Search :size="16" /><input
-                v-model="filter"
-                placeholder="搜索名称或版本"
-                aria-label="搜索实例"
-            /></label>
-          </div>
-          <div v-if="!instances.length" class="empty-library">
-            <span class="empty-icon"
-              ><Box :size="32" :stroke-width="1.3"
-            /></span>
-            <h3>{{ filter ? "没有匹配的实例" : "你的猫匣，等一个新世界" }}</h3>
-            <p>
-              {{
-                filter
-                  ? "换个名称或版本号试试。"
-                  : "新建一个实例，或者把已有的游戏目录搬进来。"
-              }}
-            </p>
-            <button
-              v-if="!filter"
-              class="button secondary"
-              :disabled="busy"
-              @click="newInstance()"
-            >
-              <Plus :size="16" />创建第一个实例
-            </button>
-          </div>
-          <div v-else class="instance-grid">
-            <article
-              v-for="(i, index) in instances"
-              :key="i.id"
-              class="instance-card"
-            >
-              <div :class="['instance-art', `art-${index % 3}`]">
-                <span class="version-tag">JAVA EDITION</span>
-                <div class="mini-cubes"><i /><i /><i /></div>
-                <span
-                  :class="[
-                    'status-tag',
-                    {
-                      ready: i.installed,
-                      running: snapshot.running.includes(i.id),
-                    },
-                  ]"
-                  ><span />{{
-                    snapshot.running.includes(i.id)
-                      ? "运行中"
-                      : i.installed
-                        ? "准备就绪"
-                        : "待安装"
-                  }}</span
+                <div>
+                  <dt><MemoryStick :size="17" />最大内存</dt>
+                  <dd>
+                    {{ (selectedInstance.memory_mb / 1024).toFixed(1) }} GiB
+                    <small>{{ selectedInstance.memory_mb }} MiB</small>
+                  </dd>
+                </div>
+                <div>
+                  <dt><Cpu :size="17" />Java</dt>
+                  <dd
+                    :title="selectedInstance.java_path || ''"
+                    class="path-value"
+                  >
+                    {{ selectedInstance.java_path || "自动匹配" }}
+                  </dd>
+                </div>
+                <div>
+                  <dt><ShieldCheck :size="17" />版本隔离</dt>
+                  <dd>独立目录</dd>
+                </div>
+                <div>
+                  <dt><Clock3 :size="17" />上次启动</dt>
+                  <dd>{{ lastPlayed(selectedInstance.last_played) }}</dd>
+                </div>
+              </dl>
+            </section>
+            <section class="directory-section">
+              <h3>游戏目录</h3>
+              <div class="directory-path">
+                <code>{{ selectedDirectory }}</code
+                ><button
+                  class="icon-button"
+                  aria-label="复制游戏目录路径"
+                  title="复制路径"
+                  @click="copy(selectedDirectory)"
                 >
+                  <Copy :size="15" />
+                </button>
               </div>
-              <div class="instance-body">
-                <div class="instance-title">
-                  <h3>{{ i.name }}</h3>
-                  <button
-                    class="icon-button"
-                    :disabled="busy || snapshot.running.includes(i.id)"
-                    :aria-label="`设置 ${i.name}`"
-                    @click="edit(i)"
-                  >
-                    <SlidersHorizontal :size="16" />
-                  </button>
-                </div>
-                <p class="instance-meta">
-                  Minecraft {{ i.version }} <span>·</span>
-                  {{ (i.memory_mb / 1024).toFixed(1) }} GiB
-                </p>
-                <div class="instance-actions">
-                  <button
-                    v-if="snapshot.running.includes(i.id)"
-                    class="button stop"
-                    @click="action('停止游戏', 'stop', { id: i.id })"
-                  >
-                    <Square :size="14" />停止游戏</button
-                  ><button
-                    v-else-if="i.installed"
-                    class="button play"
-                    :disabled="busy"
-                    @click="launch(i)"
-                  >
-                    <Play :size="15" fill="currentColor" />开始游戏</button
-                  ><button
-                    v-else
-                    class="button play"
-                    :disabled="busy"
-                    @click="install(i)"
-                  >
-                    <Download :size="16" />安装游戏</button
-                  ><button
-                    class="icon-button"
-                    title="打开游戏目录"
-                    aria-label="打开游戏目录"
-                    @click="openFolder(i.id)"
-                  >
-                    <FolderOpen :size="18" />
-                  </button>
-                </div>
-              </div>
-            </article>
-          </div>
-        </template>
-        <template v-if="page === 'accounts'">
-          <div class="panel account-intro">
-            <span class="large-icon"><ShieldCheck :size="32" /></span>
-            <div>
-              <h3>用微软账户开启游戏</h3>
-              <p>
-                在微软官方页面授权，猫匣不会收集你的密码。<br />刷新凭据保存在系统钥匙串，启动前自动检查游戏权益。
-              </p>
-            </div>
-            <button class="button primary" :disabled="busy" @click="login">
-              <Plus :size="16" />添加账户
-            </button>
-          </div>
-          <div v-if="challenge" class="panel login-panel">
-            <span class="eyebrow">MICROSOFT SIGN IN</span>
-            <h3>在浏览器中完成授权</h3>
-            <p>
-              打开微软登录页面，输入下方验证码。有效期约
-              {{ Math.ceil(challenge.expires_in / 60) }} 分钟。
-            </p>
-            <button class="device-code" @click="copy(challenge.user_code)">
-              {{ challenge.user_code }}<Copy :size="20" />
-            </button>
+            </section>
+          </section>
+          <section v-else class="empty-detail">
+            <Box :size="36" :stroke-width="1.3" />
+            <h2>暂无游戏实例</h2>
+            <p>新建实例，或导入已有的 Minecraft 游戏目录。</p>
             <div class="inline-actions">
               <button
                 class="button primary"
-                @click="openLink(challenge.verification_uri)"
+                :disabled="busy"
+                @click="newInstance()"
               >
-                打开微软登录页 <ExternalLink :size="16" /></button
-              ><button class="button secondary" @click="cancel">
-                取消登录
+                <Plus :size="16" />新建实例</button
+              ><button
+                class="button secondary"
+                :disabled="busy"
+                @click="newInstance(true)"
+              >
+                <Download :size="16" />导入实例
               </button>
             </div>
-            <p class="waiting">
-              <LoaderCircle :size="15" class="spin" />等待你完成授权…
-            </p>
-          </div>
+          </section>
+        </template>
+
+        <div v-if="page === 'accounts'" class="page-inner">
           <div class="section-heading">
-            <h3>
-              已连接账户 <span>{{ snapshot.database.accounts.length }}</span>
-            </h3>
+            <h2>
+              微软账户 <span>{{ snapshot.database.accounts.length }}</span>
+            </h2>
             <button
               v-if="selectedAccount"
               class="button secondary"
@@ -705,30 +768,62 @@ onUnmounted(() => unlisten?.());
               <RefreshCw :size="15" />刷新权益
             </button>
           </div>
+          <div v-if="challenge" class="panel login-panel">
+            <h3>完成微软授权</h3>
+            <p>
+              在微软页面输入验证码，有效期约
+              {{ Math.ceil(challenge.expires_in / 60) }} 分钟。
+            </p>
+            <button
+              class="device-code"
+              title="复制验证码"
+              @click="copy(challenge.user_code)"
+            >
+              {{ challenge.user_code }}<Copy :size="19" />
+            </button>
+            <div class="inline-actions">
+              <button
+                class="button primary"
+                @click="openLink(challenge.verification_uri)"
+              >
+                打开登录页 <ExternalLink :size="15" /></button
+              ><button class="button secondary" @click="cancel">
+                取消登录
+              </button>
+            </div>
+            <p class="waiting">
+              <LoaderCircle :size="14" class="spin" />等待授权…
+            </p>
+          </div>
           <div
             v-if="!snapshot.database.accounts.length && !challenge"
-            class="empty-library"
+            class="empty-state"
           >
-            <UsersRound :size="32" />
-            <h3>还没有游戏账户</h3>
-            <p>你可以先创建和安装实例，登录后开始游戏。</p>
+            <UsersRound :size="30" :stroke-width="1.5" />
+            <h3>尚未添加账户</h3>
+            <p>登录拥有 Minecraft Java 版的微软账户后即可启动游戏。</p>
+            <button class="button primary" :disabled="busy" @click="login">
+              <Plus :size="16" />添加账户
+            </button>
           </div>
           <div
             v-for="account in snapshot.database.accounts"
             :key="account.id"
             class="panel account-row"
           >
-            <span class="avatar large"><Cat :size="26" /></span>
+            <span class="avatar"><UsersRound :size="22" /></span>
             <div class="grow">
               <h3>
                 {{ account.username }}
                 <span
                   v-if="account.id === snapshot.database.selected_account"
                   class="pill"
-                  >当前账户</span
+                  >当前</span
                 >
               </h3>
-              <p>Microsoft <span>·</span> Java 版权益已验证</p>
+              <p>
+                Microsoft<span class="dot-separator">·</span>Java 版权益已验证
+              </p>
               <small class="mono">{{ account.id }}</small>
             </div>
             <button
@@ -737,68 +832,62 @@ onUnmounted(() => unlisten?.());
               :disabled="busy"
               @click="action('切换账户', 'select_account', { id: account.id })"
             >
-              使用此账户</button
+              切换</button
             ><button
               class="icon-button danger"
               :disabled="busy"
-              aria-label="移除账户"
+              :aria-label="`移除账户 ${account.username}`"
               @click="action('移除账户', 'remove_account', { id: account.id })"
             >
-              <Trash2 :size="18" />
+              <Trash2 :size="17" />
             </button>
           </div>
-        </template>
-        <template v-if="page === 'downloads'">
-          <div class="panel download-intro">
-            <CloudDownload :size="36" />
-            <div>
-              <h3>下载有校验，重试有缓存</h3>
-              <p>校验通过的文件会被复用。中断后再次安装，将跳过完整文件。</p>
-            </div>
-            <button
-              class="button secondary"
-              :disabled="busy"
-              @click="loadVersions"
-            >
-              <RefreshCw :size="16" />同步版本目录
-            </button>
-          </div>
+          <p class="section-note">
+            <ShieldCheck
+              :size="15"
+            />授权在微软官网完成，刷新凭据保存在系统钥匙串。
+          </p>
+        </div>
+
+        <div v-if="page === 'downloads'" class="page-inner">
           <div class="section-heading">
-            <h3>
+            <h2>
               本次会话任务 <span>{{ tasks.length }}</span>
-            </h3>
-            <span class="muted"
-              >{{
-                settings.download_source === "official"
-                  ? "官方源"
-                  : settings.download_source === "auto"
-                    ? "官方优先 · 自动回退"
-                    : "BMCLAPI 优先"
-              }}
-              · {{ settings.concurrency }} 并发</span
-            >
+            </h2>
+            <button class="text-button" @click="page = 'settings'">
+              {{ downloadSource }} ·
+              {{ snapshot.database.settings.concurrency }} 并发
+              <ChevronRight :size="14" />
+            </button>
           </div>
-          <div v-if="!tasks.length" class="empty-library">
-            <CheckCircle2 :size="32" />
-            <h3>没有等待中的下载</h3>
-            <p>在「我的猫匣」中安装游戏，或者选择下方实例进行修复。</p>
+          <div v-if="!tasks.length" class="empty-state compact">
+            <ArrowDownToLine :size="27" :stroke-width="1.5" />
+            <h3>暂无下载任务</h3>
           </div>
           <div v-for="task in tasks" :key="task.id" class="panel task-row">
             <span :class="['task-icon', task.status]"
               ><LoaderCircle
                 v-if="task.status === 'running'"
                 class="spin"
-                :size="20" /><Check
+                :size="19" /><Check
                 v-else-if="task.status === 'done'"
-                :size="20" /><CircleAlert v-else :size="20"
+                :size="19" /><CircleAlert v-else :size="19"
             /></span>
             <div class="grow">
               <div class="task-title">
                 <strong>{{ task.title }}</strong
-                ><span>{{ task.started }}</span>
+                ><time>{{ task.started }}</time>
               </div>
               <p>{{ task.message }}</p>
-              <div v-if="task.status === 'running'" class="progress-track">
+              <div
+                v-if="task.status === 'running'"
+                class="progress-track"
+                role="progressbar"
+                :aria-valuenow="task.progress"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                :aria-label="task.title"
+              >
                 <i :style="{ width: `${task.progress}%` }" />
               </div>
             </div>
@@ -819,19 +908,19 @@ onUnmounted(() => unlisten?.());
           </div>
           <div
             v-if="snapshot.database.instances.length"
-            class="section-heading"
+            class="section-heading spaced"
           >
-            <h3>实例文件修复</h3>
+            <h2>文件校验与修复</h2>
           </div>
           <div
             v-for="i in snapshot.database.instances"
             :key="i.id"
             class="panel repair-row"
           >
-            <Box :size="22" />
+            <span class="instance-icon small"><Box :size="20" /></span>
             <div class="grow">
               <strong>{{ i.name }}</strong>
-              <p>{{ i.version }} · 检查并补齐资源、依赖、原生库和 Java</p>
+              <p>Minecraft {{ i.version }}</p>
             </div>
             <button
               class="button secondary"
@@ -841,23 +930,18 @@ onUnmounted(() => unlisten?.());
               <RefreshCw :size="15" />校验与修复
             </button>
           </div>
-        </template>
-        <template v-if="page === 'settings'">
-          <section class="panel settings-panel">
-            <div class="panel-title">
-              <UsersRound :size="20" />
-              <div>
-                <h3>微软应用配置</h3>
-                <p>使用你注册的公共客户端应用，通过设备验证码登录。</p>
-              </div>
-            </div>
+        </div>
+
+        <div v-if="page === 'settings'" class="page-inner settings-page">
+          <section class="settings-section">
+            <h2><UsersRound :size="18" />微软登录</h2>
             <label class="field"
               >Microsoft Client ID<input
                 v-model="settings.microsoft_client_id"
                 placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
                 spellcheck="false"
               /><small
-                >原型不内置其他启动器的应用标识，无需填写 Client Secret。</small
+                >填写公共客户端应用 ID，无需 Client Secret。</small
               ></label
             ><button
               class="text-button"
@@ -867,32 +951,26 @@ onUnmounted(() => unlisten?.());
                 )
               "
             >
-              查看微软设备授权说明 <ArrowUpRight :size="15" />
+              应用配置说明 <ExternalLink :size="14" />
             </button>
           </section>
-          <section class="panel settings-panel">
-            <div class="panel-title">
-              <CloudDownload :size="20" />
-              <div>
-                <h3>下载与网络</h3>
-                <p>切换来源不会关闭文件完整性校验。</p>
-              </div>
-            </div>
+          <section class="settings-section">
+            <h2><Download :size="18" />下载</h2>
             <div class="field-grid">
-              <label class="field"
+              <label class="field wide"
                 >下载来源<select v-model="settings.download_source">
                   <option value="official">Minecraft 官方</option>
                   <option value="auto">官方优先，失败回退 BMCLAPI</option>
                   <option value="bmclapi">BMCLAPI 优先，失败回退官方</option>
                 </select></label
               ><label class="field"
-                >并发下载数<input
+                >并发数<input
                   v-model.number="settings.concurrency"
                   type="number"
                   min="1"
                   max="32" /></label
               ><label class="field"
-                >每个来源重试次数<input
+                >重试次数<input
                   v-model.number="settings.retries"
                   type="number"
                   min="0"
@@ -900,23 +978,15 @@ onUnmounted(() => unlisten?.());
               /></label>
             </div>
             <p class="field-help">
-              镜像仅用于游戏文件与元数据；账户授权始终连接微软官方服务。
+              镜像用于游戏文件，账户授权始终连接微软官方服务。
             </p>
           </section>
-          <section class="panel settings-panel">
-            <div class="panel-title">
-              <Layers :size="20" />
-              <div>
-                <h3>Java 运行环境</h3>
-                <p>根据官方版本要求匹配 Java，也可在每个实例中指定路径。</p>
-              </div>
-            </div>
+          <section class="settings-section">
+            <h2><Cpu :size="18" />Java</h2>
             <label class="toggle-row"
               ><span
                 ><strong>自动安装缺少的 Java</strong
-                ><small
-                  >通过 Eclipse Adoptium 获取，下载后验证 SHA-256。</small
-                ></span
+                ><small>通过 Eclipse Adoptium 下载并校验。</small></span
               ><input
                 v-model="settings.auto_java"
                 type="checkbox"
@@ -933,61 +1003,29 @@ onUnmounted(() => unlisten?.());
               ><code>{{ java.path }}</code>
             </div>
           </section>
-          <section class="panel settings-panel">
-            <div class="panel-title">
-              <HardDrive :size="20" />
-              <div>
-                <h3>数据目录</h3>
-                <p>共享资源集中缓存，每个实例使用独立游戏目录。</p>
-              </div>
+          <section class="settings-section">
+            <h2><HardDrive :size="18" />存储</h2>
+            <div class="directory-path">
+              <code>{{ snapshot.root || "使用系统应用数据目录" }}</code
+              ><button
+                class="icon-button"
+                aria-label="打开数据目录"
+                @click="openFolder()"
+              >
+                <FolderOpen :size="17" />
+              </button>
             </div>
-            <code class="data-path">{{
-              snapshot.root || "桌面版将自动选择系统应用数据目录"
-            }}</code
-            ><button class="text-button" @click="openFolder()">
-              打开数据目录 <ArrowUpRight :size="15" />
-            </button>
           </section>
-          <div class="settings-footer">
-            <span class="muted">设置保存在本机。</span
-            ><button
-              class="button primary"
-              :disabled="busy"
-              @click="saveSettings"
-            >
-              <Check :size="17" />保存设置
-            </button>
-          </div>
-        </template>
-        <footer class="page-footer">
-          <span>NekoCrate · 为你的每个世界留一个位置</span
-          ><span>Java Edition · Prototype</span>
-        </footer>
-      </main>
-      <div v-if="current" class="task-dock">
-        <LoaderCircle class="spin" :size="19" />
-        <div>
-          <strong>{{ current.title }}</strong
-          ><span>{{ current.message }}</span>
         </div>
-        <span>{{ current.progress }}%</span
-        ><button
-          v-if="current.cancellable"
-          class="icon-button"
-          title="取消任务"
-          aria-label="取消任务"
-          @click="cancel"
-        >
-          <X :size="17" /></button
-        ><i :style="{ width: `${current.progress}%` }" />
-      </div>
-      <section v-if="showLogs" class="log-panel">
+      </main>
+
+      <section v-if="showLogs" class="log-panel" aria-label="运行日志">
         <header>
           <span
-            ><Terminal :size="16" />运行日志
-            <small>最近 {{ logs.length }} 条</small></span
+            ><Terminal :size="15" />运行日志
+            <small>{{ logs.length }} 条</small></span
           >
-          <div>
+          <div class="inline-actions">
             <button
               class="icon-button"
               aria-label="复制日志"
@@ -1007,14 +1045,12 @@ onUnmounted(() => unlisten?.());
               aria-label="关闭日志"
               @click="showLogs = false"
             >
-              <X :size="16" />
+              <X :size="17" />
             </button>
           </div>
         </header>
         <div class="log-content">
-          <p v-if="!logs.length" class="muted">
-            启动游戏或执行任务后，日志会显示在这里。
-          </p>
+          <p v-if="!logs.length" class="muted">暂无运行日志。</p>
           <p
             v-for="(line, index) in logs"
             :key="index"
@@ -1025,7 +1061,90 @@ onUnmounted(() => unlisten?.());
           </p>
         </div>
       </section>
+
+      <div v-if="current" class="task-dock" role="status">
+        <LoaderCircle class="spin" :size="17" />
+        <div class="grow">
+          <strong>{{ current.title }}</strong
+          ><span>{{ current.message }}</span>
+        </div>
+        <span class="task-percent">{{ current.progress }}%</span
+        ><button
+          v-if="current.cancellable"
+          class="icon-button"
+          aria-label="取消任务"
+          @click="cancel"
+        >
+          <X :size="17" /></button
+        ><i :style="{ width: `${current.progress}%` }" />
+      </div>
+      <footer class="launchbar">
+        <div class="launch-selection">
+          <label for="launch-instance">当前实例</label>
+          <div class="select-wrapper">
+            <select
+              id="launch-instance"
+              :value="selectedInstance?.id || ''"
+              :disabled="!snapshot.database.instances.length"
+              @change="
+                selectInstance(($event.target as HTMLSelectElement).value)
+              "
+            >
+              <option v-if="!snapshot.database.instances.length" value="">
+                未选择实例
+              </option>
+              <option
+                v-for="i in snapshot.database.instances"
+                :key="i.id"
+                :value="i.id"
+              >
+                {{ i.name }} · {{ i.version }}
+              </option></select
+            ><ChevronDown :size="14" />
+          </div>
+        </div>
+        <div class="launch-account">
+          <span>启动账户</span
+          ><button @click="page = 'accounts'">
+            {{ selectedAccount?.username || "未登录"
+            }}<ChevronRight :size="13" />
+          </button>
+        </div>
+        <button
+          v-if="selectedRunning && selectedInstance"
+          class="launch-button stop"
+          :disabled="busy"
+          @click="action('停止游戏', 'stop', { id: selectedInstance.id })"
+        >
+          <Square :size="17" />停止游戏
+        </button>
+        <button
+          v-else-if="selectedInstance?.installed"
+          class="launch-button"
+          :disabled="busy"
+          @click="launch(selectedInstance)"
+        >
+          <Play :size="19" fill="currentColor" /><span>启动游戏</span>
+        </button>
+        <button
+          v-else-if="selectedInstance"
+          class="launch-button"
+          :disabled="busy"
+          @click="install(selectedInstance)"
+        >
+          <Download :size="19" />安装游戏
+        </button>
+        <button
+          v-else
+          class="launch-button"
+          :disabled="busy"
+          @click="newInstance()"
+        >
+          <Plus :size="19" />新建实例
+        </button>
+      </footer>
     </div>
+
     <Transition name="toast"
       ><div v-if="notice" class="toast" role="status">
         <CheckCircle2 :size="17" />{{ notice }}
@@ -1035,6 +1154,7 @@ onUnmounted(() => unlisten?.());
       v-if="modal"
       class="modal-overlay"
       @click.self="!busy && (modal = null)"
+      @keydown.esc="!busy && (modal = null)"
     >
       <section
         class="modal"
@@ -1044,15 +1164,25 @@ onUnmounted(() => unlisten?.());
           modal === 'create'
             ? '新建实例'
             : modal === 'import'
-              ? '迁移导入'
+              ? '导入实例'
               : modal === 'edit'
                 ? '实例设置'
                 : '移除实例'
         "
       >
         <div class="modal-header">
-          <span class="modal-icon"><Box :size="23" /></span
-          ><button
+          <h2>
+            {{
+              modal === "create"
+                ? "新建实例"
+                : modal === "import"
+                  ? "导入实例"
+                  : modal === "edit"
+                    ? "实例设置"
+                    : "移除实例"
+            }}
+          </h2>
+          <button
             class="icon-button"
             :disabled="busy"
             aria-label="关闭对话框"
@@ -1062,18 +1192,16 @@ onUnmounted(() => unlisten?.());
           </button>
         </div>
         <div v-if="error" class="error-banner" role="alert">
-          <CircleAlert :size="18" />
+          <CircleAlert :size="17" />
           <p>{{ error }}</p>
         </div>
         <template v-if="modal === 'delete'"
-          ><h2>把这个实例移出猫匣？</h2>
-          <p class="subtitle">
-            {{ editing?.name }} 将移入数据目录的 trash
-            文件夹，游戏文件不会被永久删除。
+          ><p class="delete-message">
+            「{{ editing?.name }}」将移至回收目录，游戏文件会保留。
           </p>
           <div class="modal-actions">
             <button class="button secondary" @click="modal = 'edit'">
-              返回</button
+              取消</button
             ><button
               class="button destructive"
               :disabled="busy"
@@ -1085,120 +1213,104 @@ onUnmounted(() => unlisten?.());
                 )
               "
             >
-              移入回收目录
+              移除实例
             </button>
           </div></template
         >
         <form v-else @submit.prevent="submit">
-          <h2>
-            {{
-              modal === "create"
-                ? "装进一个新世界"
-                : modal === "import"
-                  ? "把熟悉的世界搬进来"
-                  : "让这个世界更合心意"
-            }}
-          </h2>
-          <p class="subtitle">
-            {{
-              modal === "edit"
-                ? "只影响当前实例的设置。"
-                : modal === "import"
-                  ? "复制已有游戏目录，保留来源文件。"
-                  : "为不同版本、存档和配置创建独立空间。"
-            }}
-          </p>
-          <label class="field"
-            >实例名称<input
-              v-model="form.name"
-              placeholder="例如：我的生存世界"
-              required
-              maxlength="80"
-              autofocus /></label
-          ><label class="field"
-            >Minecraft 版本<input
-              v-model="form.version"
-              list="versions"
-              :readonly="modal === 'edit'"
-              placeholder="例如：1.21.1"
-              required
-            /><datalist id="versions">
-              <option
-                v-for="version in manifest?.versions"
-                :key="version.id"
-                :value="version.id"
-              >
-                {{ version.type }}
-              </option></datalist
-            ><small v-if="modal !== 'edit'"
-              >官方 Java 版 1.13+；Apple Silicon 使用
-              1.19+。可在下载页同步完整版本目录。</small
-            ></label
-          ><label v-if="modal === 'import'" class="field"
-            >来源游戏目录
-            <div class="input-action">
-              <input
-                v-model="form.source"
+          <div class="modal-fields">
+            <label class="field"
+              >实例名称<input
+                v-model="form.name"
+                placeholder="例如：生存 1.21.1"
                 required
-                placeholder="选择 .minecraft 或实例游戏目录"
-              /><button
-                type="button"
-                class="button secondary"
-                @click="chooseDirectory"
-              >
-                <FolderOpen :size="17" />浏览
-              </button>
-            </div>
-            <small
-              >迁移存档、资源和配置，不导入其他启动器的账户凭据。原型启动官方原版，不加载迁入的模组。</small
-            ></label
-          ><template v-if="modal === 'edit'"
+                maxlength="80"
+                autofocus /></label
             ><label class="field"
-              >最大内存 <strong>{{ form.memory_mb }} MiB</strong
-              ><input
-                v-model.number="form.memory_mb"
-                type="range"
-                min="512"
-                max="16384"
-                step="256" /></label
-            ><label class="field"
-              >Java 可执行文件
+              >Minecraft 版本<input
+                v-model="form.version"
+                list="versions"
+                :readonly="modal === 'edit'"
+                placeholder="1.21.1"
+                required
+              /><datalist id="versions">
+                <option
+                  v-for="version in manifest?.versions"
+                  :key="version.id"
+                  :value="version.id"
+                >
+                  {{ version.type }}
+                </option></datalist
+              ><small v-if="modal !== 'edit'"
+                >支持原版 Java 1.13+，Apple Silicon 使用 1.19+。</small
+              ></label
+            >
+            <label v-if="modal === 'import'" class="field"
+              >来源目录
               <div class="input-action">
                 <input
-                  v-model="form.java_path"
-                  placeholder="留空自动匹配"
+                  v-model="form.source"
+                  required
+                  placeholder=".minecraft 或实例游戏目录"
                 /><button
                   type="button"
                   class="button secondary"
-                  @click="chooseJava"
+                  @click="chooseDirectory"
                 >
-                  浏览
+                  <FolderOpen :size="16" />浏览
                 </button>
-              </div></label
+              </div>
+              <small
+                >复制存档与配置，保留源文件；不导入账户凭据。原型不加载模组。</small
+              ></label
             >
-            <div class="edit-tools">
-              <button
-                type="button"
-                class="button secondary"
-                :disabled="busy"
-                @click="
-                  action('复制实例', 'clone', { id: editing?.id }, true).then(
-                    (result) => {
-                      if (result) modal = null;
-                    },
-                  )
-                "
+            <template v-if="modal === 'edit'"
+              ><label class="field"
+                >最大内存
+                <div class="memory-input">
+                  <input
+                    v-model.number="form.memory_mb"
+                    type="number"
+                    min="512"
+                    max="65536"
+                    step="256"
+                    required
+                  /><span>MiB</span>
+                </div></label
+              ><label class="field"
+                >Java 可执行文件
+                <div class="input-action">
+                  <input
+                    v-model="form.java_path"
+                    placeholder="留空自动匹配"
+                  /><button
+                    type="button"
+                    class="button secondary"
+                    @click="chooseJava"
+                  >
+                    浏览
+                  </button>
+                </div></label
               >
-                <Copy :size="15" />复制实例</button
-              ><button
-                type="button"
-                class="text-button danger"
-                @click="modal = 'delete'"
-              >
-                <Trash2 :size="15" />移除实例
-              </button>
-            </div></template
-          >
+              <div class="edit-tools">
+                <button
+                  type="button"
+                  class="button secondary"
+                  :disabled="busy"
+                  @click="editing && copyInstance(editing)"
+                >
+                  <Copy :size="15" />复制实例</button
+                ><button
+                  type="button"
+                  class="text-button danger"
+                  :disabled="busy"
+                  @click="modal = 'delete'"
+                >
+                  <Trash2 :size="15" />移除实例
+                </button>
+              </div></template
+            >
+          </div>
           <div class="modal-actions">
             <button
               type="button"
@@ -1208,14 +1320,11 @@ onUnmounted(() => unlisten?.());
             >
               取消</button
             ><button type="submit" class="button primary" :disabled="busy">
-              <LoaderCircle v-if="busy" class="spin" :size="16" /><Check
-                v-else-if="modal === 'edit'"
-                :size="16"
-              /><Plus v-else :size="16" />{{
+              <LoaderCircle v-if="busy" class="spin" :size="16" />{{
                 modal === "edit"
-                  ? "保存设置"
+                  ? "保存"
                   : modal === "import"
-                    ? "复制并导入"
+                    ? "导入"
                     : "创建实例"
               }}
             </button>

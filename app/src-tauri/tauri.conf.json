@@ -10,8 +10,30 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [{"title":"NekoCrate Launcher · 猫匣启动器","width":1240,"height":840,"minWidth":900,"minHeight":650}],
-    "security": {"csp":"default-src 'self'; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost; script-src 'self'"}
+    "windows": [
+      {
+        "title": "NekoCrate Launcher · 猫匣启动器",
+        "width": 1140,
+        "height": 720,
+        "minWidth": 900,
+        "minHeight": 600
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost; script-src 'self'"
+    }
   },
-  "bundle": {"active":true,"targets":["app"],"shortDescription":"跨平台 Minecraft Java 启动器","category":"Game","icon":["icons/icon.png","icons/icon.icns","icons/icon.ico"]}
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app"
+    ],
+    "shortDescription": "跨平台 Minecraft Java 启动器",
+    "category": "Game",
+    "icon": [
+      "icons/icon.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
 }
