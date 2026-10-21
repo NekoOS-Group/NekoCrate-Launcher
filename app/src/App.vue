@@ -156,7 +156,7 @@ async function action<T>(
   task = false,
 ): Promise<T | undefined> {
   if (busy.value) {
-    notify("请等待当前任务完成，或先取消。");
+    notify("请等待当前任务完成。");
     return;
   }
   busy.value = true;
@@ -165,6 +165,7 @@ async function action<T>(
   if (task) {
     entry = reactive<Task>({
       id: Date.now(),
+      cancellable: ["versions", "install", "launch"].includes(op),
       title,
       status: "running",
       message: "正在准备…",
@@ -802,7 +803,7 @@ onUnmounted(() => unlisten?.());
               </div>
             </div>
             <button
-              v-if="task.status === 'running'"
+              v-if="task.status === 'running' && task.cancellable"
               class="button secondary"
               @click="cancel"
             >
@@ -971,6 +972,7 @@ onUnmounted(() => unlisten?.());
         </div>
         <span>{{ current.progress }}%</span
         ><button
+          v-if="current.cancellable"
           class="icon-button"
           title="取消任务"
           aria-label="取消任务"

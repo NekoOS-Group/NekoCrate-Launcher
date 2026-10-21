@@ -52,6 +52,7 @@ export interface Challenge {
 }
 export interface Task {
   id: number;
+  cancellable: boolean;
   title: string;
   status: "running" | "done" | "error" | "cancelled";
   message: string;

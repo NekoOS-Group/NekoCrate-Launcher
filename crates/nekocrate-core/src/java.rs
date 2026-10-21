@@ -85,12 +85,11 @@ pub async fn discover(root: &Path) -> Vec<JavaInfo> {
     for base in ["/Library/Java/JavaVirtualMachines", "/opt/homebrew/opt"] {
         if let Ok(entries) = std::fs::read_dir(base) {
             for e in entries.flatten() {
-                if e.file_name().to_string_lossy().contains("jdk")
-                    || base.contains("JavaVirtualMachines")
+                if (e.file_name().to_string_lossy().contains("jdk")
+                    || base.contains("JavaVirtualMachines"))
+                    && let Some(p) = find_java(&e.path())
                 {
-                    if let Some(p) = find_java(&e.path()) {
-                        candidates.push(p);
-                    }
+                    candidates.push(p);
                 }
             }
         }
@@ -99,10 +98,10 @@ pub async fn discover(root: &Path) -> Vec<JavaInfo> {
     candidates.dedup();
     let mut found = vec![];
     for path in candidates {
-        if let Ok(info) = inspect(&path).await {
-            if !found.iter().any(|v: &JavaInfo| v.path == info.path) {
-                found.push(info);
-            }
+        if let Ok(info) = inspect(&path).await
+            && !found.iter().any(|v: &JavaInfo| v.path == info.path)
+        {
+            found.push(info);
         }
     }
     found

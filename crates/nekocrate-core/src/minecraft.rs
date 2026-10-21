@@ -359,18 +359,18 @@ pub fn arguments(
     let mut args = vec![format!("-Xmx{}M", instance.memory_mb), "-Xms256M".into()];
     let config = v.arguments.as_ref().context("不支持旧版本启动参数")?;
     args.extend(expand(&config.jvm, &vars)?);
-    if let Some(log) = v.logging.as_ref().and_then(|l| l.get("client")) {
-        if let (Some(argument), Some(id)) = (log["argument"].as_str(), log["file"]["id"].as_str()) {
-            args.push(
-                argument.replace(
-                    "${path}",
-                    &root
-                        .join("assets/log_configs")
-                        .join(storage::safe_relative(id)?)
-                        .to_string_lossy(),
-                ),
-            );
-        }
+    if let Some(log) = v.logging.as_ref().and_then(|l| l.get("client"))
+        && let (Some(argument), Some(id)) = (log["argument"].as_str(), log["file"]["id"].as_str())
+    {
+        args.push(
+            argument.replace(
+                "${path}",
+                &root
+                    .join("assets/log_configs")
+                    .join(storage::safe_relative(id)?)
+                    .to_string_lossy(),
+            ),
+        );
     }
     args.push(v.main_class.clone());
     args.extend(expand(&config.game, &vars)?);

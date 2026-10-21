@@ -46,7 +46,9 @@ impl Downloader {
             client: reqwest::Client::builder()
                 .user_agent("NekoCrate/0.1.0")
                 .connect_timeout(Duration::from_secs(15))
-                .timeout(Duration::from_secs(300))
+                // Large game/JRE files may take minutes on slower networks.
+                // Bound stalls rather than the total transfer duration.
+                .read_timeout(Duration::from_secs(45))
                 .build()?,
             cache: root.join("cache/objects"),
             settings,

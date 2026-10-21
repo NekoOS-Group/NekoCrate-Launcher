@@ -4,7 +4,7 @@
 
 当前开发分支：`neko_dev`。应用与 CLI 使用同一个核心、数据格式和下载缓存。
 
-上游仓库：[NekoOS-Group/NekoCrate-Lancher](https://github.com/NekoOS-Group/NekoCrate-Lancher)。仓库 URL 沿用现有拼写，产品显示名统一为 NekoCrate Launcher。
+上游仓库：[NekoOS-Group/NekoCrate-Launcher](https://github.com/NekoOS-Group/NekoCrate-Launcher)。产品显示名统一为 NekoCrate Launcher。
 
 ## 当前功能
 

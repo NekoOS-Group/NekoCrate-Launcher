@@ -8,7 +8,7 @@
 - `cargo clippy --workspace --all-targets -- -D warnings`：通过。
 - `cargo fmt --all -- --check`：通过。
 - `npm run build`：TypeScript 检查与 Vite 生产构建通过。
-- `npm run tauri build -- --debug`：成功生成 macOS ARM 桌面应用，约 49 MiB。
+- `npm run tauri build -- --debug`：成功生成 macOS ARM 桌面应用，约 51 MiB。
 - 实际打开 `.app`，确认 Tauri 本地资源加载、中文首页与新建实例对话框正常显示。图形界面的完整操作回归尚未完成；实例生命周期由核心集成测试验证。
 - 官方 Minecraft 1.21.1：3,953 个去重游戏文件下载与完整性校验完成。首次测试触发真实网络重试。
 
@@ -16,7 +16,11 @@
 
 使用 `python3 scripts/smoke_install.py --version 1.21.1`。测试数据位于 `.runtime/smoke-1.21.1`，不会提交到 Git。
 
-自动 Java 安装及主动损坏资源后的修复验收仍在进行。首次 Adoptium 元数据请求失败，后续 Java 压缩包请求出现重试。客户端已启用 HTTP/2，元数据请求设为 30 秒超时，并保留详细错误原因。独立诊断中 Mojang 与 Adoptium 元数据端点均返回 HTTP 200；这不能代替完整 Java 下载验收。
+真实安装脚本最终返回 **PASS**：官方游戏安装、Adoptium Java 21 自动下载/校验/解压/版本检测，以及人为损坏资源文件后的缓存修复均通过。Java 为 Temurin 21.0.12.1（macOS aarch64）。
+
+测试过程中出现过 Adoptium 元数据与 Java 下载重试。客户端已启用 HTTP/2，元数据请求设为 30 秒超时；大文件按 45 秒读取停滞超时处理，避免正常慢速传输被固定总时长截断。下载错误保留底层原因。
+
+修复脚本核对了资源 SHA-1 恢复为官方索引值，实例最终标记为已安装。完整游戏启动仍需真实账户授权。
 
 网络诊断（不发送账户信息）：
 
