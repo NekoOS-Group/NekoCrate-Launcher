@@ -1,0 +1,10 @@
+/target/
+/app/node_modules/
+/app/dist/
+/app/src-tauri/gen/
+/.runtime/
+/.cache/
+/artifacts/
+.DS_Store
+*.log
+.env

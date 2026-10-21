@@ -1,0 +1,14 @@
+[package]
+name = "nekocrate-cli"
+version.workspace = true
+edition.workspace = true
+[[bin]]
+name = "nekocrate"
+path = "src/main.rs"
+[dependencies]
+nekocrate-core = { path = "../nekocrate-core" }
+anyhow.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+clap = { version = "4", features = ["derive"] }
