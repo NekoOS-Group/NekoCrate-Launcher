@@ -1,6 +1,9 @@
 <script setup lang="ts">
+import { t } from "../i18n";
 import { nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { FolderOpen } from "lucide-vue-next";
+import { instanceIcons } from "../instanceIcons";
+import InstanceIcon from "./InstanceIcon.vue";
 
 const props = defineProps<{
   name: string;
@@ -14,7 +17,6 @@ const emit = defineEmits<{
   "update:icon": [icon: number];
   openDirectory: [];
 }>();
-const icons = ["草方块", "冰块", "红砖", "苔石"];
 const renaming = ref(false);
 const draftName = ref("");
 const nameInput = ref<HTMLInputElement>();
@@ -35,7 +37,9 @@ function finishRename(restoreFocus = false, reportError = true): boolean {
   if (!renaming.value) return true;
   const name = draftName.value.trim();
   const valid = name.length > 0 && [...name].length <= 80;
-  nameInput.value?.setCustomValidity(valid ? "" : "实例名称应为 1–80 个字符");
+  nameInput.value?.setCustomValidity(
+    valid ? "" : t("实例名称应为 1–80 个字符"),
+  );
   if (!valid) {
     if (reportError) nameInput.value?.reportValidity();
     return false;
@@ -90,37 +94,33 @@ defineExpose({ finishRename });
         ref="iconButton"
         class="instance-heading-icon"
         :disabled="disabled"
-        aria-label="切换实例图标"
-        title="切换实例图标"
+        :aria-label="t('切换实例图标')"
+        :title="t('切换实例图标')"
         :aria-expanded="choosingIcon"
         aria-controls="instance-icon-choices"
         @click="choosingIcon = !choosingIcon"
       >
-        <span class="instance-art" :data-material="icon" aria-hidden="true" />
+        <InstanceIcon :icon="icon" />
       </button>
       <div
         v-if="choosingIcon"
         id="instance-icon-choices"
         class="instance-icon-choices glass-surface"
         role="group"
-        aria-label="实例图标"
+        :aria-label="t('实例图标')"
       >
         <button
-          v-for="(label, index) in icons"
-          :key="label"
+          v-for="material in instanceIcons"
+          :key="material.id"
           class="instance-tile"
-          :class="{ selected: icon === index }"
+          :class="{ selected: icon === material.id }"
           :disabled="disabled"
-          :aria-label="label"
-          :title="label"
-          :aria-pressed="icon === index"
-          @click="chooseIcon(index)"
+          :aria-label="t(material.name)"
+          :title="t(material.name)"
+          :aria-pressed="icon === material.id"
+          @click="chooseIcon(material.id)"
         >
-          <span
-            class="instance-art"
-            :data-material="index"
-            aria-hidden="true"
-          />
+          <InstanceIcon :icon="material.id" />
         </button>
       </div>
     </div>
@@ -131,7 +131,7 @@ defineExpose({ finishRename });
           ref="nameInput"
           v-model="draftName"
           class="instance-name-input"
-          aria-label="实例名称"
+          :aria-label="t('实例名称')"
           :disabled="disabled"
           maxlength="80"
           autocomplete="off"
@@ -145,8 +145,8 @@ defineExpose({ finishRename });
           ref="nameButton"
           class="instance-name-button"
           :disabled="disabled"
-          :title="`${name} · 点击修改名称`"
-          aria-label="修改实例名称"
+          :title="t('{name} · 点击修改名称', { name })"
+          :aria-label="t('修改实例名称')"
           @click="rename"
         >
           {{ name }}
@@ -156,11 +156,13 @@ defineExpose({ finishRename });
         class="settings-directory-link"
         :disabled="!directory"
         :title="directory"
-        :aria-label="`打开游戏目录：${directory || '读取中'}`"
+        :aria-label="
+          t('打开游戏目录：{path}', { path: directory || t('读取中') })
+        "
         @click="emit('openDirectory')"
       >
         <FolderOpen :size="13" /><span>{{
-          directory || (directoryLoading ? "读取目录…" : "目录不可用")
+          directory || (directoryLoading ? t("读取目录…") : t("目录不可用"))
         }}</span>
       </button>
     </div>

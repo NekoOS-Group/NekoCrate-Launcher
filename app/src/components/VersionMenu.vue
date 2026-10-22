@@ -1,6 +1,7 @@
 <script setup lang="ts">
+import { t } from "../i18n";
 import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Box, Check, ChevronUp, Plus } from "lucide-vue-next";
+import { Box, ChevronUp, Plus } from "lucide-vue-next";
 import type { Instance } from "../types";
 
 const props = defineProps<{ instance?: Instance; disabled: boolean }>();
@@ -88,6 +89,10 @@ function leave(event: FocusEvent) {
     close();
 }
 watch(
+  () => props.instance?.id,
+  () => close(),
+);
+watch(
   () => props.disabled,
   (disabled) => {
     if (disabled) close();
@@ -110,14 +115,16 @@ onBeforeUnmount(() =>
       ref="trigger"
       class="version-trigger"
       :disabled="disabled"
-      aria-label="选择游戏版本"
+      :aria-label="t('选择游戏版本')"
       aria-haspopup="menu"
       aria-controls="launch-version-menu"
       :aria-expanded="expanded"
       :title="
         instance?.selected_version
-          ? `当前 ${instance.selected_version} · 选择版本`
-          : '选择或下载版本'
+          ? t('当前 {version} · 选择版本', {
+              version: instance.selected_version,
+            })
+          : t('选择或下载版本')
       "
       @click="expanded ? close() : open()"
       @keydown.down.prevent="open('first')"
@@ -132,12 +139,12 @@ onBeforeUnmount(() =>
         ref="menu"
         class="version-menu glass-surface"
         role="menu"
-        aria-label="游戏版本"
+        :aria-label="t('游戏版本')"
         @keydown="navigate"
       >
         <div class="version-menu-list" role="none">
           <p v-if="!instance?.versions.length" class="version-menu-empty">
-            暂无游戏版本
+            {{ t("暂无游戏版本") }}
           </p>
           <button
             v-for="version in instance?.versions"
@@ -150,13 +157,9 @@ onBeforeUnmount(() =>
             data-menu-item
             @click="choose(version.id)"
           >
-            <Box :size="16" />
+            <Box class="version-menu-icon" :size="16" />
             <span class="version-menu-name">{{ version.id }}</span>
-            <small v-if="!version.installed">待下载</small>
-            <Check
-              v-if="version.id === instance?.selected_version"
-              :size="15"
-            />
+            <small v-if="!version.installed"> {{ t("待下载") }} </small>
           </button>
         </div>
         <div
@@ -171,7 +174,7 @@ onBeforeUnmount(() =>
           data-menu-item
           @click="download"
         >
-          <Plus :size="16" /><span>下载新的版本</span>
+          <Plus :size="16" /><span> {{ t("下载新的版本") }} </span>
         </button>
       </div>
     </Transition>

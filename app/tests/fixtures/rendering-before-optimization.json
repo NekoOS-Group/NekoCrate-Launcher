@@ -1,0 +1,15 @@
+{
+  "description": "Pre-optimization simulation state and visible SVG attributes across 300 frames, including reduced-motion paint and resumption.",
+  "frames": 300,
+  "seed": 125,
+  "steps": [
+    0.008333333333333333, 0.016666666666666666, 0.03333333333333333, 0.004, 0.1
+  ],
+  "themes": {
+    "honeycomb": "46708a87ec1de928afee433b5028f2287cf5359af6227a6d77df6b2b67d6a8d7",
+    "chunks": "e6fb12f2e4d7c03291f5749bf6ce35e8dbcfe46d4f0191e7c634e8c28bf606bc",
+    "diamonds": "bde67185cf1f44cce82facf0e2f4862b22fe590320bd959cfafe01e7f285d59c",
+    "facets": "ee1e3463c588c6cda43f93a499fe232026f81d92bb4b257b0fe9ee25e2c563eb",
+    "circuit": "a2592af6949183c99f684bad4fdd36544cb9a2695759d3b6b90a587375bbd641"
+  }
+}

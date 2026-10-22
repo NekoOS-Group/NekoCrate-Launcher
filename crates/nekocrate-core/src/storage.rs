@@ -19,6 +19,9 @@ pub fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
     atomic_write(path, &serde_json::to_vec_pretty(value)?)
 }
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
+    atomic_write_with_backup(path, bytes, &path.with_extension("json.bak"))
+}
+pub(crate) fn atomic_write_with_backup(path: &Path, bytes: &[u8], backup: &Path) -> Result<()> {
     use std::io::Write;
     fs::create_dir_all(path.parent().context("路径没有父目录")?)?;
     let temp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
@@ -36,7 +39,7 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     drop(file);
     // Keep a last-known snapshot so a damaged metadata file is recoverable.
     if path.exists() {
-        fs::copy(path, path.with_extension("json.bak"))?;
+        fs::copy(path, backup)?;
     }
     fs::rename(&temp, path)?;
     Ok(())

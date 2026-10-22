@@ -1,5 +1,11 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
+
+// Stable persisted IDs, matching app/src/instanceIcons.ts (0–3 are legacy icons).
+pub const INSTANCE_ICON_COUNT: u8 = 16;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -9,6 +15,8 @@ pub struct Settings {
     pub concurrency: usize,
     pub retries: usize,
     pub auto_java: bool,
+    pub language: String,
+    pub apply_language_to_game: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -18,6 +26,8 @@ impl Default for Settings {
             concurrency: 8,
             retries: 2,
             auto_java: true,
+            language: "system".into(),
+            apply_language_to_game: false,
         }
     }
 }
@@ -28,6 +38,9 @@ pub struct Instance {
     pub name: String,
     #[serde(default)]
     pub icon: Option<u8>,
+    /// Imported directories stay in place. None denotes a launcher-managed directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_directory: Option<PathBuf>,
     pub versions: Vec<InstanceVersion>,
     pub selected_version: Option<String>,
     pub memory_mb: u32,
@@ -42,6 +55,11 @@ pub struct InstanceVersion {
     pub installed: bool,
 }
 impl Instance {
+    pub fn game_dir(&self, root: &Path) -> PathBuf {
+        self.game_directory
+            .clone()
+            .unwrap_or_else(|| root.join("instances").join(&self.id).join(".minecraft"))
+    }
     pub fn selected(&self) -> Option<&InstanceVersion> {
         self.versions
             .iter()
@@ -78,7 +96,7 @@ pub struct Database {
 impl Default for Database {
     fn default() -> Self {
         Self {
-            schema: 2,
+            schema: 3,
             settings: Settings::default(),
             instances: vec![],
             accounts: vec![],

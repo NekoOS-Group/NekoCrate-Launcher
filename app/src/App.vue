@@ -1,6 +1,17 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
+import { t, locale, setLanguage, translateMessage } from "./i18n";
+import {
+  computed,
+  nextTick,
+  onMounted,
+  onUnmounted,
+  reactive,
+  ref,
+  watch,
+  watchEffect,
+} from "vue";
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -10,9 +21,9 @@ import {
   UsersRound,
   FolderOpen,
   Play,
+  Download,
   Square,
   RefreshCw,
-  Search,
   ChevronRight,
   ChevronDown,
   Terminal,
@@ -26,6 +37,11 @@ import {
   CheckCircle2,
 } from "lucide-vue-next";
 import { backdropThemes } from "./backdropThemes";
+import { resolveInstanceIcon } from "./instanceIcons";
+import { moveInstanceBefore } from "./instanceOrder";
+import { useInstanceSorting } from "./useInstanceSorting";
+import { prepareDialogLeave, finishDialogLeave } from "./dialogMotion";
+import { version as launcherVersion } from "../package.json";
 import { prepareAndLaunch } from "./launch";
 import { signInWithMicrosoft } from "./login";
 import GlassDialog from "./components/GlassDialog.vue";
@@ -35,6 +51,10 @@ import VersionMenu from "./components/VersionMenu.vue";
 import AccountAvatar from "./components/AccountAvatar.vue";
 import InstanceHeader from "./components/InstanceHeader.vue";
 import DownloadSourceSelect from "./components/DownloadSourceSelect.vue";
+import GlassSelect from "./components/GlassSelect.vue";
+import ThemePicker from "./components/ThemePicker.vue";
+import InstanceIcon from "./components/InstanceIcon.vue";
+import InstanceProgress from "./components/InstanceProgress.vue";
 import type {
   Settings,
   Instance,
@@ -44,12 +64,14 @@ import type {
   Challenge,
   Task,
   Account,
+  UpdateStatus,
 } from "./types";
 
 const desktop = isTauri();
 const utility = ref<"accounts" | "downloads" | "settings" | null>(null);
 const snapshot = ref<Snapshot>({
   root: "",
+  system_locale: navigator.language,
   database: {
     settings: {
       microsoft_client_id: "",
@@ -57,6 +79,8 @@ const snapshot = ref<Snapshot>({
       concurrency: 8,
       retries: 2,
       auto_java: true,
+      language: "system",
+      apply_language_to_game: false,
     },
     instances: [],
     accounts: [],
@@ -65,6 +89,77 @@ const snapshot = ref<Snapshot>({
   running: [],
 });
 const settings = reactive<Settings>({ ...snapshot.value.database.settings });
+const settingsSaving = ref(false);
+let utilitySession = 0;
+let modalSession = 0;
+watch(utility, () => utilitySession++, { flush: "sync" });
+const settingsTabs = [
+  { id: "general", label: "通用设置" },
+  { id: "network", label: "网络设置" },
+] as const;
+const settingsTab = ref<(typeof settingsTabs)[number]["id"]>("general");
+let settingsInvalidFocus: string | null = null;
+function focusSettingsField() {
+  if (!settingsInvalidFocus) return;
+  const input = document.getElementById(settingsInvalidFocus);
+  if (input) {
+    input.focus();
+    settingsInvalidFocus = null;
+  }
+}
+const languages = [
+  { value: "system", label: "跟随系统" },
+  { value: "zh-CN", label: "简体中文" },
+  { value: "en-US", label: "English" },
+];
+watchEffect(() => {
+  setLanguage(
+    utility.value === "settings"
+      ? settings.language
+      : snapshot.value.database.settings.language,
+    snapshot.value.system_locale,
+  );
+  document.documentElement.lang = locale.value;
+  document.title = t("猫咪盒子启动器");
+});
+watch(
+  locale,
+  () => {
+    if (desktop)
+      void getCurrentWindow()
+        .setTitle(t("猫咪盒子启动器"))
+        .catch(() => {});
+  },
+  { immediate: true },
+);
+const updateStatus = ref<UpdateStatus | null>(null);
+const updateChecking = ref(false);
+const updateError = ref("");
+async function checkLauncherUpdate() {
+  if (updateChecking.value) return;
+  updateChecking.value = true;
+  updateError.value = "";
+  updateStatus.value = null;
+  try {
+    updateStatus.value = await rpc<UpdateStatus>("check_update");
+  } catch (e) {
+    updateError.value = message(e);
+  } finally {
+    updateChecking.value = false;
+  }
+}
+function navigateSettingsTabs(event: KeyboardEvent, index: number) {
+  let next = index;
+  if (event.key === "ArrowRight") next = (index + 1) % settingsTabs.length;
+  else if (event.key === "ArrowLeft")
+    next = (index + settingsTabs.length - 1) % settingsTabs.length;
+  else if (event.key === "Home") next = 0;
+  else if (event.key === "End") next = settingsTabs.length - 1;
+  else return;
+  event.preventDefault();
+  settingsTab.value = settingsTabs[next].id;
+  document.getElementById(`settings-tab-${settingsTab.value}`)?.focus();
+}
 const manifest = ref<VersionManifest | null>(null);
 const selectedInstanceId = ref("");
 const busy = ref(false);
@@ -82,6 +177,7 @@ const showLogs = ref(false);
 const modal = ref<"create" | "import" | "edit" | "delete" | "version" | null>(
   null,
 );
+watch(modal, () => modalSession++, { flush: "sync" });
 const modalTitles = {
   create: "新建实例",
   import: "导入实例",
@@ -104,17 +200,17 @@ const form = reactive({
 const challenge = ref<Challenge | null>(null);
 const loginSetup = ref(false);
 const loginClientId = ref("");
-const javaList = ref<{ path: string; major: number; version: string }[]>([]);
 const themes = backdropThemes;
 const theme = ref("tide");
 const hoveredInstance = ref<Instance | null>(null);
 const instanceTipPosition = ref({ left: "0px", top: "0px" });
 function previewInstance(event: MouseEvent | FocusEvent, instance: Instance) {
+  if (draggedInstanceId.value) return;
   const box = (event.currentTarget as HTMLElement).getBoundingClientRect();
   hoveredInstance.value = instance;
   instanceTipPosition.value = {
     left: `${box.left + box.width / 2}px`,
-    top: `${box.bottom + 8}px`,
+    top: `${Math.min(box.bottom + 4, window.innerHeight - 24)}px`,
   };
 }
 function setTheme(id: string) {
@@ -132,6 +228,30 @@ const skinError = ref("");
 let skinGeneration = 0;
 let unlisten: UnlistenFn | undefined;
 const instances = computed(() => snapshot.value.database.instances);
+const instanceOrderSaving = ref(false);
+const {
+  strip: instanceStrip,
+  ghost: instanceGhost,
+  draggedId: draggedInstanceId,
+  draggedInstance,
+  displayInstances: dockInstances,
+  ghostPosition: instanceGhostPosition,
+  ghostArtStyle: instanceGhostArtStyle,
+  ...instanceSort
+} = useInstanceSorting(
+  instances,
+  computed(
+    () =>
+      instanceOrderSaving.value ||
+      !!modal.value ||
+      !!utility.value ||
+      showLogs.value,
+  ),
+  (id, beforeId) => void reorderInstance(id, beforeId),
+  () => {
+    hoveredInstance.value = null;
+  },
+);
 const selectedAccount = computed(() =>
   snapshot.value.database.accounts.find(
     (a) => a.id === snapshot.value.database.selected_account,
@@ -206,7 +326,10 @@ const utilityTitles = {
 watch(utility, (panel) => {
   if (panel === "settings") {
     Object.assign(settings, snapshot.value.database.settings);
+    settingsTab.value = "general";
+    settingsInvalidFocus = null;
     error.value = "";
+    void checkLauncherUpdate();
   }
 });
 function toggleUtility(panel: "accounts" | "downloads" | "settings") {
@@ -216,15 +339,7 @@ function toggleUtility(panel: "accounts" | "downloads" | "settings") {
   utility.value = utility.value === panel ? null : panel;
 }
 function instanceMaterial(instance: Instance) {
-  if (
-    Number.isInteger(instance.icon) &&
-    instance.icon! >= 0 &&
-    instance.icon! < 4
-  )
-    return instance.icon!;
-  return (
-    (Number.parseInt(instance.id.replaceAll("-", "").slice(0, 8), 16) || 0) % 4
-  );
+  return resolveInstanceIcon(instance.icon, instance.id);
 }
 function selectInstance(id: string) {
   selectedInstanceId.value = id;
@@ -234,7 +349,38 @@ function selectInstance(id: string) {
     /* Storage may be unavailable in a restricted webview. */
   }
 }
-const stamp = () => new Date().toLocaleTimeString("zh-CN", { hour12: false });
+async function reorderInstance(id: string, beforeId: string | null) {
+  if (instanceOrderSaving.value) return;
+  const previous = instances.value;
+  const reordered = moveInstanceBefore(previous, id, beforeId);
+  if (reordered.every((item, index) => item.id === previous[index]?.id)) return;
+  if (selectedInstance.value) selectInstance(selectedInstance.value.id);
+  hoveredInstance.value = null;
+  snapshot.value.database.instances = reordered;
+  instanceOrderSaving.value = true;
+  let saved = false;
+  try {
+    await rpc("move_instance", { id, before_id: beforeId });
+    saved = true;
+    await sync();
+  } catch (e) {
+    if (!saved) {
+      const positions = new Map(
+        previous.map((item, index) => [item.id, index]),
+      );
+      snapshot.value.database.instances = [...instances.value].sort(
+        (a, b) =>
+          (positions.get(a.id) ?? Infinity) - (positions.get(b.id) ?? Infinity),
+      );
+    }
+    error.value = message(e);
+    logs.value.push({ time: stamp(), kind: "error", message: error.value });
+  } finally {
+    instanceOrderSaving.value = false;
+  }
+}
+const stamp = () =>
+  new Date().toLocaleTimeString(locale.value, { hour12: false });
 async function rpc<T = unknown>(
   op: string,
   data: Record<string, unknown> = {},
@@ -243,12 +389,15 @@ async function rpc<T = unknown>(
     throw new Error("当前为界面预览。请运行桌面版以管理实例和启动游戏。");
   return invoke<T>("command", { request: { op, ...data } });
 }
+let snapshotRequest = 0;
 async function sync() {
+  const request = ++snapshotRequest;
   const response = await rpc<{
     state: Snapshot;
     manifest: VersionManifest | null;
     busy: boolean;
   }>("snapshot");
+  if (request !== snapshotRequest) return;
   snapshot.value = response.state;
   manifest.value = response.manifest;
 }
@@ -371,7 +520,7 @@ async function chooseJava() {
   try {
     const path = await open({
       multiple: false,
-      title: "选择 bin/java 或 bin/java.exe",
+      title: t("选择 bin/java 或 bin/java.exe"),
     });
     if (typeof path === "string") form.java_path = path;
   } catch (e) {
@@ -379,6 +528,7 @@ async function chooseJava() {
   }
 }
 async function submit() {
+  const session = modalSession;
   if (modal.value === "edit" && instanceHeader.value?.finishRename() === false)
     return;
   let result: Instance | boolean | undefined;
@@ -388,7 +538,7 @@ async function submit() {
     });
   else if (modal.value === "import")
     result = await action<Instance>(
-      "迁移实例",
+      "关联实例",
       "import",
       { source: form.source, name: form.name },
       true,
@@ -400,7 +550,7 @@ async function submit() {
     });
     if (instance) {
       selectInstance(instance.id);
-      modal.value = null;
+      if (session === modalSession) modal.value = null;
       await install(instance);
     }
     return;
@@ -414,7 +564,7 @@ async function submit() {
     });
   if (result !== undefined) {
     if (typeof result === "object") selectInstance(result.id);
-    modal.value = null;
+    if (session === modalSession) modal.value = null;
   }
 }
 function newVersion(instance: Instance) {
@@ -524,15 +674,49 @@ async function chooseAccount(account: Account) {
   }
 }
 async function saveSettings() {
-  const result = await action("保存设置", "save_settings", {
-    settings: {
-      ...settings,
-      microsoft_client_id: snapshot.value.database.settings.microsoft_client_id,
-    },
-  });
-  if (result) {
-    Object.assign(settings, snapshot.value.database.settings);
-    if (utility.value === "settings") utility.value = null;
+  if (settingsSaving.value) return;
+  const invalidField =
+    !Number.isInteger(settings.concurrency) ||
+    settings.concurrency < 1 ||
+    settings.concurrency > 32
+      ? { id: "settings-concurrency", message: "并发下载请填写 1–32 的整数。" }
+      : !Number.isInteger(settings.retries) ||
+          settings.retries < 0 ||
+          settings.retries > 5
+        ? { id: "settings-retries", message: "失败重试请填写 0–5 的整数。" }
+        : null;
+  if (invalidField) {
+    settingsTab.value = "network";
+    settingsInvalidFocus = invalidField.id;
+    error.value = invalidField.message;
+    await nextTick();
+    focusSettingsField();
+    return;
+  }
+  const session = utilitySession;
+  const submitted = {
+    ...settings,
+    microsoft_client_id: snapshot.value.database.settings.microsoft_client_id,
+    auto_java: snapshot.value.database.settings.auto_java,
+  };
+  settingsSaving.value = true;
+  error.value = "";
+  try {
+    await rpc("save_settings", { settings: submitted });
+    // Discard snapshots requested before this save; they can arrive after it.
+    snapshotRequest++;
+    snapshot.value.database.settings = { ...submitted };
+    await sync();
+    if (session === utilitySession && utility.value === "settings") {
+      Object.assign(settings, submitted);
+      utility.value = null;
+    }
+  } catch (e) {
+    const text = message(e);
+    if (session === utilitySession) error.value = text;
+    logs.value.push({ time: stamp(), kind: "error", message: text });
+  } finally {
+    settingsSaving.value = false;
   }
 }
 async function openFolder(id?: string) {
@@ -557,10 +741,6 @@ async function copy(text: string) {
   } catch {
     error.value = "无法访问剪贴板，请手动选择并复制。";
   }
-}
-async function inspectJava() {
-  const result = await action<typeof javaList.value>("检测 Java", "java");
-  if (result) javaList.value = result;
 }
 function onEvent(e: LauncherEvent) {
   if (
@@ -603,7 +783,8 @@ onMounted(async () => {
       onEvent(e.payload),
     );
     await sync();
-    Object.assign(settings, snapshot.value.database.settings);
+    if (utility.value !== "settings")
+      Object.assign(settings, snapshot.value.database.settings);
   } catch (e) {
     error.value = message(e);
   }
@@ -621,7 +802,7 @@ onUnmounted(() => {
     <header class="topbar">
       <button
         class="account-card glass-surface"
-        aria-label="账户管理"
+        :aria-label="t('账户管理')"
         @click="toggleUtility('accounts')"
       >
         <span class="account-avatar"
@@ -637,27 +818,27 @@ onUnmounted(() => {
             data-online="true"
             >{{
               selectedAccount.expires_at * 1000 > Date.now()
-                ? "已登录"
-                : "待刷新"
+                ? t("已登录")
+                : t("待刷新")
             }}</span
           >
-          <span v-else class="account-status">未登录</span>
+          <span v-else class="account-status"> {{ t("未登录") }} </span>
         </span>
         <ChevronDown class="account-chevron" :size="14" />
       </button>
       <div class="global-tools">
         <button
           class="icon-button"
-          title="全局设置"
-          aria-label="全局设置"
+          :title="t('全局设置')"
+          :aria-label="t('全局设置')"
           @click="toggleUtility('settings')"
         >
           <Settings2 :size="20" />
         </button>
         <button
           class="icon-button"
-          title="运行日志"
-          aria-label="运行日志"
+          :title="t('运行日志')"
+          :aria-label="t('运行日志')"
           @click="showLogs = true"
         >
           <Terminal :size="20" />
@@ -665,17 +846,17 @@ onUnmounted(() => {
       </div>
     </header>
 
-    <main class="workspace" aria-label="玩家皮肤预览">
+    <main class="workspace" :aria-label="t('玩家皮肤预览')">
       <div
         v-if="error && !modal && !utility && !showLogs"
         class="error-banner workspace-error"
         role="alert"
       >
         <CircleAlert :size="16" />
-        <p>{{ error }}</p>
+        <p>{{ translateMessage(error) }}</p>
         <button
           class="icon-button"
-          aria-label="关闭错误提示"
+          :aria-label="t('关闭错误提示')"
           @click="error = ''"
         >
           <X :size="16" />
@@ -686,8 +867,8 @@ onUnmounted(() => {
         :slim="!!skinTexture && !!selectedAccount?.skin?.slim"
         :loading="skinLoading"
         :paused="!!modal || !!utility || showLogs"
-        :caption="skinCaption"
-        :issue="skinError"
+        :caption="t(skinCaption)"
+        :issue="translateMessage(skinError)"
         @avatar="avatar = $event"
         @failed="skinError = $event"
         @retry="loadAccountSkin"
@@ -695,158 +876,204 @@ onUnmounted(() => {
     </main>
 
     <footer class="bottom-bar">
-      <div class="theme-picker" role="group" aria-label="主题配色">
-        <button
-          v-for="color in themes"
-          :key="color.id"
-          class="theme-swatch"
-          :class="{ active: theme === color.id }"
-          :style="{ '--swatch': color.color }"
-          :aria-label="`${color.name}主题，${color.pattern}背景`"
-          :aria-pressed="theme === color.id"
-          :title="`${color.name} · ${color.pattern}`"
-          @click="setTheme(color.id)"
-        >
-          <svg
-            viewBox="0 0 12 14"
-            width="14"
-            height="16"
-            fill="none"
-            stroke="currentColor"
-            aria-hidden="true"
-          >
-            <path :d="color.mark" />
-          </svg>
-        </button>
-      </div>
+      <ThemePicker :model-value="theme" @update:model-value="setTheme" />
       <div class="game-controls">
         <nav
           class="instance-dock"
-          :class="{ empty: !instances.length }"
-          aria-label="实例"
+          :class="{ empty: !instances.length, sorting: !!draggedInstanceId }"
+          :aria-label="t('实例')"
+          @pointerdown.capture="instanceSort.resetClick"
+          @pointermove="instanceSort.track"
+          @pointerup="instanceSort.release"
+          @pointercancel="instanceSort.cancel"
+          @lostpointercapture="instanceSort.lostCapture"
+          @click.capture="instanceSort.guardClick"
+          @dblclick.capture="instanceSort.guardClick"
+          @dragstart.prevent
         >
           <button
             class="icon-button add-instance"
             :disabled="busy"
-            aria-label="新建实例"
-            title="新建实例"
+            :aria-label="t('新建实例')"
+            :title="t('新建实例')"
             @click="newInstance()"
           >
             <Plus :size="20" />
           </button>
-          <div class="instance-strip" @scroll="hoveredInstance = null">
-            <div
-              v-for="instance in instances"
-              :key="instance.id"
-              class="instance-item"
+          <div
+            ref="instanceStrip"
+            v-show="instances.length"
+            class="instance-strip"
+            @scroll="hoveredInstance = null"
+          >
+            <TransitionGroup
+              tag="div"
+              name="instance-sort"
+              class="instance-track"
             >
-              <button
-                class="instance-tile"
-                :class="{ selected: selectedInstance?.id === instance.id }"
-                :aria-label="`${instance.name}，${instance.selected_version || '尚无版本'}，双击或按 F2 设置`"
-                :aria-pressed="selectedInstance?.id === instance.id"
-                @click="selectInstance(instance.id)"
-                @dblclick="edit(instance)"
-                @contextmenu.prevent="edit(instance)"
-                @keydown.f2.prevent="edit(instance)"
-                @mouseenter="previewInstance($event, instance)"
-                @mouseleave="hoveredInstance = null"
-                @focus="previewInstance($event, instance)"
-                @blur="hoveredInstance = null"
+              <div
+                v-for="instance in dockInstances"
+                :key="instance.id"
+                class="instance-item"
+                :data-instance-id="instance.id"
+                :class="{
+                  dragging: draggedInstanceId === instance.id,
+                }"
               >
-                <span
-                  class="instance-art"
-                  :data-material="instanceMaterial(instance)"
-                  aria-hidden="true"
-                />
-                <i
-                  v-if="snapshot.running.includes(instance.id)"
-                  class="running-dot"
-                />
-              </button>
-              <button
-                v-if="
-                  current?.instance_id === instance.id &&
-                  current.status === 'running'
-                "
-                class="instance-progress-button"
-                :title="current.message"
-                aria-label="查看此实例下载进度"
-                @click="toggleUtility('downloads')"
-              >
-                <span
-                  class="instance-progress"
-                  :class="{ indeterminate: current.indeterminate }"
-                  role="progressbar"
-                  :aria-valuenow="
-                    current.indeterminate ? undefined : current.progress
+                <button
+                  class="instance-tile"
+                  :class="{ selected: selectedInstance?.id === instance.id }"
+                  :aria-label="
+                    t(
+                      '{name}，{version}，双击或按 F2 设置，拖动或按 Alt 加左右方向键排序',
+                      {
+                        name: instance.name,
+                        version: instance.selected_version || t('尚无版本'),
+                      },
+                    )
                   "
-                  aria-valuemin="0"
-                  aria-valuemax="100"
-                  :aria-label="current.title"
-                  ><i
-                    :style="
-                      current.indeterminate
-                        ? {}
-                        : { width: `${current.progress}%` }
-                    "
-                /></span>
-              </button>
-            </div>
+                  :aria-pressed="selectedInstance?.id === instance.id"
+                  aria-keyshortcuts="Alt+ArrowLeft Alt+ArrowRight F2"
+                  @pointerdown="instanceSort.start($event, instance.id)"
+                  @keydown="instanceSort.keyboard($event, instance.id)"
+                  @click="selectInstance(instance.id)"
+                  @dblclick="edit(instance)"
+                  @contextmenu.prevent="edit(instance)"
+                  @keydown.f2.prevent="edit(instance)"
+                  @mouseenter="previewInstance($event, instance)"
+                  @mouseleave="hoveredInstance = null"
+                  @focus="previewInstance($event, instance)"
+                  @blur="hoveredInstance = null"
+                >
+                  <InstanceIcon :icon="instanceMaterial(instance)" />
+                  <i
+                    v-if="snapshot.running.includes(instance.id)"
+                    class="running-dot"
+                  />
+                </button>
+                <InstanceProgress
+                  v-if="
+                    current?.instance_id === instance.id &&
+                    current.status === 'running'
+                  "
+                  :title="current.title"
+                  :message="current.message"
+                  :progress="current.progress"
+                  :indeterminate="current.indeterminate"
+                  @open="toggleUtility('downloads')"
+                />
+              </div>
+            </TransitionGroup>
           </div>
         </nav>
         <div
           class="launch-control glass-surface"
-          :class="{ running: selectedRunning }"
+          :class="{ running: selectedRunning, download: !selectedVersion }"
         >
           <button
             class="launch-button"
-            :disabled="busy || !selectedVersion"
+            :class="{ unavailable: !selectedInstance }"
+            :disabled="busy || !selectedInstance"
             :title="
               !selectedInstance
-                ? '请先新建实例'
+                ? t('请先新建实例')
                 : !selectedVersion
-                  ? '请先在右侧版本菜单中下载版本'
+                  ? t('为 {name} 下载游戏版本', { name: selectedInstance.name })
                   : selectedRunning
-                    ? '停止游戏'
-                    : `启动 ${selectedVersion.id}`
+                    ? t('停止游戏')
+                    : t('启动 {version}', { version: selectedVersion.id })
             "
             @click="
               selectedRunning
                 ? action('停止游戏', 'stop', { id: selectedInstance?.id })
-                : startGame()
+                : selectedVersion
+                  ? startGame()
+                  : selectedInstance && newVersion(selectedInstance)
             "
           >
-            <LoaderCircle
-              v-if="busy && current?.instance_id === selectedInstance?.id"
-              class="spin"
-              :size="18"
-            /><Square
-              v-else-if="selectedRunning"
-              class="stop-icon"
-              :size="16"
-            /><Play v-else :size="18" />
-            <span>{{ selectedRunning ? "停止游戏" : "启动游戏" }}</span>
+            <span class="launch-content-position">
+              <Transition name="launch-content">
+                <span
+                  :key="
+                    selectedRunning
+                      ? 'stop'
+                      : selectedVersion
+                        ? 'play'
+                        : 'download'
+                  "
+                  class="launch-content"
+                  :class="{ 'has-version': !!selectedVersion }"
+                >
+                  <span class="launch-primary">
+                    <LoaderCircle
+                      v-if="
+                        busy && current?.instance_id === selectedInstance?.id
+                      "
+                      class="spin"
+                      :size="18"
+                    /><Square
+                      v-else-if="selectedRunning"
+                      class="stop-icon"
+                      :size="16"
+                    /><Download v-else-if="!selectedVersion" :size="18" /><Play
+                      v-else
+                      :size="18"
+                    />
+                    <span class="launch-label">{{
+                      selectedRunning
+                        ? t("停止游戏")
+                        : selectedVersion
+                          ? t("启动游戏")
+                          : t("下载游戏")
+                    }}</span>
+                  </span>
+                  <Transition name="launch-version">
+                    <small
+                      v-if="selectedVersion"
+                      :key="selectedVersion.id"
+                      class="launch-version"
+                      >{{ selectedVersion.id }}</small
+                    >
+                  </Transition>
+                </span>
+              </Transition>
+            </span>
           </button>
-          <VersionMenu
-            :key="selectedInstance?.id || 'none'"
-            :instance="selectedInstance"
-            :disabled="
-              busy ||
-              !selectedInstance ||
-              selectedRunning ||
-              !!modal ||
-              !!utility ||
-              showLogs
-            "
-            @select="
-              selectedInstance && selectVersion(selectedInstance, $event)
-            "
-            @download="selectedInstance && newVersion(selectedInstance)"
-          />
+          <Transition name="version-control">
+            <VersionMenu
+              v-if="selectedVersion"
+              :instance="selectedInstance"
+              :disabled="
+                busy ||
+                !selectedInstance ||
+                selectedRunning ||
+                !!modal ||
+                !!utility ||
+                showLogs
+              "
+              @select="
+                selectedInstance && selectVersion(selectedInstance, $event)
+              "
+              @download="selectedInstance && newVersion(selectedInstance)"
+            />
+          </Transition>
         </div>
       </div>
     </footer>
+    <Transition name="instance-ghost">
+      <div
+        v-if="draggedInstance"
+        ref="instanceGhost"
+        class="instance-drag-ghost"
+        :style="instanceGhostPosition"
+        aria-hidden="true"
+      >
+        <InstanceIcon
+          :icon="instanceMaterial(draggedInstance)"
+          :style="instanceGhostArtStyle"
+        />
+      </div>
+    </Transition>
     <div
       v-if="hoveredInstance && !modal && !utility && !showLogs"
       class="instance-tooltip"
@@ -856,669 +1083,799 @@ onUnmounted(() => {
       {{ hoveredInstance.name }}
     </div>
 
-    <GlassDialog
-      :notice="notice"
-      v-if="utility"
-      :label="utilityTitles[utility]"
-      @close="utility = null"
+    <Transition
+      name="dialog"
+      appear
+      @before-leave="prepareDialogLeave"
+      @after-leave="finishDialogLeave"
     >
-      <section
-        class="utility-panel glass-surface"
-        :class="{
-          'account-panel': utility === 'accounts',
-          'global-settings': utility === 'settings',
-        }"
+      <GlassDialog
+        :notice="translateMessage(notice)"
+        v-if="utility"
+        :label="t(utilityTitles[utility])"
+        @close="utility = null"
       >
-        <header class="utility-panel-header">
-          <div
-            v-if="utility === 'settings'"
-            class="settings-heading dialog-heading"
-            tabindex="-1"
-            autofocus
-          >
-            <span class="settings-symbol" aria-hidden="true"
-              ><Settings2 :size="28"
-            /></span>
-            <div class="settings-heading-details">
-              <h2>全局设置</h2>
-              <button
-                class="settings-directory-link"
-                :disabled="!snapshot.root"
-                :title="snapshot.root"
-                aria-label="打开启动器数据目录"
-                @click="openFolder()"
-              >
-                <FolderOpen :size="13" /><span>{{
-                  snapshot.root || "使用系统应用数据目录"
-                }}</span>
-              </button>
-            </div>
-          </div>
-          <h2 v-else class="dialog-heading" tabindex="-1" autofocus>
-            {{ utilityTitles[utility] }}
-          </h2>
-          <div class="inline-actions">
-            <button
-              v-if="
-                utility === 'accounts' &&
-                selectedAccount &&
-                !loginSetup &&
-                !challenge
-              "
-              class="icon-button"
-              :disabled="busy"
-              aria-label="刷新账户与皮肤"
-              title="刷新账户与皮肤"
-              @click="action('刷新账户', 'refresh_account')"
-            >
-              <RefreshCw :size="18" />
-            </button>
-            <button
-              v-if="utility === 'downloads'"
-              class="button"
-              @click="
-                showLogs = true;
-                utility = null;
-              "
-            >
-              <Terminal :size="16" />日志
-            </button>
-            <button
-              class="icon-button"
-              aria-label="关闭面板"
-              @click="utility = null"
-            >
-              <X :size="16" />
-            </button>
-          </div>
-        </header>
-        <div v-if="error && !modal" class="error-banner" role="alert">
-          <CircleAlert :size="16" />
-          <p>{{ error }}</p>
-          <button
-            class="icon-button"
-            aria-label="关闭错误提示"
-            @click="error = ''"
-          >
-            <X :size="16" />
-          </button>
-        </div>
-        <div class="utility-panel-content">
-          <div v-if="utility === 'accounts'" class="page-inner">
-            <form
-              v-if="loginSetup"
-              class="login-setup"
-              @submit.prevent="saveLoginConfiguration"
-            >
-              <p class="login-explanation">
-                此开发版本还需要配置微软登录应用。Client ID
-                是启动器的公开应用编号，由开发者注册提供。
-              </p>
-              <label class="field"
-                >应用 ID（Client ID）
-                <input
-                  v-model="loginClientId"
-                  required
-                  :disabled="busy"
-                  placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-                  spellcheck="false"
-                  autocomplete="off"
-                />
-              </label>
-              <div class="login-setup-actions">
-                <button
-                  type="button"
-                  class="text-button"
-                  @click="
-                    openLink(
-                      'https://learn.microsoft.com/entra/identity-platform/v2-oauth2-device-code',
-                    )
-                  "
-                >
-                  注册说明 <ExternalLink :size="14" />
-                </button>
-                <span class="grow" />
-                <button
-                  type="button"
-                  class="button"
-                  :disabled="busy"
-                  @click="loginSetup = false"
-                >
-                  取消
-                </button>
-                <button
-                  type="submit"
-                  class="button primary"
-                  :disabled="busy || !loginClientId.trim()"
-                >
-                  保存并登录
-                </button>
-              </div>
-            </form>
-            <div v-else-if="challenge" class="panel login-panel">
-              <h3>完成微软授权</h3>
-              <p>
-                在微软页面输入验证码，有效期约
-                {{ Math.ceil(challenge.expires_in / 60) }} 分钟。
-              </p>
-              <button
-                class="device-code"
-                title="复制验证码"
-                @click="copy(challenge.user_code)"
-              >
-                {{ challenge.user_code }}<Copy :size="16" />
-              </button>
-              <div class="inline-actions">
-                <button
-                  class="button primary"
-                  @click="openLink(challenge.verification_uri)"
-                >
-                  打开登录页 <ExternalLink :size="16" /></button
-                ><button class="button" @click="cancel">取消登录</button>
-              </div>
-              <button
-                class="text-button login-address"
-                title="复制登录地址"
-                @click="copy(challenge.verification_uri)"
-              >
-                {{ challenge.verification_uri }} <Copy :size="14" />
-              </button>
-              <p class="waiting">
-                <LoaderCircle :size="16" class="spin" />等待授权…
-              </p>
-            </div>
-            <template v-else>
-              <div
-                class="account-picker"
-                role="group"
-                aria-label="选择启动账户"
-              >
-                <div
-                  v-for="account in snapshot.database.accounts"
-                  :key="account.id"
-                  class="account-choice"
-                >
-                  <button
-                    class="account-select"
-                    :class="{
-                      current:
-                        account.id === snapshot.database.selected_account,
-                    }"
-                    :disabled="busy"
-                    :aria-pressed="
-                      account.id === snapshot.database.selected_account
-                    "
-                    :aria-label="`使用 ${account.username} 启动游戏`"
-                    :title="account.username"
-                    @click="chooseAccount(account)"
-                  >
-                    <span class="account-avatar-frame">
-                      <AccountAvatar
-                        :account="account"
-                        :preview="
-                          account.id === selectedAccount?.id
-                            ? avatar
-                            : undefined
-                        "
-                        :load-texture="fetchAccountSkin"
-                      />
-                      <span
-                        v-if="account.id === snapshot.database.selected_account"
-                        class="account-selected-mark"
-                        aria-label="当前账户"
-                        ><Check :size="12"
-                      /></span>
-                    </span>
-                    <span class="account-name">{{ account.username }}</span>
-                  </button>
-                  <button
-                    class="icon-button account-remove"
-                    :disabled="busy"
-                    :aria-label="`移除账户 ${account.username}`"
-                    title="移除账户"
-                    @click="
-                      action('移除账户', 'remove_account', { id: account.id })
-                    "
-                  >
-                    <X :size="14" />
-                  </button>
-                </div>
-                <button
-                  class="account-add"
-                  :disabled="busy"
-                  aria-label="添加微软账户"
-                  title="添加微软账户"
-                  @click="login"
-                >
-                  <span class="account-add-icon"><Plus :size="24" /></span>
-                </button>
-              </div>
-              <button
-                v-if="error"
-                class="text-button"
-                :disabled="busy"
-                @click="configureLogin"
-              >
-                配置登录应用
-              </button>
-            </template>
-          </div>
-
-          <div v-if="utility === 'downloads'" class="page-inner">
-            <div class="section-heading">
-              <h2>
-                任务 <span>{{ tasks.length }}</span>
-              </h2>
-              <button class="text-button" @click="utility = 'settings'">
-                下载设置 <ChevronRight :size="16" />
-              </button>
-            </div>
-            <div v-if="!tasks.length" class="empty-state compact">
-              <p>暂无下载任务</p>
-            </div>
-            <div v-for="task in tasks" :key="task.id" class="panel task-row">
-              <span :class="['task-icon', task.status]"
-                ><LoaderCircle
-                  v-if="task.status === 'running'"
-                  class="spin"
-                  :size="16" /><Check
-                  v-else-if="task.status === 'done'"
-                  :size="16" /><CircleAlert v-else :size="16"
-              /></span>
-              <div class="grow">
-                <div class="task-title">
-                  <strong>{{ task.title }}</strong
-                  ><time>{{ task.started }}</time>
-                </div>
-                <p>{{ task.message }}</p>
-                <div
-                  v-if="task.status === 'running'"
-                  :class="[
-                    'progress-track',
-                    { indeterminate: task.indeterminate },
-                  ]"
-                  role="progressbar"
-                  :aria-valuenow="
-                    task.indeterminate ? undefined : task.progress
-                  "
-                  aria-valuemin="0"
-                  aria-valuemax="100"
-                  :aria-label="task.title"
-                >
-                  <i
-                    :style="
-                      task.indeterminate ? {} : { width: `${task.progress}%` }
-                    "
-                  />
-                </div>
-              </div>
-              <button
-                v-if="task.status === 'running' && task.cancellable"
-                class="button"
-                @click="cancel"
-              >
-                取消</button
-              ><span v-else class="task-state">{{
-                {
-                  done: "已完成",
-                  error: "失败",
-                  cancelled: "已取消",
-                  running: "进行中",
-                }[task.status]
-              }}</span>
-            </div>
-          </div>
-
-          <form
-            v-if="utility === 'settings'"
-            id="global-settings-form"
-            class="page-inner settings-form"
-            @submit.prevent="saveSettings"
-          >
-            <div class="settings-fields">
-              <div class="field settings-source-field">
-                <label id="download-source-label" for="download-source-trigger"
-                  >下载源</label
-                >
-                <DownloadSourceSelect
-                  v-model="settings.download_source"
-                  :disabled="busy"
-                />
-              </div>
-              <label class="field"
-                >并发下载
-                <input
-                  v-model.number="settings.concurrency"
-                  type="number"
-                  min="1"
-                  max="32"
-                  step="1"
-                  required
-                  :disabled="busy"
-                />
-              </label>
-              <label class="field"
-                >失败重试
-                <input
-                  v-model.number="settings.retries"
-                  type="number"
-                  min="0"
-                  max="5"
-                  step="1"
-                  required
-                  :disabled="busy"
-                />
-              </label>
-            </div>
-            <label
-              class="toggle-row settings-java-toggle"
-              title="缺少 Java 时，通过 Eclipse Adoptium 下载并校验"
-            >
-              <span>自动安装 Java</span>
-              <input
-                v-model="settings.auto_java"
-                type="checkbox"
-                role="switch"
-                :disabled="busy"
-              />
-            </label>
-            <div
-              v-if="javaList.length"
-              class="settings-java-list"
-              aria-label="检测到的 Java"
-            >
-              <div v-for="java in javaList" :key="java.path" class="java-row">
-                <strong>Java {{ java.major }}</strong
-                ><code :title="java.path">{{ java.path }}</code>
-              </div>
-            </div>
-          </form>
-        </div>
-        <footer v-if="utility === 'settings'" class="modal-actions">
-          <div class="settings-maintenance-actions">
-            <button
-              type="button"
-              class="text-button"
-              :disabled="busy"
-              @click="inspectJava"
-            >
-              <Search :size="16" />检测 Java
-            </button>
-            <button
-              type="button"
-              class="text-button"
-              @click="utility = 'downloads'"
-            >
-              下载记录
-            </button>
-          </div>
-          <button type="button" class="button" @click="utility = null">
-            取消
-          </button>
-          <button
-            type="submit"
-            form="global-settings-form"
-            class="button primary"
-            :disabled="busy"
-          >
-            保存
-          </button>
-        </footer>
-      </section>
-    </GlassDialog>
-    <GlassDialog
-      :notice="notice"
-      v-if="showLogs"
-      label="运行日志"
-      @close="showLogs = false"
-    >
-      <section class="log-panel glass-surface" aria-label="运行日志">
-        <header>
-          <h2 class="dialog-heading" tabindex="-1" autofocus>
-            <Terminal :size="16" />运行日志 <small>{{ logs.length }} 条</small>
-          </h2>
-          <div class="inline-actions">
-            <button
-              class="icon-button"
-              aria-label="复制日志"
-              @click="
-                copy(logs.map((l) => `[${l.time}] ${l.message}`).join('\n'))
-              "
-            >
-              <Copy :size="16" /></button
-            ><button
-              class="icon-button"
-              aria-label="清空日志"
-              @click="logs = []"
-            >
-              <Trash2 :size="16" /></button
-            ><button
-              class="icon-button"
-              aria-label="关闭日志"
-              @click="showLogs = false"
-            >
-              <X :size="16" />
-            </button>
-          </div>
-        </header>
-        <div class="log-content">
-          <p v-if="!logs.length" class="muted">暂无运行日志。</p>
-          <p
-            v-for="(line, index) in logs"
-            :key="index"
-            :class="{ error: line.kind === 'error' }"
-          >
-            <time>{{ line.time }}</time
-            ><span>{{ line.message }}</span>
-          </p>
-        </div>
-      </section>
-    </GlassDialog>
-
-    <Transition name="toast"
-      ><div v-if="notice" class="toast glass-surface" role="status">
-        <CheckCircle2 :size="16" />{{ notice }}
-      </div></Transition
-    >
-    <GlassDialog
-      :notice="notice"
-      v-if="modal"
-      :label="modal === 'edit' ? form.name : modalTitles[modal]"
-      :locked="busy"
-      @close="modal = null"
-    >
-      <section
-        class="modal glass-surface"
-        :class="{ 'instance-settings': modal === 'edit' }"
-      >
-        <div class="modal-header">
-          <InstanceHeader
-            v-if="modal === 'edit'"
-            ref="instanceHeader"
-            v-model:name="form.name"
-            v-model:icon="form.icon"
-            :directory="editingDirectory"
-            :directory-loading="directoryLoading"
-            :disabled="busy"
-            @open-directory="editing && openFolder(editing.id)"
-          />
-          <h2 v-else class="dialog-heading" tabindex="-1" autofocus>
-            {{ modalTitles[modal] }}
-          </h2>
-          <button
-            class="icon-button"
-            :disabled="busy"
-            aria-label="关闭对话框"
-            @click="modal = null"
-          >
-            <X :size="16" />
-          </button>
-        </div>
-        <div v-if="error" class="error-banner" role="alert">
-          <CircleAlert :size="16" />
-          <p>{{ error }}</p>
-        </div>
-        <template v-if="modal === 'delete'"
-          ><p class="delete-message">
-            「{{ editing?.name }}」将移至回收目录，游戏文件会保留。
-          </p>
-          <div class="modal-actions">
-            <button class="button" @click="modal = 'edit'">取消</button
-            ><button
-              class="button destructive"
-              :disabled="busy"
-              @click="
-                action('移除实例', 'delete', { id: editing?.id }).then(
-                  (result) => {
-                    if (result) modal = null;
-                  },
-                )
-              "
-            >
-              移除实例
-            </button>
-          </div></template
+        <section
+          class="utility-panel glass-surface"
+          :class="{
+            'account-panel': utility === 'accounts',
+            'global-settings': utility === 'settings',
+          }"
         >
-        <form v-else @submit.prevent="submit">
-          <div class="modal-fields">
-            <div v-if="modal === 'version'" class="download-destination">
-              <span
-                >安装到 <strong>{{ editing?.name }}</strong></span
-              >
+          <header class="utility-panel-header">
+            <div
+              v-if="utility === 'settings'"
+              class="settings-tabs dialog-heading"
+              role="tablist"
+              :aria-label="t('设置分类')"
+              tabindex="-1"
+              autofocus
+            >
               <button
+                v-for="(tab, index) in settingsTabs"
+                :id="`settings-tab-${tab.id}`"
+                :key="tab.id"
                 type="button"
+                role="tab"
+                class="settings-tab"
+                :aria-selected="settingsTab === tab.id"
+                :aria-controls="`settings-panel-${tab.id}`"
+                :tabindex="settingsTab === tab.id ? 0 : -1"
+                @click="settingsTab = tab.id"
+                @keydown="navigateSettingsTabs($event, index)"
+              >
+                {{ t(tab.label) }}
+              </button>
+            </div>
+            <h2 v-else class="dialog-heading" tabindex="-1" autofocus>
+              {{ t(utilityTitles[utility]) }}
+            </h2>
+            <div class="inline-actions">
+              <button
+                v-if="
+                  utility === 'accounts' &&
+                  selectedAccount &&
+                  !loginSetup &&
+                  !challenge
+                "
                 class="icon-button"
                 :disabled="busy"
-                aria-label="更新版本列表"
-                title="更新版本列表"
-                @click="loadVersions"
+                :aria-label="t('刷新账户与皮肤')"
+                :title="t('刷新账户与皮肤')"
+                @click="action('刷新账户', 'refresh_account')"
               >
                 <RefreshCw :size="18" />
               </button>
+              <button
+                v-if="utility === 'downloads'"
+                class="button"
+                @click="
+                  showLogs = true;
+                  utility = null;
+                "
+              >
+                <Terminal :size="16" /> {{ t("日志") }}
+              </button>
+              <button
+                class="icon-button"
+                :aria-label="t('关闭面板')"
+                @click="utility = null"
+              >
+                <X :size="16" />
+              </button>
             </div>
-            <label v-if="modal === 'create' || modal === 'import'" class="field"
-              >实例名称<input
-                v-model="form.name"
-                placeholder="例如：日常游戏"
-                required
-                maxlength="80" /></label
-            ><label v-if="modal === 'version'" class="field"
-              >Minecraft 版本<input
-                v-model="form.version"
-                list="versions"
-                placeholder="1.21.1"
-                required
-              /><datalist id="versions">
-                <option
-                  v-for="version in manifest?.versions"
-                  :key="version.id"
-                  :value="version.id"
-                >
-                  {{ version.type }}
-                </option></datalist
-              ><small v-if="modal === 'version'"
-                >支持原版 Java 1.13+，Apple Silicon 使用 1.19+。</small
-              ></label
+          </header>
+          <div v-if="error && !modal" class="error-banner" role="alert">
+            <CircleAlert :size="16" />
+            <p>{{ translateMessage(error) }}</p>
+            <button
+              class="icon-button"
+              :aria-label="t('关闭错误提示')"
+              @click="error = ''"
             >
-            <label v-if="modal === 'import'" class="field"
-              >来源目录
-              <div class="input-action">
-                <input
-                  v-model="form.source"
-                  required
-                  placeholder="~/.minecraft 或游戏目录"
-                /><button
-                  type="button"
-                  class="button"
-                  :disabled="directoryPicking || busy"
-                  @click="chooseDirectory"
+              <X :size="16" />
+            </button>
+          </div>
+          <div class="utility-panel-content">
+            <div v-if="utility === 'accounts'" class="page-inner">
+              <form
+                v-if="loginSetup"
+                class="login-setup"
+                @submit.prevent="saveLoginConfiguration"
+              >
+                <p class="login-explanation">
+                  {{
+                    t(
+                      "此开发版本还需要配置微软登录应用。Client ID 是启动器的公开应用编号，由开发者注册提供。",
+                    )
+                  }}
+                </p>
+                <label class="field">
+                  {{ t("应用 ID（Client ID）") }}
+                  <input
+                    v-model="loginClientId"
+                    required
+                    :disabled="busy"
+                    placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+                    spellcheck="false"
+                    autocomplete="off"
+                  />
+                </label>
+                <div class="login-setup-actions">
+                  <button
+                    type="button"
+                    class="text-button"
+                    @click="
+                      openLink(
+                        'https://learn.microsoft.com/entra/identity-platform/v2-oauth2-device-code',
+                      )
+                    "
+                  >
+                    {{ t("注册说明") }} <ExternalLink :size="14" />
+                  </button>
+                  <span class="grow" />
+                  <button
+                    type="button"
+                    class="button"
+                    :disabled="busy"
+                    @click="loginSetup = false"
+                  >
+                    {{ t("取消") }}
+                  </button>
+                  <button
+                    type="submit"
+                    class="button primary"
+                    :disabled="busy || !loginClientId.trim()"
+                  >
+                    {{ t("保存并登录") }}
+                  </button>
+                </div>
+              </form>
+              <div v-else-if="challenge" class="panel login-panel">
+                <h3>{{ t("完成微软授权") }}</h3>
+                <p>
+                  {{
+                    t("在微软页面输入验证码，有效期约 {minutes} 分钟。", {
+                      minutes: Math.ceil(challenge.expires_in / 60),
+                    })
+                  }}
+                </p>
+                <button
+                  class="device-code"
+                  :title="t('复制验证码')"
+                  @click="copy(challenge.user_code)"
                 >
-                  <FolderOpen :size="16" />浏览
+                  {{ challenge.user_code }}<Copy :size="16" />
+                </button>
+                <div class="inline-actions">
+                  <button
+                    class="button primary"
+                    @click="openLink(challenge.verification_uri)"
+                  >
+                    {{ t("打开登录页") }} <ExternalLink :size="16" /></button
+                  ><button class="button" @click="cancel">
+                    {{ t("取消登录") }}
+                  </button>
+                </div>
+                <button
+                  class="text-button login-address"
+                  :title="t('复制登录地址')"
+                  @click="copy(challenge.verification_uri)"
+                >
+                  {{ challenge.verification_uri }} <Copy :size="14" />
+                </button>
+                <p class="waiting">
+                  <LoaderCircle :size="16" class="spin" /> {{ t("等待授权…") }}
+                </p>
+              </div>
+              <template v-else>
+                <div
+                  class="account-picker"
+                  role="group"
+                  :aria-label="t('选择启动账户')"
+                >
+                  <div
+                    v-for="account in snapshot.database.accounts"
+                    :key="account.id"
+                    class="account-choice"
+                  >
+                    <button
+                      class="account-select"
+                      :class="{
+                        current:
+                          account.id === snapshot.database.selected_account,
+                      }"
+                      :disabled="busy"
+                      :aria-pressed="
+                        account.id === snapshot.database.selected_account
+                      "
+                      :aria-label="
+                        t('使用 {name} 启动游戏', { name: account.username })
+                      "
+                      :title="account.username"
+                      @click="chooseAccount(account)"
+                    >
+                      <span class="account-avatar-frame">
+                        <AccountAvatar
+                          :account="account"
+                          :preview="
+                            account.id === selectedAccount?.id
+                              ? avatar
+                              : undefined
+                          "
+                          :load-texture="fetchAccountSkin"
+                        />
+                        <span
+                          v-if="
+                            account.id === snapshot.database.selected_account
+                          "
+                          class="account-selected-mark"
+                          :aria-label="t('当前账户')"
+                          ><Check :size="12"
+                        /></span>
+                      </span>
+                      <span class="account-name">{{ account.username }}</span>
+                    </button>
+                    <button
+                      class="icon-button account-remove"
+                      :disabled="busy"
+                      :aria-label="
+                        t('移除账户 {name}', { name: account.username })
+                      "
+                      :title="t('移除账户')"
+                      @click="
+                        action('移除账户', 'remove_account', { id: account.id })
+                      "
+                    >
+                      <X :size="14" />
+                    </button>
+                  </div>
+                  <button
+                    class="account-add"
+                    :disabled="busy"
+                    :aria-label="t('添加微软账户')"
+                    :title="t('添加微软账户')"
+                    @click="login"
+                  >
+                    <span class="account-add-icon"><Plus :size="24" /></span>
+                  </button>
+                </div>
+                <button
+                  v-if="error"
+                  class="text-button"
+                  :disabled="busy"
+                  @click="configureLogin"
+                >
+                  {{ t("配置登录应用") }}
+                </button>
+              </template>
+            </div>
+
+            <div v-if="utility === 'downloads'" class="page-inner">
+              <div class="section-heading">
+                <h2>
+                  {{ t("任务") }} <span>{{ tasks.length }}</span>
+                </h2>
+                <button class="text-button" @click="utility = 'settings'">
+                  {{ t("下载设置") }} <ChevronRight :size="16" />
                 </button>
               </div>
-              <small>保留源目录，仅复制游戏文件。原型不加载模组。</small></label
-            >
-            <template v-if="modal === 'edit'"
-              ><label class="field"
-                >最大内存
-                <div class="memory-input">
-                  <input
-                    v-model.number="form.memory_mb"
-                    type="number"
-                    min="512"
-                    max="65536"
-                    step="256"
-                    required
-                  /><span>MiB</span>
-                </div></label
-              ><label class="field instance-java"
-                >Java 可执行文件
-                <div class="input-action">
-                  <input
-                    v-model="form.java_path"
-                    placeholder="留空自动匹配"
-                  /><button
-                    type="button"
-                    class="icon-button"
-                    :disabled="busy"
-                    aria-label="选择 Java 可执行文件"
-                    title="选择 Java 可执行文件"
-                    @click="chooseJava"
+              <div v-if="!tasks.length" class="empty-state compact">
+                <p>{{ t("暂无下载任务") }}</p>
+              </div>
+              <div v-for="task in tasks" :key="task.id" class="panel task-row">
+                <span :class="['task-icon', task.status]"
+                  ><LoaderCircle
+                    v-if="task.status === 'running'"
+                    class="spin"
+                    :size="16" /><Check
+                    v-else-if="task.status === 'done'"
+                    :size="16" /><CircleAlert v-else :size="16"
+                /></span>
+                <div class="grow">
+                  <div class="task-title">
+                    <strong>{{ t(task.title) }}</strong
+                    ><time>{{ task.started }}</time>
+                  </div>
+                  <p>{{ translateMessage(task.message) }}</p>
+                  <div
+                    v-if="task.status === 'running'"
+                    :class="[
+                      'progress-track',
+                      { indeterminate: task.indeterminate },
+                    ]"
+                    role="progressbar"
+                    :aria-valuenow="
+                      task.indeterminate ? undefined : task.progress
+                    "
+                    aria-valuemin="0"
+                    aria-valuemax="100"
+                    :aria-label="t(task.title)"
                   >
-                    <FolderOpen :size="18" />
-                  </button></div
-              ></label>
-            </template>
+                    <i
+                      :style="
+                        task.indeterminate ? {} : { width: `${task.progress}%` }
+                      "
+                    />
+                  </div>
+                </div>
+                <button
+                  v-if="task.status === 'running' && task.cancellable"
+                  class="button"
+                  @click="cancel"
+                >
+                  {{ t("取消") }}</button
+                ><span v-else class="task-state">{{
+                  {
+                    done: t("已完成"),
+                    error: t("失败"),
+                    cancelled: t("已取消"),
+                    running: t("进行中"),
+                  }[task.status]
+                }}</span>
+              </div>
+            </div>
+
+            <form
+              v-if="utility === 'settings'"
+              id="global-settings-form"
+              class="page-inner settings-form"
+              novalidate
+              @submit.prevent="saveSettings"
+            >
+              <div class="settings-pages">
+                <Transition
+                  name="settings-page"
+                  mode="out-in"
+                  @after-enter="focusSettingsField"
+                >
+                  <div
+                    v-if="settingsTab === 'general'"
+                    key="general"
+                    id="settings-panel-general"
+                    class="settings-page"
+                    role="tabpanel"
+                    aria-labelledby="settings-tab-general"
+                  >
+                    <div class="settings-language">
+                      <div class="field">
+                        <label id="language-label" for="language-trigger">{{
+                          t("语言")
+                        }}</label>
+                        <GlassSelect
+                          id="language"
+                          v-model="settings.language"
+                          :options="languages"
+                          :disabled="settingsSaving"
+                        />
+                      </div>
+                      <div class="toggle-row settings-language-sync">
+                        <span id="game-language-label">{{
+                          t("游戏启动时跟随")
+                        }}</span>
+                        <input
+                          v-model="settings.apply_language_to_game"
+                          type="checkbox"
+                          role="switch"
+                          aria-labelledby="game-language-label"
+                          :disabled="settingsSaving"
+                        />
+                      </div>
+                    </div>
+                    <div class="settings-preference settings-update">
+                      <div class="field settings-version">
+                        <span>{{ t("启动器版本") }}</span>
+                        <strong>v{{ launcherVersion }}</strong>
+                      </div>
+                      <span
+                        v-if="updateChecking"
+                        class="settings-update-state"
+                        role="status"
+                        ><LoaderCircle :size="14" class="spin" />
+                        {{ t("正在检查更新") }}
+                      </span>
+                      <button
+                        v-else-if="updateError"
+                        type="button"
+                        class="text-button"
+                        :title="translateMessage(updateError)"
+                        @click="checkLauncherUpdate"
+                      >
+                        {{ t("检查失败，点击重试") }}
+                      </button>
+                      <span
+                        v-else-if="updateStatus && !updateStatus.available"
+                        class="settings-update-state"
+                        role="status"
+                      >
+                        {{ t("你已经是最新版") }}
+                      </span>
+                      <button
+                        v-else-if="updateStatus?.available"
+                        type="button"
+                        class="text-button"
+                        @click="openLink(updateStatus.download_url)"
+                      >
+                        {{
+                          t("最新版为 {version} · 点击更新", {
+                            version: updateStatus.latest_version,
+                          })
+                        }}
+                      </button>
+                    </div>
+                    <button
+                      type="button"
+                      class="settings-directory"
+                      :disabled="!snapshot.root"
+                      :title="snapshot.root"
+                      :aria-label="t('打开启动器数据目录')"
+                      @click="openFolder()"
+                    >
+                      <FolderOpen :size="20" />
+                      <span>
+                        <strong> {{ t("启动器目录") }} </strong>
+                        <small>{{
+                          snapshot.root || t("使用系统应用数据目录")
+                        }}</small>
+                      </span>
+                      <ExternalLink :size="15" />
+                    </button>
+                  </div>
+                  <div
+                    v-else
+                    key="network"
+                    id="settings-panel-network"
+                    class="settings-page settings-fields"
+                    role="tabpanel"
+                    aria-labelledby="settings-tab-network"
+                  >
+                    <div class="field settings-source-field">
+                      <label
+                        id="download-source-label"
+                        for="download-source-trigger"
+                      >
+                        {{ t("下载源") }}
+                      </label>
+                      <DownloadSourceSelect
+                        v-model="settings.download_source"
+                        :disabled="settingsSaving"
+                      />
+                    </div>
+                    <label class="field">
+                      {{ t("并发下载") }}
+                      <input
+                        id="settings-concurrency"
+                        v-model.number="settings.concurrency"
+                        type="number"
+                        min="1"
+                        max="32"
+                        step="1"
+                        required
+                        :disabled="settingsSaving"
+                      />
+                    </label>
+                    <label class="field">
+                      {{ t("失败重试") }}
+                      <input
+                        id="settings-retries"
+                        v-model.number="settings.retries"
+                        type="number"
+                        min="0"
+                        max="5"
+                        step="1"
+                        required
+                        :disabled="settingsSaving"
+                      />
+                    </label>
+                  </div>
+                </Transition>
+              </div>
+            </form>
           </div>
-          <div class="modal-actions">
-            <div v-if="modal === 'edit'" class="instance-maintenance-actions">
+          <footer v-if="utility === 'settings'" class="modal-actions">
+            <button type="button" class="button" @click="utility = null">
+              {{ t("取消") }}
+            </button>
+            <button
+              type="submit"
+              form="global-settings-form"
+              class="button primary"
+              :disabled="settingsSaving"
+            >
+              {{ t("保存") }}
+            </button>
+          </footer>
+        </section>
+      </GlassDialog>
+    </Transition>
+    <Transition
+      name="dialog"
+      appear
+      @before-leave="prepareDialogLeave"
+      @after-leave="finishDialogLeave"
+    >
+      <GlassDialog
+        :notice="translateMessage(notice)"
+        v-if="showLogs"
+        :label="t('运行日志')"
+        @close="showLogs = false"
+      >
+        <section class="log-panel glass-surface" :aria-label="t('运行日志')">
+          <header>
+            <h2 class="dialog-heading" tabindex="-1" autofocus>
+              <Terminal :size="16" /> {{ t("运行日志") }}
+              <small>{{ t("{count} 条", { count: logs.length }) }} </small>
+            </h2>
+            <div class="inline-actions">
               <button
-                type="button"
-                class="text-button"
-                :disabled="busy || !editing?.selected_version"
-                @click="editing && install(editing)"
+                class="icon-button"
+                :aria-label="t('复制日志')"
+                @click="
+                  copy(logs.map((l) => `[${l.time}] ${l.message}`).join('\n'))
+                "
               >
-                <RefreshCw :size="16" />校验修复
-              </button>
-              <button
-                type="button"
-                class="text-button danger"
-                :disabled="busy"
-                @click="modal = 'delete'"
+                <Copy :size="16" /></button
+              ><button
+                class="icon-button"
+                :aria-label="t('清空日志')"
+                @click="logs = []"
               >
-                <Trash2 :size="16" />移除实例
+                <Trash2 :size="16" /></button
+              ><button
+                class="icon-button"
+                :aria-label="t('关闭日志')"
+                @click="showLogs = false"
+              >
+                <X :size="16" />
               </button>
             </div>
-            <button
-              v-if="modal === 'create'"
-              type="button"
-              class="text-button import-link"
-              :disabled="busy"
-              @click="newInstance(true)"
+          </header>
+          <div class="log-content">
+            <p v-if="!logs.length" class="muted">{{ t("暂无运行日志。") }}</p>
+            <p
+              v-for="(line, index) in logs"
+              :key="index"
+              :class="{ error: line.kind === 'error' }"
             >
-              导入已有目录
-            </button>
-            <button
-              type="button"
-              class="button"
+              <time>{{ line.time }}</time
+              ><span>{{
+                line.kind === "log"
+                  ? line.message
+                  : translateMessage(line.message)
+              }}</span>
+            </p>
+          </div>
+        </section>
+      </GlassDialog>
+    </Transition>
+
+    <Transition name="toast"
+      ><div v-if="notice" class="toast glass-surface" role="status">
+        <CheckCircle2 :size="16" />{{ translateMessage(notice) }}
+      </div></Transition
+    >
+    <Transition
+      name="dialog"
+      appear
+      @before-leave="prepareDialogLeave"
+      @after-leave="finishDialogLeave"
+    >
+      <GlassDialog
+        :notice="translateMessage(notice)"
+        v-if="modal"
+        :label="modal === 'edit' ? form.name : t(modalTitles[modal])"
+        :locked="busy"
+        @close="modal = null"
+      >
+        <section
+          class="modal glass-surface"
+          :class="{ 'instance-settings': modal === 'edit' }"
+        >
+          <div class="modal-header">
+            <InstanceHeader
+              v-if="modal === 'edit'"
+              ref="instanceHeader"
+              v-model:name="form.name"
+              v-model:icon="form.icon"
+              :directory="editingDirectory"
+              :directory-loading="directoryLoading"
               :disabled="busy"
+              @open-directory="editing && openFolder(editing.id)"
+            />
+            <h2 v-else class="dialog-heading" tabindex="-1" autofocus>
+              {{ t(modalTitles[modal]) }}
+            </h2>
+            <button
+              class="icon-button"
+              :disabled="busy"
+              :aria-label="t('关闭对话框')"
               @click="modal = null"
             >
-              取消</button
-            ><button type="submit" class="button primary" :disabled="busy">
-              <LoaderCircle v-if="busy" class="spin" :size="16" />{{
-                modal === "edit"
-                  ? "保存"
-                  : modal === "import"
-                    ? "导入"
-                    : modal === "version"
-                      ? "下载并安装"
-                      : "创建实例"
-              }}
+              <X :size="16" />
             </button>
           </div>
-        </form>
-      </section>
-    </GlassDialog>
+          <div v-if="error" class="error-banner" role="alert">
+            <CircleAlert :size="16" />
+            <p>{{ translateMessage(error) }}</p>
+          </div>
+          <template v-if="modal === 'delete'"
+            ><p class="delete-message">
+              {{
+                editing?.game_directory
+                  ? t("仅从列表移除「{name}」，原目录和游戏文件保留在原处。", {
+                      name: editing.name,
+                    })
+                  : t("「{name}」将移至回收目录，游戏文件会保留。", {
+                      name: editing?.name || "",
+                    })
+              }}
+            </p>
+            <div class="modal-actions">
+              <button class="button" @click="modal = 'edit'">
+                {{ t("取消") }}</button
+              ><button
+                class="button destructive"
+                :disabled="busy"
+                @click="
+                  action('移除实例', 'delete', { id: editing?.id }).then(
+                    (result) => {
+                      if (result) modal = null;
+                    },
+                  )
+                "
+              >
+                {{ t("移除实例") }}
+              </button>
+            </div></template
+          >
+          <form v-else @submit.prevent="submit">
+            <div class="modal-fields">
+              <div v-if="modal === 'version'" class="download-destination">
+                <span>
+                  {{ t("安装到") }} <strong>{{ editing?.name }}</strong></span
+                >
+                <button
+                  type="button"
+                  class="icon-button"
+                  :disabled="busy"
+                  :aria-label="t('更新版本列表')"
+                  :title="t('更新版本列表')"
+                  @click="loadVersions"
+                >
+                  <RefreshCw :size="18" />
+                </button>
+              </div>
+              <label
+                v-if="modal === 'create' || modal === 'import'"
+                class="field"
+              >
+                {{ t("实例名称") }}
+                <input
+                  v-model="form.name"
+                  :placeholder="t('例如：日常游戏')"
+                  required
+                  maxlength="80" /></label
+              ><label v-if="modal === 'version'" class="field">
+                {{ t("Minecraft 版本") }}
+                <input
+                  v-model="form.version"
+                  list="versions"
+                  placeholder="1.21.1"
+                  required
+                /><datalist id="versions">
+                  <option
+                    v-for="version in manifest?.versions"
+                    :key="version.id"
+                    :value="version.id"
+                  >
+                    {{ version.type }}
+                  </option></datalist
+                ><small v-if="modal === 'version'">
+                  {{ t("支持原版 Java 1.13+，Apple Silicon 使用 1.19+。") }}
+                </small></label
+              >
+              <label v-if="modal === 'import'" class="field">
+                {{ t("游戏目录") }}
+                <div class="input-action">
+                  <input
+                    v-model="form.source"
+                    required
+                    :placeholder="t('~/.minecraft 或游戏目录')"
+                  /><button
+                    type="button"
+                    class="button"
+                    :disabled="directoryPicking || busy"
+                    @click="chooseDirectory"
+                  >
+                    <FolderOpen :size="16" /> {{ t("浏览") }}
+                  </button>
+                </div>
+                <small>
+                  {{ t("直接使用原目录，不复制游戏文件。") }}
+                </small></label
+              >
+              <template v-if="modal === 'edit'"
+                ><label class="field">
+                  {{ t("最大内存") }}
+                  <div class="memory-input">
+                    <input
+                      v-model.number="form.memory_mb"
+                      type="number"
+                      min="512"
+                      max="65536"
+                      step="256"
+                      required
+                    /><span>MiB</span>
+                  </div></label
+                ><label class="field instance-java">
+                  {{ t("Java 可执行文件") }}
+                  <div class="input-action">
+                    <input
+                      v-model="form.java_path"
+                      :placeholder="t('留空自动匹配')"
+                    /><button
+                      type="button"
+                      class="icon-button"
+                      :disabled="busy"
+                      :aria-label="t('选择 Java 可执行文件')"
+                      :title="t('选择 Java 可执行文件')"
+                      @click="chooseJava"
+                    >
+                      <FolderOpen :size="18" />
+                    </button></div
+                ></label>
+              </template>
+            </div>
+            <div class="modal-actions">
+              <div v-if="modal === 'edit'" class="instance-maintenance-actions">
+                <button
+                  type="button"
+                  class="text-button"
+                  :disabled="busy || !editing?.selected_version"
+                  @click="editing && install(editing)"
+                >
+                  <RefreshCw :size="16" /> {{ t("校验修复") }}
+                </button>
+                <button
+                  type="button"
+                  class="text-button danger"
+                  :disabled="busy"
+                  @click="modal = 'delete'"
+                >
+                  <Trash2 :size="16" /> {{ t("移除实例") }}
+                </button>
+              </div>
+              <button
+                v-if="modal === 'create'"
+                type="button"
+                class="text-button import-link"
+                :disabled="busy"
+                @click="newInstance(true)"
+              >
+                {{ t("导入已有目录") }}
+              </button>
+              <button
+                type="button"
+                class="button"
+                :disabled="busy"
+                @click="modal = null"
+              >
+                {{ t("取消") }}</button
+              ><button type="submit" class="button primary" :disabled="busy">
+                <LoaderCircle v-if="busy" class="spin" :size="16" />{{
+                  modal === "edit"
+                    ? t("保存")
+                    : modal === "import"
+                      ? t("导入")
+                      : modal === "version"
+                        ? t("下载并安装")
+                        : t("创建实例")
+                }}
+              </button>
+            </div>
+          </form>
+        </section>
+      </GlassDialog>
+    </Transition>
   </div>
 </template>

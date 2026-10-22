@@ -9,6 +9,7 @@ import {
 } from "../hexFlow";
 
 import { createBackdropGraph } from "../flowGraph";
+import { createFlowPainter } from "../flowPainter";
 import { backdropForTheme } from "../backdropThemes";
 
 const props = defineProps<{ paused: boolean; theme: string }>();
@@ -28,10 +29,7 @@ const tiles = computed(() =>
 let flow: HexFlow | undefined;
 let paths: SVGPathElement[][] = [];
 let cellPaths: SVGPathElement[][] = [];
-let rendered = new Float32Array();
-let renderedWidths = new Float32Array();
-let renderedCellOpacity = new Float32Array();
-let renderedCellColor: string[] = [];
+let repaint: ReturnType<typeof createFlowPainter> | undefined;
 let frame = 0;
 let last = 0;
 let motionPreference: MediaQueryList | undefined;
@@ -43,45 +41,7 @@ function stop() {
   last = 0;
 }
 function paint() {
-  if (!flow) return;
-  const still = motionPreference?.matches;
-  paths.forEach((copies, index) => {
-    const intensity = still ? restingIntensity() : flow!.intensity[index]!;
-    const width = still ? restingWidth() : flow!.widths[index]!;
-    if (Math.abs(rendered[index]! - intensity) >= 0.003) {
-      for (const path of copies)
-        path.setAttribute("stroke-opacity", intensity.toFixed(3));
-      rendered[index] = intensity;
-    }
-    if (Math.abs(renderedWidths[index]! - width) >= 0.01) {
-      for (const path of copies)
-        path.setAttribute("stroke-width", width.toFixed(2));
-      renderedWidths[index] = width;
-    }
-  });
-  cellPaths.forEach((copies, index) => {
-    const cyan = flow!.dye[index * 3]!;
-    const blue = flow!.dye[index * 3 + 1]!;
-    const aqua = flow!.dye[index * 3 + 2]!;
-    const total = cyan + blue + aqua;
-    const opacity = still ? 0 : Math.min(0.54, total * 0.6);
-    if (Math.abs(renderedCellOpacity[index]! - opacity) >= 0.002) {
-      for (const path of copies)
-        path.setAttribute("fill-opacity", opacity.toFixed(3));
-      renderedCellOpacity[index] = opacity;
-    }
-    if (opacity < 0.002) return;
-    // Pigment concentrations mix theme colors, not overlaid translucent layers.
-    const cyanPercent = (Math.round((cyan / total) * 200) / 2).toFixed(1);
-    const bluePercent =
-      blue + aqua > 0
-        ? (Math.round((blue / (blue + aqua)) * 200) / 2).toFixed(1)
-        : "50";
-    const color = `color-mix(in srgb, var(--cyan) ${cyanPercent}%, color-mix(in srgb, var(--blue) ${bluePercent}%, var(--aqua)))`;
-    if (renderedCellColor[index] === color) return;
-    for (const path of copies) path.style.fill = color;
-    renderedCellColor[index] = color;
-  });
+  if (flow) repaint?.(flow, motionPreference?.matches);
 }
 function collectPaths() {
   paths = Array.from({ length: graph.edges.length }, () => []);
@@ -89,15 +49,12 @@ function collectPaths() {
     ".flow-edge",
   ) || [])
     paths[Number(path.dataset.edge)]!.push(path);
-  rendered = new Float32Array(graph.edges.length).fill(-1);
-  renderedWidths = new Float32Array(graph.edges.length).fill(-1);
   cellPaths = Array.from({ length: graph.cells.length }, () => []);
   for (const path of mesh.value?.querySelectorAll<SVGPathElement>(
     ".flow-cell",
   ) || [])
     cellPaths[Number(path.dataset.cell)]!.push(path);
-  renderedCellOpacity = new Float32Array(graph.cells.length).fill(-1);
-  renderedCellColor = Array.from({ length: graph.cells.length }, () => "");
+  repaint = createFlowPainter(paths, cellPaths);
   paint();
 }
 function tick(now: number) {

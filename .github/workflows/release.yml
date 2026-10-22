@@ -1,14 +1,14 @@
-name: Build and publish development release
+name: Build and publish preview release
 
 on:
   push:
-    tags: ["dev*"]
+    tags: ["dev*", "beta*"]
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing development tag to build
+        description: Existing preview tag to build
         required: true
-        default: dev0.1
+        default: beta0.2
         type: string
 
 permissions:
@@ -96,7 +96,7 @@ jobs:
           compression-level: 0
 
   publish:
-    name: Publish dev release
+    name: Publish preview release
     needs: build
     runs-on: ubuntu-22.04
     permissions:

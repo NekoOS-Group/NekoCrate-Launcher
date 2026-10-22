@@ -9,7 +9,7 @@ pub(crate) fn load_database(root: &Path, path: &Path) -> Result<Database> {
     }
     let mut value: serde_json::Value = storage::read_json(path)?;
     let schema = value.get("schema").and_then(|v| v.as_u64()).unwrap_or(1);
-    if schema != 1 && schema != 2 {
+    if !(1..=3).contains(&schema) {
         bail!("不支持的数据格式版本 {schema}");
     }
     if schema == 1 {
@@ -30,6 +30,13 @@ pub(crate) fn load_database(root: &Path, path: &Path) -> Result<Database> {
     // Validate all identifiers before using any of them as paths during migration.
     for instance in &db.instances {
         storage::safe_id(&instance.id)?;
+        if instance
+            .game_directory
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute())
+        {
+            bail!("实例 {} 的关联目录必须是绝对路径", instance.name);
+        }
         for version in &instance.versions {
             storage::safe_version(&version.id)?;
         }
@@ -85,6 +92,15 @@ pub(crate) fn load_database(root: &Path, path: &Path) -> Result<Database> {
                     && dest.join("natives").is_dir();
             }
         }
+    }
+    if schema < 3 {
+        // Older launchers must reject linked-directory databases rather than silently
+        // discarding their paths. Existing managed games remain exactly where they are.
+        let backup = root.join(format!("database.v{schema}.json"));
+        if !backup.exists() {
+            fs::copy(path, backup)?;
+        }
+        db.schema = 3;
         storage::write_json(path, &db)?;
     }
     Ok(db)
@@ -94,6 +110,65 @@ pub(crate) fn load_database(root: &Path, path: &Path) -> Result<Database> {
 mod tests {
     use super::*;
     use crate::Launcher;
+
+    #[test]
+    fn upgrades_schema_two_without_relocating_existing_copies() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let id = uuid::Uuid::new_v4().to_string();
+        let game = root.join("instances").join(&id).join(".minecraft");
+        fs::create_dir_all(game.join("saves/world")).unwrap();
+        fs::write(game.join("saves/world/level.dat"), b"existing-copy").unwrap();
+        let old = json!({"schema":2,"instances":[{
+            "id":id,"name":"旧版导入副本","icon":2,
+            "versions":[{"id":"1.21.1","installed":true}],"selected_version":"1.21.1",
+            "memory_mb":2048,"java_path":null,"created_at":1,"last_played":null
+        }]});
+        storage::write_json(&root.join("database.json"), &old).unwrap();
+        let launcher = Launcher::open(Some(root.into())).unwrap();
+        assert_eq!(launcher.snapshot().database.schema, 3);
+        assert_eq!(
+            launcher.game_dir(&id).unwrap(),
+            game.canonicalize().unwrap()
+        );
+        let instance = launcher.instance(&id).unwrap();
+        assert_eq!(instance.game_directory, None);
+        assert_eq!(instance.icon, Some(2));
+        assert!(instance.selected().unwrap().installed);
+        assert_eq!(
+            fs::read(game.join("saves/world/level.dat")).unwrap(),
+            b"existing-copy"
+        );
+        assert_eq!(
+            storage::read_json::<serde_json::Value>(&root.join("database.v2.json")).unwrap(),
+            old
+        );
+        drop(launcher);
+        let reopened = Launcher::open(Some(root.into())).unwrap();
+        assert_eq!(reopened.instance(&id).unwrap().game_directory, None);
+    }
+
+    #[test]
+    fn rejects_relative_linked_directory_without_mutating_database() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("database.json");
+        let invalid = json!({"schema":3,"instances":[{
+            "id":uuid::Uuid::new_v4().to_string(),"name":"错误路径",
+            "game_directory":"../outside","versions":[],"selected_version":null,
+            "memory_mb":2048,"java_path":null,"created_at":1,"last_played":null
+        }]});
+        storage::write_json(&file, &invalid).unwrap();
+        assert!(
+            load_database(temp.path(), &file)
+                .unwrap_err()
+                .to_string()
+                .contains("绝对路径")
+        );
+        assert_eq!(
+            storage::read_json::<serde_json::Value>(&file).unwrap(),
+            invalid
+        );
+    }
 
     #[test]
     fn upgrades_old_instance_without_losing_saves_or_installation() {
@@ -139,7 +214,7 @@ mod tests {
         );
         drop(launcher);
         let reopened = Launcher::open(Some(root.into())).unwrap();
-        assert_eq!(reopened.snapshot().database.schema, 2);
+        assert_eq!(reopened.snapshot().database.schema, 3);
         assert!(
             reopened
                 .instance(&id)

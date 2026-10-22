@@ -14,18 +14,18 @@ fn initial_directory(path: &str) -> Result<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
-pub async fn pick(app: &tauri::AppHandle, path: &str) -> Result<Option<PathBuf>> {
+pub async fn pick(app: &tauri::AppHandle, path: &str, english: bool) -> Result<Option<PathBuf>> {
     let directory = initial_directory(path)?;
     let (sender, receiver) = tokio::sync::oneshot::channel();
     app.run_on_main_thread(move || {
-        let result = objc2::rc::autoreleasepool(|_| pick_macos(&directory));
+        let result = objc2::rc::autoreleasepool(|_| pick_macos(&directory, english));
         let _ = sender.send(result);
     })?;
     receiver.await.context("目录选择窗口未返回结果")?
 }
 
 #[cfg(target_os = "macos")]
-fn pick_macos(directory: &Path) -> Result<Option<PathBuf>> {
+fn pick_macos(directory: &Path, english: bool) -> Result<Option<PathBuf>> {
     use objc2::MainThreadMarker;
     use objc2_app_kit::{NSModalResponseOK, NSOpenPanel};
     use objc2_foundation::{NSString, NSURL};
@@ -38,8 +38,16 @@ fn pick_macos(directory: &Path) -> Result<Option<PathBuf>> {
     panel.setCanCreateDirectories(false);
     // This panel only: do not change the user's Finder preferences.
     panel.setShowsHiddenFiles(true);
-    panel.setMessage(Some(&NSString::from_str("选择现有 Minecraft 游戏目录")));
-    panel.setPrompt(Some(&NSString::from_str("选择目录")));
+    panel.setMessage(Some(&NSString::from_str(if english {
+        "Choose an existing Minecraft game folder"
+    } else {
+        "选择现有 Minecraft 游戏目录"
+    })));
+    panel.setPrompt(Some(&NSString::from_str(if english {
+        "Choose folder"
+    } else {
+        "选择目录"
+    })));
     let initial =
         NSURL::fileURLWithPath_isDirectory(&NSString::from_str(&directory.to_string_lossy()), true);
     panel.setDirectoryURL(Some(&initial));
@@ -54,14 +62,18 @@ fn pick_macos(directory: &Path) -> Result<Option<PathBuf>> {
 }
 
 #[cfg(not(target_os = "macos"))]
-pub async fn pick(app: &tauri::AppHandle, path: &str) -> Result<Option<PathBuf>> {
+pub async fn pick(app: &tauri::AppHandle, path: &str, english: bool) -> Result<Option<PathBuf>> {
     use tauri_plugin_dialog::DialogExt;
 
     let directory = initial_directory(path)?;
     let (sender, receiver) = tokio::sync::oneshot::channel();
     app.dialog()
         .file()
-        .set_title("选择现有 Minecraft 游戏目录")
+        .set_title(if english {
+            "Choose an existing Minecraft game folder"
+        } else {
+            "选择现有 Minecraft 游戏目录"
+        })
         .set_directory(directory)
         .pick_folder(move |path| {
             let _ = sender.send(path);

@@ -39,6 +39,7 @@ enum Request {
     Snapshot,
     Versions,
     Java,
+    CheckUpdate,
     SaveSettings {
         settings: Settings,
     },
@@ -60,6 +61,10 @@ enum Request {
     },
     Delete {
         id: String,
+    },
+    MoveInstance {
+        id: String,
+        before_id: Option<String>,
     },
     Import {
         source: String,
@@ -124,13 +129,15 @@ async fn command(
             Request::Snapshot=>json!({"state":launcher.snapshot(),"manifest":launcher.cached_versions(),"busy":state.job.lock().unwrap().is_some()}),
             Request::Versions=>{let (cancel,_guard)=state.job().map_err(anyhow::Error::msg)?;json!(launcher.versions(&cancel).await?)},
             Request::Java=>json!(nekocrate_core::java::discover(launcher.root()).await),
+            Request::CheckUpdate=>json!(nekocrate_core::updates::check().await?),
             Request::SaveSettings{settings}=>{launcher.save_settings(settings)?;json!(true)},
             Request::Create{name,version}=>json!(launcher.create_instance(&name,&version)?),
             Request::Update{id,name,memory_mb,java_path,icon}=>{launcher.update_instance(&id,&name,memory_mb,java_path,icon)?;json!(true)},
             Request::Clone{id}=>{let (_cancel,_guard)=state.job().map_err(anyhow::Error::msg)?;json!(launcher.clone_instance(&id).await?)},
             Request::Delete{id}=>{launcher.delete_instance(&id)?;json!(true)},
+            Request::MoveInstance{id,before_id}=>{launcher.move_instance(&id,before_id.as_deref())?;json!(true)},
             Request::Import{source,name,version}=>{let (_cancel,_guard)=state.job().map_err(anyhow::Error::msg)?;json!(launcher.import_instance(PathBuf::from(source),name,version).await?)},
-            Request::PickImportDirectory{path}=>json!(import_picker::pick(&app,&path).await?),
+            Request::PickImportDirectory{path}=>json!(import_picker::pick(&app,&path,launcher.ui_language() == "en-US").await?),
             Request::AddVersion{id,version}=>json!(launcher.add_version(&id,&version)?),
             Request::SelectVersion{id,version}=>{launcher.select_version(&id,&version)?;json!(true)},
             Request::Install{id}=>{let (cancel,_guard)=state.job().map_err(anyhow::Error::msg)?;launcher.install(&id,&cancel,&sink).await?;json!(true)},

@@ -1,0 +1,84 @@
+{
+  "version": "Minecraft Java Edition 1.21.1",
+  "source": "https://piston-data.mojang.com/v1/objects/30c73b1c5da787909b2f73340419fdf13b9def88/client.jar",
+  "client_sha1": "30c73b1c5da787909b2f73340419fdf13b9def88",
+  "copyright": "Mojang Studios / Microsoft. Unmodified Minecraft game textures; not covered by this repository's code license.",
+  "usage": "Original textures projected onto three SVG cube faces. No game client code is included.",
+  "assets": [
+    {
+      "asset": "oak_planks.png",
+      "archive_entry": "assets/minecraft/textures/block/oak_planks.png",
+      "sha256": "3a33db67a3ba30537d0890a5cb37c8087ca336be89cbb1393a71c23224e361a8"
+    },
+    {
+      "asset": "cherry_planks.png",
+      "archive_entry": "assets/minecraft/textures/block/cherry_planks.png",
+      "sha256": "efbbc8ffdbe0d7803a2da0e350987d12390ad79c4eb375246d7115dcc904a436"
+    },
+    {
+      "asset": "bamboo_planks.png",
+      "archive_entry": "assets/minecraft/textures/block/bamboo_planks.png",
+      "sha256": "0fd66fc81a0e7ffe5fbbbb03a297e46255bde0abdc9eac348846bbc60f9a11bd"
+    },
+    {
+      "asset": "stone_bricks.png",
+      "archive_entry": "assets/minecraft/textures/block/stone_bricks.png",
+      "sha256": "33da66239c5586ee712ffa3fab45927cd7d4968cf111829d3049f84152d85953"
+    },
+    {
+      "asset": "deepslate_bricks.png",
+      "archive_entry": "assets/minecraft/textures/block/deepslate_bricks.png",
+      "sha256": "18bd891e8b1b9520005c6dd436560873faadcac113eeac6948499ca52a3f9a2a"
+    },
+    {
+      "asset": "sandstone.png",
+      "archive_entry": "assets/minecraft/textures/block/sandstone.png",
+      "sha256": "532e1da119576e3ca8a0983c173040fb3e932a935aba29aff79deb4c8a26fb1c"
+    },
+    {
+      "asset": "sandstone_top.png",
+      "archive_entry": "assets/minecraft/textures/block/sandstone_top.png",
+      "sha256": "321c39b772533abf1b6441d484d05e8e7bf1fa017c97acafcaec9e63781cb40c"
+    },
+    {
+      "asset": "quartz_block_side.png",
+      "archive_entry": "assets/minecraft/textures/block/quartz_block_side.png",
+      "sha256": "6a1525cca96303a1fa02e019861ae4fe795c9ad93a79123c654db242cce898f8"
+    },
+    {
+      "asset": "quartz_block_top.png",
+      "archive_entry": "assets/minecraft/textures/block/quartz_block_top.png",
+      "sha256": "6a1525cca96303a1fa02e019861ae4fe795c9ad93a79123c654db242cce898f8"
+    },
+    {
+      "asset": "prismarine_bricks.png",
+      "archive_entry": "assets/minecraft/textures/block/prismarine_bricks.png",
+      "sha256": "052c3cd7870700bd2e3f13242024f4526ace612e2f6488158b11e0dab6cfaad8"
+    },
+    {
+      "asset": "cut_copper.png",
+      "archive_entry": "assets/minecraft/textures/block/cut_copper.png",
+      "sha256": "a18f8e12937a0a9ab2ad9968af57586e314505c9e0fc3c2c9395e6e54e846f2b"
+    },
+    {
+      "asset": "oxidized_cut_copper.png",
+      "archive_entry": "assets/minecraft/textures/block/oxidized_cut_copper.png",
+      "sha256": "f2608f6e7c20a9bcbe97da01c4392134c6a9e4a39b1d76e72aa6bd224fa13492"
+    },
+    {
+      "asset": "amethyst_block.png",
+      "archive_entry": "assets/minecraft/textures/block/amethyst_block.png",
+      "sha256": "03c7a9fbacf1cb89fe1265e2ef79cf39df6089c416a626b144bca448b2cd276e"
+    },
+    {
+      "asset": "hay_block_top.png",
+      "archive_entry": "assets/minecraft/textures/block/hay_block_top.png",
+      "sha256": "99b8063611a6816b67c652f2f847048cd798a9b8858c84b9f597363007153693"
+    },
+    {
+      "asset": "hay_block_side.png",
+      "archive_entry": "assets/minecraft/textures/block/hay_block_side.png",
+      "sha256": "b0181d301e7819daa8719067c616ca47aab766e538cdaf1f722a711efac3ea6f"
+    }
+  ]
+}

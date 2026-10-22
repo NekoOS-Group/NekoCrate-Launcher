@@ -1,8 +1,10 @@
 <script setup lang="ts">
+import { t, translateMessage } from "../i18n";
 import { onMounted, onBeforeUnmount, ref, watch } from "vue";
 import { RefreshCw, LoaderCircle } from "lucide-vue-next";
 import type { SkinViewer } from "skinview3d";
 import { loadSkinImage, skinAvatar } from "../previewSkin";
+import { createDemandRenderer } from "../demandRenderer";
 const props = defineProps<{
   texture: string | null;
   slim: boolean;
@@ -24,12 +26,26 @@ let viewer: SkinViewer | undefined;
 let observer: ResizeObserver | undefined;
 let disposed = false;
 let generation = 0;
+let drawing: ReturnType<typeof createDemandRenderer> | undefined;
+let contextLost = false;
+function invalidate() {
+  drawing?.invalidate();
+}
+function loseContext() {
+  contextLost = true;
+  updatePause();
+}
+function restoreContext() {
+  contextLost = false;
+  updatePause();
+}
 function reset() {
   if (!viewer) return;
   viewer.resetCameraPose();
   viewer.camera.position.set(18, 7, 60);
   viewer.adjustCameraDistance();
   viewer.controls.update();
+  invalidate();
 }
 function rotate(event: KeyboardEvent) {
   if (!viewer || !["ArrowLeft", "ArrowRight", "Home"].includes(event.key))
@@ -46,7 +62,7 @@ function rotate(event: KeyboardEvent) {
   viewer.controls.update();
 }
 function updatePause() {
-  if (viewer) viewer.renderPaused = props.paused || document.hidden;
+  drawing?.setPaused(props.paused || document.hidden || contextLost);
 }
 async function loadSkin() {
   if (!viewer) return;
@@ -58,6 +74,7 @@ async function loadSkin() {
       model: props.texture && props.slim ? "slim" : "default",
     });
     viewer.playerObject.visible = true;
+    invalidate();
     emit("avatar", skinAvatar(texture, texture.width));
     failure.value = "";
   } catch {
@@ -68,10 +85,12 @@ async function loadSkin() {
       if (disposed || request !== generation) return;
       viewer.loadSkin(fallback, { model: "default" });
       viewer.playerObject.visible = true;
+      invalidate();
       emit("avatar", skinAvatar(fallback, fallback.width));
     } catch {
       if (disposed || request !== generation) return;
       viewer.playerObject.visible = false;
+      invalidate();
       emit("avatar", "");
     }
     failure.value = "皮肤纹理无法读取";
@@ -89,6 +108,7 @@ onMounted(async () => {
       zoom: 0.91,
       fov: 32,
       pixelRatio: Math.min(devicePixelRatio, 2),
+      renderPaused: true,
     });
     // The scene must composite over the continuous launcher background.
     viewer.background = null;
@@ -101,10 +121,25 @@ onMounted(async () => {
     viewer.controls.maxPolarAngle = Math.PI * 0.64;
     viewer.globalLight.intensity = 2.5;
     viewer.cameraLight.intensity = 0.7;
+    drawing = createDemandRenderer(
+      () => viewer?.controls.update() ?? false,
+      () => viewer?.render(),
+    );
+    viewer.controls.addEventListener("change", invalidate);
+    canvas.value.addEventListener("webglcontextlost", loseContext);
+    canvas.value.addEventListener("webglcontextrestored", restoreContext);
     reset();
     observer = new ResizeObserver(([entry]) => {
-      if (entry && entry.contentRect.width > 0 && entry.contentRect.height > 0)
-        viewer?.setSize(entry.contentRect.width, entry.contentRect.height);
+      if (!entry || !viewer) return;
+      const { width, height } = entry.contentRect;
+      if (
+        width > 0 &&
+        height > 0 &&
+        (viewer.width !== width || viewer.height !== height)
+      ) {
+        viewer.setSize(width, height);
+        invalidate();
+      }
     });
     observer.observe(host.value);
     document.addEventListener("visibilitychange", updatePause);
@@ -121,25 +156,28 @@ onBeforeUnmount(() => {
   disposed = true;
   generation++;
   observer?.disconnect();
+  drawing?.dispose();
+  viewer?.controls.removeEventListener("change", invalidate);
+  canvas.value?.removeEventListener("webglcontextlost", loseContext);
+  canvas.value?.removeEventListener("webglcontextrestored", restoreContext);
   document.removeEventListener("visibilitychange", updatePause);
   viewer?.dispose();
 });
 </script>
 
 <template>
-  <section class="skin-stage" :aria-label="caption || '玩家皮肤'">
+  <section class="skin-stage" :aria-label="caption || t('玩家皮肤')">
     <div ref="host" class="skin-viewport" :class="{ loading }">
       <canvas
         ref="canvas"
         v-show="!unavailable"
         tabindex="0"
-        aria-label="玩家皮肤，拖拽旋转；方向键左右旋转，Home 复位"
-        :title="[caption, '拖拽旋转，双击复位'].filter(Boolean).join(' · ')"
+        :aria-label="t('玩家皮肤，拖拽旋转；方向键左右旋转，Home 复位')"
         @keydown="rotate"
         @dblclick="reset"
       />
       <p v-if="unavailable" class="skin-unavailable" role="status">
-        {{ failure }}
+        {{ t(failure) }}
       </p>
     </div>
     <div
@@ -151,14 +189,16 @@ onBeforeUnmount(() => {
         v-if="loading"
         class="skin-loading"
         role="status"
-        aria-label="正在加载皮肤"
+        :aria-label="t('正在加载皮肤')"
         ><LoaderCircle :size="16" class="spin"
       /></span>
       <button
         v-else-if="issue || failure"
         class="icon-button"
-        :title="`${issue || failure}，点击重试`"
-        aria-label="重新加载皮肤"
+        :title="
+          t('{error}，点击重试', { error: translateMessage(issue || failure) })
+        "
+        :aria-label="t('重新加载皮肤')"
         @click="emit('retry')"
       >
         <RefreshCw :size="16" />

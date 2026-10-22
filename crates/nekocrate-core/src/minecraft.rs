@@ -349,7 +349,7 @@ pub fn arguments(
     instance: &Instance,
     account: &LaunchSession,
 ) -> Result<Vec<String>> {
-    let game = root.join("instances").join(&instance.id).join(".minecraft");
+    let game = instance.game_dir(root);
     let native = game.join("versions").join(&v.id).join("natives");
     let mut classpath = vec![];
     for l in v.libraries.iter().filter(|l| is_allowed(l)) {
@@ -482,100 +482,122 @@ mod tests {
     async fn two_versions_keep_clients_and_natives_separate_but_share_game_directory() {
         use sha1::{Digest, Sha1};
         use std::fs;
-        let temp = tempfile::tempdir().unwrap();
-        let launcher = crate::Launcher::open(Some(temp.path().into())).unwrap();
-        let instance = launcher.create_instance("多版本", "1.21.1").unwrap();
-        launcher.add_version(&instance.id, "1.20.1").unwrap();
-        let game = launcher.game_dir(&instance.id).unwrap();
-        let downloader = Downloader::new(launcher.root(), Settings::default()).unwrap();
-        let cancel = CancellationToken::new();
-        let sink: EventSink = std::sync::Arc::new(|_| {});
-        let account: LaunchSession = crate::auth::MinecraftSession {
-            account: Account {
-                id: "fixture-player".into(),
-                username: "Fixture".into(),
-                expires_at: 0,
-                client_id: "fixture-client".into(),
-                owned: true,
-                skin: None,
-            },
-            access_token: "fixture-token".into(),
-            refresh_token: "fixture-refresh".into(),
-            xuid: "0".into(),
-        }
-        .into();
-        let mut launch_args = vec![];
-        for (index, id) in ["1.21.1", "1.20.1"].iter().enumerate() {
-            let index_body = format!("{{ \"objects\": {{}} }}{}", " ".repeat(index));
-            let client_body = format!("client-fixture-{id}");
-            let (base, server) = crate::test_http::serve(vec![
-                (200, index_body.clone()),
-                (200, client_body.clone()),
-            ])
-            .await;
-            let mut version = crate::test_http::version_fixture(id);
-            version.asset_index.url = format!("{base}/index");
-            version.asset_index.sha1 = hex::encode(Sha1::digest(index_body.as_bytes()));
-            version.asset_index.size = index_body.len() as u64;
-            version.downloads.insert(
-                "client".into(),
-                Artifact {
-                    url: format!("{base}/client"),
-                    sha1: hex::encode(Sha1::digest(client_body.as_bytes())),
-                    size: client_body.len() as u64,
-                    path: None,
+        for linked in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let launcher = crate::Launcher::open(Some(temp.path().join("launcher"))).unwrap();
+            let source = temp.path().join("external/.minecraft");
+            let instance = if linked {
+                fs::create_dir_all(source.join("saves")).unwrap();
+                launcher
+                    .import_instance(source.clone(), "关联多版本".into(), "1.21.1".into())
+                    .await
+                    .unwrap()
+            } else {
+                launcher.create_instance("多版本", "1.21.1").unwrap()
+            };
+            launcher.add_version(&instance.id, "1.20.1").unwrap();
+            let game = launcher.game_dir(&instance.id).unwrap();
+            let downloader = Downloader::new(launcher.root(), Settings::default()).unwrap();
+            let cancel = CancellationToken::new();
+            let sink: EventSink = std::sync::Arc::new(|_| {});
+            let account: LaunchSession = crate::auth::MinecraftSession {
+                account: Account {
+                    id: "fixture-player".into(),
+                    username: "Fixture".into(),
+                    expires_at: 0,
+                    client_id: "fixture-client".into(),
+                    owned: true,
+                    skin: None,
                 },
-            );
-            install_files(
-                launcher.root(),
-                &game,
-                &version,
-                &downloader,
-                &cancel,
-                &sink,
-            )
-            .await
-            .unwrap();
-            assert_eq!(server.await.unwrap().len(), 2);
-            fs::write(game.join("versions").join(id).join("natives/marker"), id).unwrap();
-            launch_args.push(arguments(&version, launcher.root(), &instance, &account).unwrap());
-        }
-        for (index, id) in ["1.21.1", "1.20.1"].iter().enumerate() {
-            let version_dir = game.join("versions").join(id);
-            assert_eq!(
-                fs::read_to_string(version_dir.join("natives/marker")).unwrap(),
-                *id
-            );
-            assert_eq!(
-                fs::read_to_string(version_dir.join(format!("{id}.jar"))).unwrap(),
-                format!("client-fixture-{id}")
-            );
-            let args = &launch_args[index];
-            for (key, value) in [
-                ("--username", "Fixture"),
-                ("--uuid", "fixture-player"),
-                ("--accessToken", "fixture-token"),
-                ("--userType", "msa"),
-                ("--clientId", "fixture-client"),
-                ("--xuid", "0"),
-            ] {
-                let at = args.iter().position(|arg| arg == key).unwrap();
-                assert_eq!(args[at + 1], value);
+                access_token: "fixture-token".into(),
+                refresh_token: "fixture-refresh".into(),
+                xuid: "0".into(),
             }
-            let game_at = args.iter().position(|arg| arg == "--gameDir").unwrap();
-            assert_eq!(args[game_at + 1], game.to_string_lossy());
-            assert!(
-                args.contains(
-                    &version_dir
-                        .join(format!("{id}.jar"))
-                        .to_string_lossy()
-                        .into_owned()
+            .into();
+            let mut launch_args = vec![];
+            for (index, id) in ["1.21.1", "1.20.1"].iter().enumerate() {
+                let index_body = format!("{{ \"objects\": {{}} }}{}", " ".repeat(index));
+                let client_body = format!("client-fixture-{id}");
+                let (base, server) = crate::test_http::serve(vec![
+                    (200, index_body.clone()),
+                    (200, client_body.clone()),
+                ])
+                .await;
+                let mut version = crate::test_http::version_fixture(id);
+                version.asset_index.url = format!("{base}/index");
+                version.asset_index.sha1 = hex::encode(Sha1::digest(index_body.as_bytes()));
+                version.asset_index.size = index_body.len() as u64;
+                version.downloads.insert(
+                    "client".into(),
+                    Artifact {
+                        url: format!("{base}/client"),
+                        sha1: hex::encode(Sha1::digest(client_body.as_bytes())),
+                        size: client_body.len() as u64,
+                        path: None,
+                    },
+                );
+                install_files(
+                    launcher.root(),
+                    &game,
+                    &version,
+                    &downloader,
+                    &cancel,
+                    &sink,
                 )
-            );
-            assert!(args.contains(&format!(
-                "-Djava.library.path={}",
-                version_dir.join("natives").display()
-            )));
+                .await
+                .unwrap();
+                assert_eq!(server.await.unwrap().len(), 2);
+                fs::write(game.join("versions").join(id).join("natives/marker"), id).unwrap();
+                launch_args
+                    .push(arguments(&version, launcher.root(), &instance, &account).unwrap());
+            }
+            for (index, id) in ["1.21.1", "1.20.1"].iter().enumerate() {
+                let version_dir = game.join("versions").join(id);
+                assert_eq!(
+                    fs::read_to_string(version_dir.join("natives/marker")).unwrap(),
+                    *id
+                );
+                assert_eq!(
+                    fs::read_to_string(version_dir.join(format!("{id}.jar"))).unwrap(),
+                    format!("client-fixture-{id}")
+                );
+                let args = &launch_args[index];
+                for (key, value) in [
+                    ("--username", "Fixture"),
+                    ("--uuid", "fixture-player"),
+                    ("--accessToken", "fixture-token"),
+                    ("--userType", "msa"),
+                    ("--clientId", "fixture-client"),
+                    ("--xuid", "0"),
+                ] {
+                    let at = args.iter().position(|arg| arg == key).unwrap();
+                    assert_eq!(args[at + 1], value);
+                }
+                let game_at = args.iter().position(|arg| arg == "--gameDir").unwrap();
+                assert_eq!(args[game_at + 1], game.to_string_lossy());
+                assert!(
+                    args.contains(
+                        &version_dir
+                            .join(format!("{id}.jar"))
+                            .to_string_lossy()
+                            .into_owned()
+                    )
+                );
+                assert!(args.contains(&format!(
+                    "-Djava.library.path={}",
+                    version_dir.join("natives").display()
+                )));
+            }
+            if linked {
+                assert_eq!(game, source.canonicalize().unwrap());
+                assert!(
+                    !launcher
+                        .instance_dir(&instance.id)
+                        .unwrap()
+                        .join(".minecraft")
+                        .exists()
+                );
+            }
         }
     }
 }

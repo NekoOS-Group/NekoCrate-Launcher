@@ -1,6 +1,8 @@
 pub mod auth;
 pub mod download;
+mod game_options;
 pub mod java;
+mod language;
 mod migration;
 pub mod minecraft;
 pub mod model;
@@ -8,6 +10,7 @@ pub mod skin;
 pub mod storage;
 #[cfg(test)]
 mod test_http;
+pub mod updates;
 
 use anyhow::{Context, Result, bail};
 use fs2::FileExt;
@@ -41,6 +44,7 @@ pub struct Launcher(Arc<Shared>);
 #[derive(Serialize)]
 pub struct Snapshot {
     pub root: String,
+    pub system_locale: String,
     pub database: Database,
     pub running: Vec<String>,
 }
@@ -91,12 +95,16 @@ impl Launcher {
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
             root: self.root().to_string_lossy().into(),
+            system_locale: language::system_locale(),
             database: self.0.db.lock().unwrap().clone(),
             running: self.0.games.lock().unwrap().keys().cloned().collect(),
         }
     }
     pub fn settings(&self) -> Settings {
         self.0.db.lock().unwrap().settings.clone()
+    }
+    pub fn ui_language(&self) -> &'static str {
+        language::resolve(&self.settings().language, &language::system_locale())
     }
     fn mutate<T>(&self, operation: impl FnOnce(&mut Database) -> Result<T>) -> Result<T> {
         let mut db = self.0.db.lock().unwrap();
@@ -129,7 +137,45 @@ impl Launcher {
         Ok(self.root().join("instances").join(id))
     }
     pub fn game_dir(&self, id: &str) -> Result<PathBuf> {
-        Ok(self.instance_dir(id)?.join(".minecraft"))
+        Ok(self.instance(id)?.game_dir(self.root()))
+    }
+    /// Reorder metadata only; game processes and directory contents stay intact.
+    pub fn move_instance(&self, id: &str, before_id: Option<&str>) -> Result<()> {
+        self.mutate(|db| {
+            let from = db
+                .instances
+                .iter()
+                .position(|i| i.id == id)
+                .context("实例不存在")?;
+            let before = before_id
+                .map(|target| {
+                    db.instances
+                        .iter()
+                        .position(|i| i.id == target)
+                        .context("目标实例不存在，请刷新后重试")
+                })
+                .transpose()?;
+            if before == Some(from) {
+                return Ok(());
+            }
+            let instance = db.instances.remove(from);
+            let destination = before
+                .map(|index| if index > from { index - 1 } else { index })
+                .unwrap_or(db.instances.len());
+            db.instances.insert(destination, instance);
+            Ok(())
+        })
+    }
+    fn available_game_dir(&self, id: &str) -> Result<PathBuf> {
+        let instance = self.instance(id)?;
+        let game = instance.game_dir(self.root());
+        if instance.game_directory.is_some() && !game.is_dir() {
+            bail!(
+                "关联的游戏目录不可用，请恢复原路径或重新添加目录：{}",
+                game.display()
+            );
+        }
+        Ok(game)
     }
     pub fn add_version(&self, id: &str, version: &str) -> Result<Instance> {
         let _guard = self
@@ -188,16 +234,16 @@ impl Launcher {
         })
     }
     pub fn save_settings(&self, mut settings: Settings) -> Result<()> {
-        let _guard = self
-            .0
-            .operation
-            .try_lock()
-            .context("有任务正在运行，请完成后修改设置")?;
+        // Active jobs own a Settings snapshot. Persist future preferences under
+        // the database lock without waiting for downloads or changing their plan.
         if !(1..=32).contains(&settings.concurrency) || settings.retries > 5 {
             bail!("并发应为 1–32，重试次数应为 0–5");
         }
         if !["official", "auto", "bmclapi"].contains(&settings.download_source.as_str()) {
             bail!("未知下载源");
+        }
+        if !["system", "zh-CN", "en-US"].contains(&settings.language.as_str()) {
+            bail!("不支持的语言选项");
         }
         settings.microsoft_client_id = settings.microsoft_client_id.trim().to_owned();
         if !settings.microsoft_client_id.is_empty() {
@@ -214,9 +260,14 @@ impl Launcher {
             .operation
             .try_lock()
             .context("有任务正在运行，请稍后创建实例")?;
-        self.create_unlocked(name, version)
+        self.create_unlocked(name, version, None)
     }
-    fn create_unlocked(&self, name: &str, version: &str) -> Result<Instance> {
+    fn create_unlocked(
+        &self,
+        name: &str,
+        version: &str,
+        game_directory: Option<PathBuf>,
+    ) -> Result<Instance> {
         let name = name.trim();
         if name.is_empty() || name.chars().count() > 80 {
             bail!("实例名称应为 1–80 个字符");
@@ -228,6 +279,7 @@ impl Launcher {
             id: uuid::Uuid::new_v4().to_string(),
             name: name.into(),
             icon: None,
+            game_directory,
             versions: if version.is_empty() {
                 vec![]
             } else {
@@ -243,7 +295,11 @@ impl Launcher {
             last_played: None,
         };
         let dir = self.root().join("instances").join(&i.id);
-        fs::create_dir_all(dir.join(".minecraft"))?;
+        if i.game_directory.is_some() {
+            fs::create_dir_all(&dir)?;
+        } else {
+            fs::create_dir_all(dir.join(".minecraft"))?;
+        }
         if let Err(e) = self.mutate(|db| {
             db.instances.push(i.clone());
             Ok(())
@@ -273,7 +329,7 @@ impl Launcher {
         {
             bail!("名称应为 1–80 个字符，内存应为 512–65536 MiB");
         }
-        if icon.is_some_and(|value| value > 3) {
+        if icon.is_some_and(|value| value >= INSTANCE_ICON_COUNT) {
             bail!("请选择有效的实例图标");
         }
         self.mutate(|db| {
@@ -324,6 +380,20 @@ impl Launcher {
         if !is_game_directory(&source) {
             bail!("请选择含 saves、mods、versions 或 options.txt 的游戏目录");
         }
+        let source = source.canonicalize()?;
+        if source.starts_with(self.root()) || self.root().starts_with(&source) {
+            bail!("游戏目录不能与启动器数据目录重叠，请选择原有的独立游戏目录");
+        }
+        for existing in &self.snapshot().database.instances {
+            let directory = existing.game_dir(self.root());
+            let directory = directory.canonicalize().unwrap_or(directory);
+            if source.starts_with(&directory) || directory.starts_with(&source) {
+                bail!(
+                    "此目录已由实例「{}」使用，不能重复添加或嵌套关联",
+                    existing.name
+                );
+            }
+        }
         let mut versions = vec![];
         if source.join("versions").is_dir() {
             for entry in fs::read_dir(source.join("versions"))? {
@@ -352,14 +422,7 @@ impl Launcher {
                 installed: false,
             });
         }
-        let i = self.create_unlocked(&name, "")?;
-        let dest = self.root().join("instances").join(&i.id).join(".minecraft");
-        let result =
-            tokio::task::spawn_blocking(move || storage::copy_tree(&source, &dest)).await?;
-        if let Err(e) = result {
-            self.rollback_new(&i.id)?;
-            return Err(e);
-        }
+        let i = self.create_unlocked(&name, "", Some(source))?;
         if let Err(e) = self.mutate(|db| {
             let target = db.instances.iter_mut().find(|x| x.id == i.id).unwrap();
             target.selected_version = if version.is_empty() {
@@ -387,9 +450,9 @@ impl Launcher {
         let _guard = self.0.operation.lock().await;
         self.idle(id)?;
         let original = self.instance(id)?;
-        let i = self.create_unlocked(&format!("{} · 副本", original.name), "")?;
-        let source = self.root().join("instances").join(id).join(".minecraft");
-        let dest = self.root().join("instances").join(&i.id).join(".minecraft");
+        let source = self.available_game_dir(id)?;
+        let i = self.create_unlocked(&format!("{} · 副本", original.name), "", None)?;
+        let dest = self.game_dir(&i.id)?;
         if let Err(e) =
             tokio::task::spawn_blocking(move || storage::copy_tree(&source, &dest)).await?
         {
@@ -454,20 +517,13 @@ impl Launcher {
         let selected = instance
             .selected()
             .context("请先为此实例添加并选择一个版本")?;
+        let game = self.available_game_dir(id)?;
         self.set_installed(id, &selected.id, false)?;
         let settings = self.settings();
         let downloader = download::Downloader::new(self.root(), settings.clone())?;
         sink(Event::new("stage", "获取官方版本元数据"));
         let v = minecraft::version(self.root(), &selected.id, &downloader, cancel, sink).await?;
-        minecraft::install_files(
-            self.root(),
-            &self.instance_dir(id)?.join(".minecraft"),
-            &v,
-            &downloader,
-            cancel,
-            sink,
-        )
-        .await?;
+        minecraft::install_files(self.root(), &game, &v, &downloader, cancel, sink).await?;
         let java = java::ensure(
             self.root(),
             v.java_version.as_ref().map_or(8, |j| j.major),
@@ -599,6 +655,7 @@ impl Launcher {
         let _guard = self.0.operation.lock().await;
         self.idle(id)?;
         let instance = self.instance(id)?;
+        let game = self.available_game_dir(id)?;
         let selected = instance.selected().context("请先选择游戏版本")?;
         if !selected.installed {
             bail!("请先安装或修复所选版本");
@@ -635,13 +692,14 @@ impl Launcher {
         let mut command = tokio::process::Command::new(&java.path);
         command
             .args(args)
-            .current_dir(self.instance_dir(id)?.join(".minecraft"))
+            .current_dir(&game)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         #[cfg(windows)]
         command.creation_flags(0x08000000);
         download::check_cancel(cancel)?;
+        game_options::apply_language(&game, &settings)?;
         let mut child = command
             .spawn()
             .context("无法启动 Java 进程，请检查 Java 路径和系统权限")?;
@@ -770,6 +828,145 @@ async fn pipe_logs<R: tokio::io::AsyncRead + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn settings_can_be_saved_during_download_without_changing_its_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let launcher = Launcher::open(Some(temp.path().into())).unwrap();
+        let instance = launcher.create_instance("Downloading", "1.21.1").unwrap();
+        let operation = launcher.0.operation.try_lock().unwrap();
+        let active_download =
+            download::Downloader::new(launcher.root(), launcher.settings()).unwrap();
+        let url = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
+        launcher
+            .set_installed(&instance.id, "1.21.1", false)
+            .unwrap();
+        let preferences = Settings {
+            language: "en-US".into(),
+            apply_language_to_game: true,
+            download_source: "bmclapi".into(),
+            concurrency: 3,
+            retries: 4,
+            ..launcher.settings()
+        };
+        launcher.save_settings(preferences).unwrap();
+        // The active operation keeps its original source; the next uses the saved source.
+        assert_eq!(active_download.urls(url), vec![url]);
+        let next_download =
+            download::Downloader::new(launcher.root(), launcher.settings()).unwrap();
+        assert!(next_download.urls(url)[0].starts_with("https://bmclapi2.bangbang93.com/"));
+        launcher
+            .set_installed(&instance.id, "1.21.1", true)
+            .unwrap();
+        let invalid = Settings {
+            concurrency: 0,
+            ..launcher.settings()
+        };
+        assert!(launcher.save_settings(invalid).is_err());
+        drop(operation);
+        drop(launcher);
+        let launcher = Launcher::open(Some(temp.path().into())).unwrap();
+        assert_eq!(launcher.settings().language, "en-US");
+        assert!(launcher.settings().apply_language_to_game);
+        assert_eq!(launcher.settings().concurrency, 3);
+        assert_eq!(launcher.settings().retries, 4);
+        assert!(
+            launcher
+                .instance(&instance.id)
+                .unwrap()
+                .selected()
+                .unwrap()
+                .installed
+        );
+    }
+    #[test]
+    fn language_preferences_persist_and_invalid_changes_are_not_saved() {
+        let temp = tempfile::tempdir().unwrap();
+        for preference in ["en-US", "zh-CN", "system"] {
+            let launcher = Launcher::open(Some(temp.path().into())).unwrap();
+            let settings = Settings {
+                language: preference.into(),
+                apply_language_to_game: true,
+                ..launcher.settings()
+            };
+            launcher.save_settings(settings).unwrap();
+            drop(launcher);
+            let launcher = Launcher::open(Some(temp.path().into())).unwrap();
+            assert_eq!(launcher.settings().language, preference);
+            assert!(launcher.settings().apply_language_to_game);
+            let invalid = Settings {
+                language: "invalid".into(),
+                ..launcher.settings()
+            };
+            assert!(launcher.save_settings(invalid).is_err());
+            assert_eq!(launcher.settings().language, preference);
+            assert!(!launcher.snapshot().system_locale.is_empty());
+        }
+    }
+    #[test]
+    fn instance_order_persists_without_affecting_running_games_or_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let launcher = Launcher::open(Some(temp.path().into())).unwrap();
+        let a = launcher.create_instance("A", "1.21.1").unwrap();
+        let b = launcher.create_instance("B", "1.20.1").unwrap();
+        let c = launcher.create_instance("C", "").unwrap();
+        let directory = launcher.game_dir(&a.id).unwrap();
+        fs::write(directory.join("keep.txt"), "saved world").unwrap();
+        let running = CancellationToken::new();
+        launcher
+            .0
+            .games
+            .lock()
+            .unwrap()
+            .insert(a.id.clone(), running.clone());
+        let operation = launcher.0.operation.try_lock().unwrap();
+        launcher.move_instance(&c.id, Some(&a.id)).unwrap();
+        launcher.move_instance(&a.id, None).unwrap();
+        launcher.move_instance(&a.id, Some(&a.id)).unwrap();
+        assert!(!running.is_cancelled());
+        assert_eq!(launcher.snapshot().running, std::slice::from_ref(&a.id));
+        assert_eq!(
+            launcher.instance(&a.id).unwrap().selected_version,
+            a.selected_version
+        );
+        assert_eq!(launcher.game_dir(&a.id).unwrap(), directory);
+        assert_eq!(
+            fs::read_to_string(directory.join("keep.txt")).unwrap(),
+            "saved world"
+        );
+        drop(operation);
+        drop(launcher);
+        let reopened = Launcher::open(Some(temp.path().into())).unwrap();
+        let order: Vec<_> = reopened
+            .snapshot()
+            .database
+            .instances
+            .into_iter()
+            .map(|i| i.id)
+            .collect();
+        assert_eq!(order, [c.id, b.id, a.id]);
+    }
+
+    #[test]
+    fn stale_instance_reorder_does_not_drop_or_duplicate_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let launcher = Launcher::open(Some(temp.path().into())).unwrap();
+        let a = launcher.create_instance("A", "").unwrap();
+        let b = launcher.create_instance("B", "").unwrap();
+        let database = temp.path().join("database.json");
+        let original = fs::read(&database).unwrap();
+        assert!(launcher.move_instance("missing", Some(&a.id)).is_err());
+        assert!(launcher.move_instance(&a.id, Some("missing")).is_err());
+        assert_eq!(fs::read(database).unwrap(), original);
+        let order: Vec<_> = launcher
+            .snapshot()
+            .database
+            .instances
+            .into_iter()
+            .map(|i| i.id)
+            .collect();
+        assert_eq!(order, [a.id, b.id]);
+    }
+
     #[cfg(unix)]
     #[test]
     fn directory_lock_follows_launcher_lifetime_even_with_inherited_descriptor() {
@@ -806,26 +1003,41 @@ mod tests {
         assert_eq!(updated.icon, Some(2));
         assert_eq!(launcher.game_dir(&instance.id).unwrap(), directory);
 
+        // Every new material is accepted, including the last catalog entry.
+        for icon in 4..INSTANCE_ICON_COUNT {
+            launcher
+                .update_instance(&instance.id, "新名称", 2048, None, Some(icon))
+                .unwrap();
+            assert_eq!(launcher.instance(&instance.id).unwrap().icon, Some(icon));
+        }
+        let selected_icon = Some(INSTANCE_ICON_COUNT - 1);
+
         // Missing icon fields from older clients must not reset the saved choice.
         launcher
             .update_instance(&instance.id, "新名称", 2048, None, None)
             .unwrap();
-        assert_eq!(launcher.instance(&instance.id).unwrap().icon, Some(2));
+        assert_eq!(launcher.instance(&instance.id).unwrap().icon, selected_icon);
         assert!(
             launcher
-                .update_instance(&instance.id, "不应保存", 8192, None, Some(4))
+                .update_instance(
+                    &instance.id,
+                    "不应保存",
+                    8192,
+                    None,
+                    Some(INSTANCE_ICON_COUNT)
+                )
                 .is_err()
         );
         let unchanged = launcher.instance(&instance.id).unwrap();
         assert_eq!(unchanged.name, "新名称");
         assert_eq!(unchanged.memory_mb, 2048);
-        assert_eq!(unchanged.icon, Some(2));
+        assert_eq!(unchanged.icon, selected_icon);
         let cloned = launcher.clone_instance(&instance.id).await.unwrap();
-        assert_eq!(cloned.icon, Some(2));
+        assert_eq!(cloned.icon, selected_icon);
         drop(launcher);
 
         let reopened = Launcher::open(Some(temp.path().into())).unwrap();
-        assert_eq!(reopened.instance(&instance.id).unwrap().icon, Some(2));
+        assert_eq!(reopened.instance(&instance.id).unwrap().icon, selected_icon);
         assert_eq!(reopened.instance(&instance.id).unwrap().name, "新名称");
         assert_eq!(reopened.game_dir(&instance.id).unwrap(), directory);
         drop(reopened);
@@ -875,6 +1087,12 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn no_account_launch_reaches_game_process_and_keeps_guest_logs_intact() {
+        verify_guest_launch_directory(false).await;
+        verify_guest_launch_directory(true).await;
+    }
+
+    #[cfg(unix)]
+    async fn verify_guest_launch_directory(linked: bool) {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
         let launcher = Launcher::open(Some(temp.path().join("launcher"))).unwrap();
@@ -892,7 +1110,16 @@ printf '%s\n' 'offline session 0 started'
         )
         .unwrap();
         fs::set_permissions(&java, fs::Permissions::from_mode(0o700)).unwrap();
-        let instance = launcher.create_instance("未登录启动", "1.21.1").unwrap();
+        let source = temp.path().join("已有 游戏/.minecraft");
+        let instance = if linked {
+            fs::create_dir_all(source.join("saves")).unwrap();
+            launcher
+                .import_instance(source.clone(), "原目录启动".into(), "1.21.1".into())
+                .await
+                .unwrap()
+        } else {
+            launcher.create_instance("未登录启动", "1.21.1").unwrap()
+        };
         launcher
             .update_instance(
                 &instance.id,
@@ -904,6 +1131,9 @@ printf '%s\n' 'offline session 0 started'
             .unwrap();
         let version = test_http::version_fixture("1.21.1");
         let game = launcher.game_dir(&instance.id).unwrap();
+        if linked {
+            assert_eq!(game, source.canonicalize().unwrap());
+        }
         let version_dir = game.join("versions/1.21.1");
         fs::create_dir_all(&version_dir).unwrap();
         storage::write_json(&version_dir.join("1.21.1.json"), &version).unwrap();
@@ -928,6 +1158,17 @@ printf '%s\n' 'offline session 0 started'
         .unwrap();
         let text = fs::read_to_string(game.join("launch-arguments.txt")).unwrap();
         let args: Vec<_> = text.lines().collect();
+        let game_at = args.iter().position(|arg| *arg == "--gameDir").unwrap();
+        assert_eq!(args[game_at + 1], game.to_string_lossy());
+        if linked {
+            assert!(
+                !launcher
+                    .instance_dir(&instance.id)
+                    .unwrap()
+                    .join(".minecraft")
+                    .exists()
+            );
+        }
         for (key, value) in [
             ("--username", "Player"),
             ("--uuid", "a01e3843e5213998958af459800e4d11"),
@@ -993,7 +1234,7 @@ printf '%s\n' 'offline session 0 started'
     }
 
     #[tokio::test]
-    async fn migration_copies_saves_and_excludes_credentials() {
+    async fn imported_directory_stays_in_place_and_explicit_clone_excludes_credentials() {
         let t = tempfile::tempdir().unwrap();
         let source = t.path().join("existing/.minecraft");
         fs::create_dir_all(source.join("saves/world")).unwrap();
@@ -1008,17 +1249,46 @@ printf '%s\n' 'offline session 0 started'
             )
             .await
             .unwrap();
-        let game = launcher
-            .instance_dir(&instance.id)
-            .unwrap()
-            .join(".minecraft");
+        let game = launcher.game_dir(&instance.id).unwrap();
+        assert_eq!(game, source.canonicalize().unwrap());
+        assert!(
+            !launcher
+                .instance_dir(&instance.id)
+                .unwrap()
+                .join(".minecraft")
+                .exists()
+        );
         assert_eq!(
             fs::read(game.join("saves/world/level.dat")).unwrap(),
             b"save-fixture"
         );
-        assert!(!game.join("launcher_accounts.json").exists());
+        assert_eq!(
+            fs::read(game.join("launcher_accounts.json")).unwrap(),
+            b"private-fixture"
+        );
         assert!(source.join("launcher_accounts.json").exists());
         assert!(!instance.selected().unwrap().installed);
+        fs::write(source.join("saves/world/level.dat"), b"updated-in-place").unwrap();
+        assert_eq!(
+            fs::read(game.join("saves/world/level.dat")).unwrap(),
+            b"updated-in-place"
+        );
+        let cloned = launcher.clone_instance(&instance.id).await.unwrap();
+        assert_eq!(cloned.game_directory, None);
+        let clone_game = launcher.game_dir(&cloned.id).unwrap();
+        assert_ne!(clone_game, game);
+        assert_eq!(
+            fs::read(clone_game.join("saves/world/level.dat")).unwrap(),
+            b"updated-in-place"
+        );
+        assert!(!clone_game.join("launcher_accounts.json").exists());
+        drop(launcher);
+        let reopened = Launcher::open(Some(t.path().join("launcher"))).unwrap();
+        assert_eq!(reopened.game_dir(&instance.id).unwrap(), game);
+        assert_eq!(
+            reopened.instance(&instance.id).unwrap().game_directory,
+            Some(game)
+        );
     }
 
     #[tokio::test]
@@ -1177,7 +1447,112 @@ printf '%s\n' 'offline session 0 started'
             fs::read(source.join("saves/world/level.dat")).unwrap(),
             b"original-world"
         );
-        assert!(!imported.join("launcher_accounts.json").exists());
+        assert_eq!(imported, source.canonicalize().unwrap());
+        assert_eq!(
+            fs::read(imported.join("launcher_accounts.json")).unwrap(),
+            b"private-fixture"
+        );
+        assert!(
+            !launcher
+                .instance_dir(&instance.id)
+                .unwrap()
+                .join(".minecraft")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn linked_directories_reject_duplicates_and_overlapping_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("existing/.minecraft");
+        fs::create_dir_all(source.join("saves")).unwrap();
+        let launcher = Launcher::open(Some(temp.path().join("launcher"))).unwrap();
+        launcher
+            .import_instance(source.clone(), "原目录".into(), String::new())
+            .await
+            .unwrap();
+        for duplicate in [source.clone(), source.parent().unwrap().to_owned()] {
+            let error = launcher
+                .import_instance(duplicate, "重复".into(), String::new())
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("已由实例"));
+        }
+        #[cfg(unix)]
+        {
+            let alias = temp.path().join("linked-alias");
+            std::os::unix::fs::symlink(&source, &alias).unwrap();
+            assert!(
+                launcher
+                    .import_instance(alias, "别名".into(), String::new())
+                    .await
+                    .is_err()
+            );
+        }
+        let nested = source.join("nested/.minecraft");
+        fs::create_dir_all(nested.join("saves")).unwrap();
+        assert!(
+            launcher
+                .import_instance(nested, "嵌套".into(), String::new())
+                .await
+                .is_err()
+        );
+        let managed = launcher.create_instance("托管目录", "").unwrap();
+        let managed_dir = launcher.game_dir(&managed.id).unwrap();
+        fs::create_dir_all(managed_dir.join("saves")).unwrap();
+        assert!(
+            launcher
+                .import_instance(managed_dir, "自身".into(), String::new())
+                .await
+                .is_err()
+        );
+        assert_eq!(launcher.snapshot().database.instances.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn removing_linked_instance_preserves_files_and_missing_source_is_not_recreated() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("external/.minecraft");
+        fs::create_dir_all(source.join("saves/world")).unwrap();
+        fs::write(source.join("saves/world/level.dat"), b"precious-world").unwrap();
+        let launcher = Launcher::open(Some(temp.path().join("launcher"))).unwrap();
+        let first = launcher
+            .import_instance(source.clone(), "原目录".into(), "1.21.1".into())
+            .await
+            .unwrap();
+        launcher.delete_instance(&first.id).unwrap();
+        assert_eq!(
+            fs::read(source.join("saves/world/level.dat")).unwrap(),
+            b"precious-world"
+        );
+        let instance = launcher
+            .import_instance(source.clone(), "重新关联".into(), "1.21.1".into())
+            .await
+            .unwrap();
+        let offline = temp.path().join("unmounted");
+        fs::rename(&source, &offline).unwrap();
+        let cancel = CancellationToken::new();
+        let sink: EventSink = Arc::new(|_| {});
+        let error = launcher
+            .install(&instance.id, &cancel, &sink)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("关联的游戏目录不可用"));
+        let error = launcher
+            .launch(&instance.id, &cancel, sink)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("关联的游戏目录不可用"));
+        assert!(launcher.clone_instance(&instance.id).await.is_err());
+        assert_eq!(launcher.snapshot().database.instances.len(), 1);
+        assert!(!source.exists());
+        launcher.delete_instance(&instance.id).unwrap();
+        assert_eq!(
+            fs::read(offline.join("saves/world/level.dat")).unwrap(),
+            b"precious-world"
+        );
+        assert!(!source.exists());
+        assert!(launcher.snapshot().database.instances.is_empty());
     }
 
     #[tokio::test]

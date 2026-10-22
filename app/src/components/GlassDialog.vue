@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, ref } from "vue";
+import { onMounted, ref } from "vue";
 import { CheckCircle2 } from "lucide-vue-next";
+import { rememberDialogFocus } from "../dialogMotion";
 const props = defineProps<{
   label: string;
   locked?: boolean;
@@ -8,22 +9,17 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{ close: [] }>();
 const dialog = ref<HTMLDialogElement>();
-let previousFocus: HTMLElement | null = null;
 function close() {
   if (!props.locked) emit("close");
 }
 onMounted(() => {
-  previousFocus = document.activeElement as HTMLElement | null;
+  if (dialog.value) rememberDialogFocus(dialog.value);
   dialog.value?.showModal();
   // Start on the static title, keeping Tab navigation inside the dialog
   // without highlighting or arming its first action button.
   dialog.value
     ?.querySelector<HTMLElement>(".dialog-heading")
     ?.focus({ preventScroll: true });
-});
-onBeforeUnmount(() => {
-  dialog.value?.close();
-  previousFocus?.focus();
 });
 </script>
 

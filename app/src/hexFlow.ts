@@ -11,6 +11,21 @@ export const HEX_ACTIVE_INTENSITY = 0.82;
 // The full state includes particle positions and their staggered clocks. A
 // walker proposes an adjacent move; a full destination rejects it.
 type Walker = { edge: number; elapsed: number };
+type RegionScratch = {
+  visited: Uint8Array;
+  xs: Int32Array;
+  ys: Int32Array;
+  queue: Int32Array;
+};
+
+function regionScratch(size: number): RegionScratch {
+  return {
+    visited: new Uint8Array(size),
+    xs: new Int32Array(size),
+    ys: new Int32Array(size),
+    queue: new Int32Array(size),
+  };
+}
 export type HexFlow = {
   graph: HexGraph;
   random: () => number;
@@ -23,6 +38,8 @@ export type HexFlow = {
   dye: Float32Array;
   dyeScratch: Float32Array;
   sources: Int8Array;
+  sourcesScratch: Int8Array;
+  regionScratch: RegionScratch;
   regions: number[][];
 };
 
@@ -56,18 +73,20 @@ export function sampleHexTransition(
 export function findEnclosedHexRegions(
   graph: HexGraph,
   blocked: Uint8Array,
+  scratch = regionScratch(graph.cells.length),
 ): number[][] {
-  const visited = new Uint8Array(graph.cells.length);
-  const xs = new Int32Array(graph.cells.length);
-  const ys = new Int32Array(graph.cells.length);
+  const { visited, xs, ys, queue } = scratch;
+  visited.fill(0);
   const regions: number[][] = [];
   for (let root = 0; root < graph.cells.length; root++) {
     if (visited[root]) continue;
-    const component = [root];
+    queue[0] = root;
+    let length = 1;
+    xs[root] = ys[root] = 0;
     visited[root] = 1;
     let winding = false;
-    for (let head = 0; head < component.length; head++) {
-      const index = component[head]!;
+    for (let head = 0; head < length; head++) {
+      const index = queue[head]!;
       for (const neighbor of graph.cells[index]!.neighbors) {
         if (blocked[neighbor.edge]) continue;
         const x = xs[index]! + neighbor.dx;
@@ -76,13 +95,13 @@ export function findEnclosedHexRegions(
           visited[neighbor.cell] = 1;
           xs[neighbor.cell] = x;
           ys[neighbor.cell] = y;
-          component.push(neighbor.cell);
+          queue[length++] = neighbor.cell;
         } else if (xs[neighbor.cell] !== x || ys[neighbor.cell] !== y) {
           winding = true;
         }
       }
     }
-    if (!winding) regions.push(component);
+    if (!winding) regions.push(Array.from(queue.subarray(0, length)));
   }
   return regions;
 }
@@ -118,23 +137,37 @@ export function diffuseHexDye(
 }
 
 function updateRegions(flow: HexFlow) {
-  flow.regions = findEnclosedHexRegions(flow.graph, flow.blocked);
+  flow.regions = findEnclosedHexRegions(
+    flow.graph,
+    flow.blocked,
+    flow.regionScratch,
+  );
   const previous = flow.sources;
-  const sources = new Int8Array(previous.length).fill(-1);
+  const sources = flow.sourcesScratch;
+  sources.fill(-1);
   for (const region of flow.regions) {
-    const retained = region
-      .map((i) => previous[i]!)
-      .filter((source) => source >= 0);
-    let source: number;
-    if (retained.length) source = retained[0]!;
-    else if (region.some((i) => previous[i] === -2)) source = -2;
-    else source = flow.random() < 0.75 ? Math.floor(flow.random() * 3) : -2;
+    let source = -1;
+    let uncolored = false;
+    for (const cell of region) {
+      if (previous[cell]! >= 0) {
+        source = previous[cell]!;
+        break;
+      }
+      if (previous[cell] === -2) uncolored = true;
+    }
+    if (source < 0)
+      source = uncolored
+        ? -2
+        : flow.random() < 0.75
+          ? Math.floor(flow.random() * 3)
+          : -2;
     for (const cell of region) {
       // Merging two colored enclosures preserves both pigments so they mix.
       sources[cell] = previous[cell]! >= 0 ? previous[cell]! : source;
     }
   }
   flow.sources = sources;
+  flow.sourcesScratch = previous;
 }
 
 function updateEdges(flow: HexFlow, dt: number) {
@@ -184,6 +217,8 @@ export function createHexFlow(graph: HexGraph, random = Math.random): HexFlow {
     dye: new Float32Array(graph.cells.length * 3),
     dyeScratch: new Float32Array(graph.cells.length * 3),
     sources: new Int8Array(graph.cells.length).fill(-1),
+    sourcesScratch: new Int8Array(graph.cells.length),
+    regionScratch: regionScratch(graph.cells.length),
     regions: [],
   };
   // 486 packets on the default graph, with four slots per edge. Individual

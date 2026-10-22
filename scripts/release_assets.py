@@ -28,8 +28,11 @@ def write_json(path, value):
 
 
 def version(tag):
-    if not re.fullmatch(r"dev\d+(?:\.\d+)+", tag):
-        raise ValueError("Expected a development tag such as dev0.1")
+    match = re.fullmatch(r"(dev|beta)(0|[1-9]\d*)\.(0|[1-9]\d*)", tag)
+    if not match:
+        raise ValueError("Expected a preview tag such as dev0.1 or beta0.2")
+    channel, major, minor = match.groups()
+    expected_version = f"{major}.{minor}.0-{channel}.1"
     config = read_json(ROOT / "app/src-tauri/tauri.conf.json")
     package = read_json(ROOT / "app/package.json")
     lock = read_json(ROOT / "app/package-lock.json")
@@ -38,9 +41,12 @@ def version(tag):
                 lock["packages"][""]["version"], cargo["workspace"]["package"]["version"]}
     if len(versions) != 1:
         raise ValueError(f"Package versions disagree: {versions}")
+    app_version = versions.pop()
+    if app_version != expected_version:
+        raise ValueError(f"Tag {tag} requires {expected_version}, found {app_version}")
     if not (ROOT / "docs/releases" / f"{tag}.md").is_file():
         raise ValueError("Missing release notes")
-    return versions.pop()
+    return app_version
 
 
 def commit():

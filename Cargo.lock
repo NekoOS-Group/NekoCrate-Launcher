@@ -2461,7 +2461,7 @@ dependencies = [
 
 [[package]]
 name = "nekocrate-cli"
-version = "0.1.0-dev.1"
+version = "0.2.0-beta.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2473,7 +2473,7 @@ dependencies = [
 
 [[package]]
 name = "nekocrate-core"
-version = "0.1.0-dev.1"
+version = "0.2.0-beta.1"
 dependencies = [
  "anyhow",
  "directories",
@@ -2484,10 +2484,12 @@ dependencies = [
  "keyring",
  "regex",
  "reqwest 0.12.28",
+ "semver",
  "serde",
  "serde_json",
  "sha1",
  "sha2",
+ "sys-locale",
  "tar",
  "tempfile",
  "tokio",
@@ -2499,7 +2501,7 @@ dependencies = [
 
 [[package]]
 name = "nekocrate-desktop"
-version = "0.1.0-dev.1"
+version = "0.2.0-beta.1"
 dependencies = [
  "anyhow",
  "nekocrate-core",
@@ -2518,7 +2520,7 @@ dependencies = [
 
 [[package]]
 name = "nekocrate-dev"
-version = "0.1.0-dev.1"
+version = "0.2.0-beta.1"
 
 [[package]]
 name = "new_debug_unreachable"
@@ -4179,6 +4181,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.9",
+]
+
+[[package]]
+name = "sys-locale"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eab9a99a024a169fe8a903cf9d4a3b3601109bcc13bd9e3c6fff259138626c4"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

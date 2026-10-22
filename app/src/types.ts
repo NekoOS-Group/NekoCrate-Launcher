@@ -4,11 +4,19 @@ export interface Settings {
   concurrency: number;
   retries: number;
   auto_java: boolean;
+  language: string;
+  apply_language_to_game: boolean;
+}
+export interface UpdateStatus {
+  latest_version: string;
+  available: boolean;
+  download_url: string;
 }
 export interface Instance {
   id: string;
   name: string;
   icon?: number | null;
+  game_directory?: string | null;
   versions: InstanceVersion[];
   selected_version: string | null;
   memory_mb: number;
@@ -30,6 +38,7 @@ export interface Account {
 }
 export interface Snapshot {
   root: string;
+  system_locale: string;
   database: {
     settings: Settings;
     instances: Instance[];
