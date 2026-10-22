@@ -212,3 +212,9 @@ cargo run -p nekocrate-core --example check_network
 - macOS 使用 ARM64 目标及 ad-hoc 签名，Windows 使用 AMD64 NSIS，Linux 在 Ubuntu 22.04 AMD64 生成 DEB 和 AppImage；Linux 使用合法英文包名及中文桌面入口。发布资产记录目标架构、源提交、版本和 SHA-256，禁止不同提交的包混合发布。
 - 版本变更后本机 Rust 27 项测试、Clippy、前端 30 项测试、TypeScript/Vite 构建及格式检查通过。使用临时文件验证收集校验流程：完整三平台资产可通过，损坏文件和不同提交的资产被拒绝；这些文件只是校验器测试夹具，不是跨平台构建结果。
 - 远端构建与发布的最终结果以对应 GitHub Actions 运行和 Release 中的 `BUILDINFO.json` 为准。安装包构建不等同于真实游戏进入及完整实机 UI 验收。
+
+### 首轮 macOS 文件锁回归
+
+- macOS 14 发布 runner 的多版本持久化测试在销毁 Launcher 后立即重开目录时出现 `EWOULDBLOCK`；其他检查中同一测试可以通过。新增确定性用例保留一个复制的锁文件句柄，模拟并行子进程启动时 fork／exec 间隙的句柄继承，本机成功复现同一错误。
+- `Shared` 的析构现在显式解锁：锁生命周期由最后一个 Launcher 引用决定，不再依赖所有继承的文件句柄都关闭。回归用例同时确认仍有 Launcher 引用时禁止重复打开，以及旧句柄关闭不会释放后来获得的新锁。
+- 修复后本机 28 项 Rust 测试和 Clippy 通过；核心测试以 8 个测试线程连续运行 10 轮均通过。未公开的 `dev0.1` 标签更新到修复提交后重新构建三个平台，首轮失败资产不会用于发布。

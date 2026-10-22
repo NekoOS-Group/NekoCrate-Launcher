@@ -29,6 +29,13 @@ struct Shared {
     operation: tokio::sync::Mutex<()>,
     games: Mutex<HashMap<String, CancellationToken>>,
 }
+impl Drop for Shared {
+    fn drop(&mut self) {
+        // A concurrent fork can retain the open file description until exec.
+        // Release ownership with the last Launcher, not the last inherited fd.
+        let _ = FileExt::unlock(&self._lock);
+    }
+}
 #[derive(Clone)]
 pub struct Launcher(Arc<Shared>);
 #[derive(Serialize)]
@@ -763,6 +770,27 @@ async fn pipe_logs<R: tokio::io::AsyncRead + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn directory_lock_follows_launcher_lifetime_even_with_inherited_descriptor() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().to_path_buf();
+        let launcher = Launcher::open(Some(root.clone())).unwrap();
+        let owner = launcher.clone();
+        // fork() duplicates the open file description until the child execs.
+        let inherited = launcher.0._lock.try_clone().unwrap();
+        assert!(Launcher::open(Some(root.clone())).is_err());
+        drop(launcher);
+        assert!(Launcher::open(Some(root.clone())).is_err());
+        drop(owner);
+
+        let reopened = Launcher::open(Some(root.clone())).unwrap();
+        drop(inherited);
+        assert!(Launcher::open(Some(root.clone())).is_err());
+        drop(reopened);
+        assert!(Launcher::open(Some(root)).is_ok());
+    }
+
     #[tokio::test]
     async fn instance_identity_edits_persist_without_changing_the_game_directory() {
         let temp = tempfile::tempdir().unwrap();
