@@ -1,19 +1,21 @@
 {
   "name": "nekocrate-desktop",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.0-dev.1",
   "type": "module",
   "scripts": {
     "dev": "vite --port 1420 --strictPort",
     "build": "vue-tsc --noEmit && vite build",
     "tauri": "tauri",
-    "format": "prettier --write src index.html package.json tsconfig.json vite.config.ts"
+    "format": "prettier --write src tests index.html package.json tsconfig.json vite.config.ts",
+    "test": "node --experimental-strip-types --test tests/*.test.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.10.0",
     "@tauri-apps/plugin-dialog": "^2.6.0",
     "@tauri-apps/plugin-opener": "^2.5.0",
     "lucide-vue-next": "^0.468.0",
+    "skinview3d": "^3.4.2",
     "vue": "^3.5.0"
   },
   "devDependencies": {

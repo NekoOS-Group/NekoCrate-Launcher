@@ -229,6 +229,7 @@ async fn exchange_at(
             expires_at: now() + minecraft["expires_in"].as_u64().unwrap_or(3600),
             client_id: client_id.into(),
             owned: true,
+            skin: crate::skin::profile_skin(&profile),
         },
         access_token: access,
         xuid,
@@ -276,7 +277,8 @@ mod tests {
             if owned {
                 replies.push((
                     200,
-                    json!({"id":"00112233445566778899aabbccddeeff","name":"NekoTest"}).to_string(),
+                    json!({"id":"00112233445566778899aabbccddeeff","name":"NekoTest",
+                        "skins":[{"state":"ACTIVE","variant":"SLIM","url":"https://textures.minecraft.net/texture/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}).to_string(),
                 ));
             }
             let (url, server) = crate::test_http::serve(replies).await;
@@ -300,6 +302,7 @@ mod tests {
                 assert_eq!(session.account.username, "NekoTest");
                 assert_eq!(session.xuid, "1234");
                 assert!(session.account.owned);
+                assert!(session.account.skin.as_ref().unwrap().slim);
                 assert_eq!(requests.len(), 5);
             } else {
                 assert!(result.err().unwrap().to_string().contains("没有可用"));

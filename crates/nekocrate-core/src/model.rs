@@ -26,12 +26,27 @@ impl Default for Settings {
 pub struct Instance {
     pub id: String,
     pub name: String,
-    pub version: String,
+    #[serde(default)]
+    pub icon: Option<u8>,
+    pub versions: Vec<InstanceVersion>,
+    pub selected_version: Option<String>,
     pub memory_mb: u32,
     pub java_path: Option<String>,
     pub created_at: u64,
-    pub installed: bool,
     pub last_played: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InstanceVersion {
+    pub id: String,
+    pub installed: bool,
+}
+impl Instance {
+    pub fn selected(&self) -> Option<&InstanceVersion> {
+        self.versions
+            .iter()
+            .find(|v| Some(&v.id) == self.selected_version.as_ref())
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -41,6 +56,14 @@ pub struct Account {
     pub expires_at: u64,
     pub client_id: String,
     pub owned: bool,
+    #[serde(default)]
+    pub skin: Option<AccountSkin>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AccountSkin {
+    pub url: String,
+    pub slim: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -55,7 +78,7 @@ pub struct Database {
 impl Default for Database {
     fn default() -> Self {
         Self {
-            schema: 1,
+            schema: 2,
             settings: Settings::default(),
             instances: vec![],
             accounts: vec![],

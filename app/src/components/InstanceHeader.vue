@@ -1,0 +1,168 @@
+<script setup lang="ts">
+import { nextTick, onBeforeUnmount, onMounted, ref } from "vue";
+import { FolderOpen } from "lucide-vue-next";
+
+const props = defineProps<{
+  name: string;
+  icon: number;
+  directory: string;
+  directoryLoading: boolean;
+  disabled: boolean;
+}>();
+const emit = defineEmits<{
+  "update:name": [name: string];
+  "update:icon": [icon: number];
+  openDirectory: [];
+}>();
+const icons = ["草方块", "冰块", "红砖", "苔石"];
+const renaming = ref(false);
+const draftName = ref("");
+const nameInput = ref<HTMLInputElement>();
+const nameButton = ref<HTMLButtonElement>();
+const iconControl = ref<HTMLElement>();
+const iconButton = ref<HTMLButtonElement>();
+const choosingIcon = ref(false);
+
+async function rename() {
+  choosingIcon.value = false;
+  draftName.value = props.name;
+  renaming.value = true;
+  await nextTick();
+  nameInput.value?.focus();
+  nameInput.value?.select();
+}
+function finishRename(restoreFocus = false, reportError = true): boolean {
+  if (!renaming.value) return true;
+  const name = draftName.value.trim();
+  const valid = name.length > 0 && [...name].length <= 80;
+  nameInput.value?.setCustomValidity(valid ? "" : "实例名称应为 1–80 个字符");
+  if (!valid) {
+    if (reportError) nameInput.value?.reportValidity();
+    return false;
+  }
+  emit("update:name", name);
+  renaming.value = false;
+  if (restoreFocus) void nextTick(() => nameButton.value?.focus());
+  return true;
+}
+function cancelRename() {
+  renaming.value = false;
+  void nextTick(() => nameButton.value?.focus());
+}
+function closeIcons(restoreFocus = false) {
+  choosingIcon.value = false;
+  if (restoreFocus) iconButton.value?.focus();
+}
+function chooseIcon(icon: number) {
+  emit("update:icon", icon);
+  closeIcons(true);
+}
+function outside(event: PointerEvent) {
+  if (
+    event.target instanceof Node &&
+    !iconControl.value?.contains(event.target)
+  )
+    closeIcons();
+}
+function leaveIcons(event: FocusEvent) {
+  if (
+    !(event.relatedTarget instanceof Node) ||
+    !iconControl.value?.contains(event.relatedTarget)
+  )
+    closeIcons();
+}
+onMounted(() => document.addEventListener("pointerdown", outside, true));
+onBeforeUnmount(() =>
+  document.removeEventListener("pointerdown", outside, true),
+);
+defineExpose({ finishRename });
+</script>
+
+<template>
+  <div class="settings-heading dialog-heading" tabindex="-1" autofocus>
+    <div
+      ref="iconControl"
+      class="instance-icon-control"
+      @focusout="leaveIcons"
+      @keydown.esc.stop.prevent="closeIcons(true)"
+    >
+      <button
+        ref="iconButton"
+        class="instance-heading-icon"
+        :disabled="disabled"
+        aria-label="切换实例图标"
+        title="切换实例图标"
+        :aria-expanded="choosingIcon"
+        aria-controls="instance-icon-choices"
+        @click="choosingIcon = !choosingIcon"
+      >
+        <span class="instance-art" :data-material="icon" aria-hidden="true" />
+      </button>
+      <div
+        v-if="choosingIcon"
+        id="instance-icon-choices"
+        class="instance-icon-choices glass-surface"
+        role="group"
+        aria-label="实例图标"
+      >
+        <button
+          v-for="(label, index) in icons"
+          :key="label"
+          class="instance-tile"
+          :class="{ selected: icon === index }"
+          :disabled="disabled"
+          :aria-label="label"
+          :title="label"
+          :aria-pressed="icon === index"
+          @click="chooseIcon(index)"
+        >
+          <span
+            class="instance-art"
+            :data-material="index"
+            aria-hidden="true"
+          />
+        </button>
+      </div>
+    </div>
+    <div class="settings-heading-details">
+      <h2>
+        <input
+          v-if="renaming"
+          ref="nameInput"
+          v-model="draftName"
+          class="instance-name-input"
+          aria-label="实例名称"
+          :disabled="disabled"
+          maxlength="80"
+          autocomplete="off"
+          @input="nameInput?.setCustomValidity('')"
+          @blur="finishRename(false, false)"
+          @keydown.enter.stop.prevent="finishRename(true)"
+          @keydown.esc.stop.prevent="cancelRename"
+        />
+        <button
+          v-else
+          ref="nameButton"
+          class="instance-name-button"
+          :disabled="disabled"
+          :title="`${name} · 点击修改名称`"
+          aria-label="修改实例名称"
+          @click="rename"
+        >
+          {{ name }}
+        </button>
+      </h2>
+      <button
+        class="settings-directory-link"
+        :disabled="!directory"
+        :title="directory"
+        :aria-label="`打开游戏目录：${directory || '读取中'}`"
+        @click="emit('openDirectory')"
+      >
+        <FolderOpen :size="13" /><span>{{
+          directory || (directoryLoading ? "读取目录…" : "目录不可用")
+        }}</span>
+      </button>
+    </div>
+  </div>
+</template>

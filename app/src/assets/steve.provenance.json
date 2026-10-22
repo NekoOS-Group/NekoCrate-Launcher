@@ -1,0 +1,9 @@
+{
+  "asset": "steve.png",
+  "source": "https://piston-data.mojang.com/v1/objects/30c73b1c5da787909b2f73340419fdf13b9def88/client.jar",
+  "version": "Minecraft Java Edition 1.21.1",
+  "archive_entry": "assets/minecraft/textures/entity/player/wide/steve.png",
+  "client_sha1": "30c73b1c5da787909b2f73340419fdf13b9def88",
+  "asset_sha256": "d876e0c88f4b3de71040966ed94a614f315b888592b520b993399fd2738418d0",
+  "copyright": "Mojang Studios / Microsoft. Unmodified Minecraft game texture; not covered by this repository's code license."
+}

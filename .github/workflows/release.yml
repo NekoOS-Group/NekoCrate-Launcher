@@ -1,0 +1,130 @@
+name: Build and publish development release
+
+on:
+  push:
+    tags: ["dev*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing development tag to build
+        required: true
+        default: dev0.1
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            platform: mac-appsilicon
+            target: aarch64-apple-darwin
+            bundles: app,dmg
+          - os: windows-2022
+            platform: win-amd64
+            target: x86_64-pc-windows-msvc
+            bundles: nsis
+          - os: ubuntu-22.04
+            platform: linux-amd64
+            target: x86_64-unknown-linux-gnu
+            bundles: deb,appimage
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+      - uses: dtolnay/rust-toolchain@1.93.1
+        with:
+          targets: ${{ matrix.target }}
+          components: rustfmt, clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libssl-dev librsvg2-dev libayatana-appindicator3-dev libdbus-1-dev libfuse2 patchelf
+      - name: Install frontend dependencies
+        run: npm ci
+        working-directory: app
+      - name: Verify source
+        run: |
+          python scripts/release_assets.py check-version --tag "$RELEASE_TAG"
+          npm --prefix app test
+          cargo fmt --all -- --check
+          cargo test --workspace --locked
+          cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Build release installers
+        run: npm run tauri build -- --target "${{ matrix.target }}" --bundles "${{ matrix.bundles }}" --ci -- --locked
+        working-directory: app
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+      - name: Collect and verify architecture
+        run: python scripts/release_assets.py collect --tag "$RELEASE_TAG" --target "${{ matrix.target }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: artifacts/release/*
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  publish:
+    name: Publish dev release
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: artifacts/release
+          merge-multiple: true
+      - name: Verify all platforms and checksums
+        run: python scripts/release_assets.py verify --tag "$RELEASE_TAG"
+      - name: Publish complete prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" --json isDraft > /tmp/nekocrate-release.json 2>/dev/null; then
+            test "$(jq -r .isDraft /tmp/nekocrate-release.json)" = true || { echo "Release already published; refusing to replace its assets."; exit 1; }
+          else
+            gh release create "$RELEASE_TAG" --verify-tag --draft --prerelease --title "猫咪盒子启动器 $RELEASE_TAG" --notes-file "docs/releases/$RELEASE_TAG.md"
+          fi
+          gh release upload "$RELEASE_TAG" artifacts/release/NekoCrate-Launcher-* artifacts/release/SHA256SUMS artifacts/release/BUILDINFO.json --clobber
+          gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false --notes-file "docs/releases/$RELEASE_TAG.md"

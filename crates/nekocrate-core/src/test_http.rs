@@ -47,3 +47,17 @@ pub async fn serve(replies: Vec<(u16, String)>) -> (String, tokio::task::JoinHan
     });
     (address, task)
 }
+
+pub fn version_fixture(id: &str) -> crate::model::Version {
+    serde_json::from_value(serde_json::json!({
+        "id": id, "type": "release", "mainClass": "net.minecraft.client.main.Main",
+        "downloads": {}, "libraries": [],
+        "assetIndex": {"id": id, "url": "http://127.0.0.1/fixture", "sha1": "", "size": 0},
+        "arguments": {"jvm": ["-Djava.library.path=${natives_directory}", "-cp", "${classpath}"],
+            "game": ["--gameDir", "${game_directory}", "--version", "${version_name}",
+                "--username", "${auth_player_name}", "--uuid", "${auth_uuid}",
+                "--accessToken", "${auth_access_token}", "--userType", "${user_type}",
+                "--clientId", "${clientid}", "--xuid", "${auth_xuid}"]}
+    }))
+    .unwrap()
+}

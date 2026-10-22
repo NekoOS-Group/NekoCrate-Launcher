@@ -1,0 +1,12 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "NekoCrate Launcher",
+  "bundle": {
+    "targets": ["deb", "appimage"],
+    "linux": {
+      "deb": {
+        "desktopTemplate": "linux/nekocrate-launcher.desktop"
+      }
+    }
+  }
+}

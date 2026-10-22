@@ -1,7 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "NekoCrate Launcher",
-  "version": "0.1.0",
+  "productName": "猫咪盒子启动器",
+  "version": "0.1.0-dev.1",
+  "mainBinaryName": "nekocrate-launcher",
   "identifier": "dev.nekocrate.launcher",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -12,9 +13,9 @@
   "app": {
     "windows": [
       {
-        "title": "NekoCrate Launcher · 猫匣启动器",
-        "width": 1140,
-        "height": 720,
+        "title": "猫咪盒子启动器",
+        "width": 900,
+        "height": 600,
         "minWidth": 900,
         "minHeight": 600
       }
@@ -25,15 +26,21 @@
   },
   "bundle": {
     "active": true,
-    "targets": [
-      "app"
-    ],
+    "targets": ["app"],
     "shortDescription": "跨平台 Minecraft Java 启动器",
     "category": "Game",
-    "icon": [
-      "icons/icon.png",
-      "icons/icon.icns",
-      "icons/icon.ico"
-    ]
+    "publisher": "NekoOS Group",
+    "homepage": "https://github.com/NekoOS-Group/NekoCrate-Launcher",
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": "-"
+    },
+    "windows": {
+      "nsis": {
+        "languages": ["SimpChinese", "English"],
+        "installMode": "currentUser"
+      }
+    },
+    "icon": ["icons/icon.png", "icons/icon.icns", "icons/icon.ico"]
   }
 }

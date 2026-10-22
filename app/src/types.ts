@@ -8,12 +8,17 @@ export interface Settings {
 export interface Instance {
   id: string;
   name: string;
-  version: string;
+  icon?: number | null;
+  versions: InstanceVersion[];
+  selected_version: string | null;
   memory_mb: number;
   java_path: string | null;
   created_at: number;
-  installed: boolean;
   last_played: number | null;
+}
+export interface InstanceVersion {
+  id: string;
+  installed: boolean;
 }
 export interface Account {
   id: string;
@@ -21,6 +26,7 @@ export interface Account {
   expires_at: number;
   client_id: string;
   owned: boolean;
+  skin?: { url: string; slim: boolean } | null;
 }
 export interface Snapshot {
   root: string;
@@ -52,10 +58,12 @@ export interface Challenge {
 }
 export interface Task {
   id: number;
+  instance_id: string | null;
   cancellable: boolean;
   title: string;
   status: "running" | "done" | "error" | "cancelled";
   message: string;
   progress: number;
+  indeterminate: boolean;
   started: string;
 }

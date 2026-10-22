@@ -54,9 +54,25 @@ pub fn safe_relative(value: &str) -> Result<PathBuf> {
     }
     Ok(path.to_path_buf())
 }
+pub fn safe_version(version: &str) -> Result<()> {
+    if version.len() > 80 || safe_relative(version)?.components().count() != 1 {
+        bail!("游戏版本不合法");
+    }
+    Ok(())
+}
 pub fn safe_id(id: &str) -> Result<()> {
     uuid::Uuid::parse_str(id).context("实例 ID 无效")?;
     Ok(())
+}
+
+/// Expand only a leading `~` path component; never evaluate shell syntax.
+pub fn expand_user_path(path: &Path) -> Result<PathBuf> {
+    if let Ok(relative) = path.strip_prefix("~") {
+        let home = directories::UserDirs::new().context("无法确定用户主目录")?;
+        Ok(home.home_dir().join(relative))
+    } else {
+        Ok(path.to_owned())
+    }
 }
 
 pub fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
@@ -104,6 +120,26 @@ pub fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn expands_home_without_evaluating_other_path_text() {
+        let home = directories::UserDirs::new().unwrap();
+        assert_eq!(expand_user_path(Path::new("~")).unwrap(), home.home_dir());
+        assert_eq!(
+            expand_user_path(Path::new("~/game/minecraft/.minecraft")).unwrap(),
+            home.home_dir().join("game/minecraft/.minecraft")
+        );
+        for literal in [
+            "~someone/game",
+            "game/~/world",
+            "$HOME/game",
+            "game with spaces/.minecraft",
+        ] {
+            assert_eq!(
+                expand_user_path(Path::new(literal)).unwrap(),
+                PathBuf::from(literal)
+            );
+        }
+    }
     #[test]
     fn rejects_path_traversal() {
         for bad in ["../secret", "/etc/passwd", "C:/x", "a\\b", "a/../../b", ""] {

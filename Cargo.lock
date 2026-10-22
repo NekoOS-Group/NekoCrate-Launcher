@@ -2461,7 +2461,7 @@ dependencies = [
 
 [[package]]
 name = "nekocrate-cli"
-version = "0.1.0"
+version = "0.1.0-dev.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2473,7 +2473,7 @@ dependencies = [
 
 [[package]]
 name = "nekocrate-core"
-version = "0.1.0"
+version = "0.1.0-dev.1"
 dependencies = [
  "anyhow",
  "directories",
@@ -2499,10 +2499,13 @@ dependencies = [
 
 [[package]]
 name = "nekocrate-desktop"
-version = "0.1.0"
+version = "0.1.0-dev.1"
 dependencies = [
  "anyhow",
  "nekocrate-core",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "serde",
  "serde_json",
  "tauri",
@@ -2512,6 +2515,10 @@ dependencies = [
  "tokio",
  "tokio-util",
 ]
+
+[[package]]
+name = "nekocrate-dev"
+version = "0.1.0-dev.1"
 
 [[package]]
 name = "new_debug_unreachable"

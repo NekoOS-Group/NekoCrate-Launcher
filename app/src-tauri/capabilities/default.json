@@ -3,5 +3,18 @@
   "identifier": "default",
   "description": "Main window, directory selection and external Microsoft sign-in",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:allow-open", "opener:allow-open-url"]
+  "permissions": [
+    "core:default",
+    "dialog:allow-open",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://microsoft.com/*" },
+        { "url": "https://www.microsoft.com/*" },
+        { "url": "https://login.microsoftonline.com/*" },
+        { "url": "https://login.live.com/*" },
+        { "url": "https://learn.microsoft.com/*" }
+      ]
+    }
+  ]
 }

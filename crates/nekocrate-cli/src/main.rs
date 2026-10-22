@@ -5,7 +5,11 @@ use std::{path::PathBuf, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Parser)]
-#[command(name = "nekocrate", version, about = "NekoCrate Launcher · 猫匣启动器")]
+#[command(
+    name = "nekocrate",
+    version,
+    about = "猫咪盒子启动器 · NekoCrate Launcher"
+)]
 struct Cli {
     #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
@@ -18,7 +22,15 @@ enum Commands {
     Versions,
     Create {
         name: String,
-        #[arg(long, default_value = "1.21.1")]
+        #[arg(long, default_value = "")]
+        version: String,
+    },
+    AddVersion {
+        id: String,
+        version: String,
+    },
+    SelectVersion {
+        id: String,
         version: String,
     },
     Install {
@@ -39,7 +51,7 @@ enum Commands {
     Import {
         source: PathBuf,
         name: String,
-        #[arg(long)]
+        #[arg(long, default_value = "")]
         version: String,
     },
     Java,
@@ -103,6 +115,11 @@ async fn main() -> Result<()> {
             "{}",
             serde_json::to_string_pretty(&launcher.create_instance(&name, &version)?)?
         ),
+        Commands::AddVersion { id, version } => println!(
+            "{}",
+            serde_json::to_string_pretty(&launcher.add_version(&id, &version)?)?
+        ),
+        Commands::SelectVersion { id, version } => launcher.select_version(&id, &version)?,
         Commands::Install { id } | Commands::Repair { id } => {
             launcher.install(&id, &cancel, &sink).await?
         }

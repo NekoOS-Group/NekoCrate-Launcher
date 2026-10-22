@@ -173,7 +173,7 @@ pub async fn install_files(
     let mut files = vec![];
     files.push(artifact_file(
         v.downloads.get("client").context("元数据缺少客户端文件")?,
-        root.join("versions")
+        game.join("versions")
             .join(&v.id)
             .join(format!("{}.jar", v.id)),
     ));
@@ -237,7 +237,7 @@ pub async fn install_files(
     ));
     downloader.batch(files, cancel, sink).await?;
     check_cancel(cancel)?;
-    let natives = game.parent().context("实例目录无效")?.join("natives");
+    let natives = game.join("versions").join(&v.id).join("natives");
     if natives.exists() {
         std::fs::remove_dir_all(&natives)?;
     }
@@ -301,14 +301,56 @@ fn extract_natives(
     }
     Ok(())
 }
+/// Game process identity. A local player is never persisted as a Microsoft account.
+pub struct LaunchSession {
+    pub username: String,
+    pub uuid: String,
+    pub access_token: String,
+    pub auth_session: String,
+    pub client_id: String,
+    pub xuid: String,
+    pub user_type: &'static str,
+    pub(crate) log_secrets: Vec<String>,
+}
+impl LaunchSession {
+    pub fn guest() -> Self {
+        Self {
+            username: "Player".into(),
+            // Java UUID.nameUUIDFromBytes("OfflinePlayer:Player".getBytes(UTF_8)).
+            // Stable across launches and instances; no account or token is invented.
+            uuid: "a01e3843e5213998958af459800e4d11".into(),
+            access_token: "0".into(),
+            auth_session: "-".into(),
+            client_id: String::new(),
+            xuid: String::new(),
+            user_type: "legacy",
+            log_secrets: vec![],
+        }
+    }
+}
+impl From<crate::auth::MinecraftSession> for LaunchSession {
+    fn from(session: crate::auth::MinecraftSession) -> Self {
+        Self {
+            username: session.account.username,
+            uuid: session.account.id,
+            auth_session: session.access_token.clone(),
+            log_secrets: vec![session.access_token.clone(), session.refresh_token],
+            access_token: session.access_token,
+            client_id: session.account.client_id,
+            xuid: session.xuid,
+            user_type: "msa",
+        }
+    }
+}
+
 pub fn arguments(
     v: &Version,
     root: &Path,
     instance: &Instance,
-    account: &crate::auth::MinecraftSession,
+    account: &LaunchSession,
 ) -> Result<Vec<String>> {
-    let game = root.join("instances").join(&instance.id).join("game");
-    let native = game.parent().unwrap().join("natives");
+    let game = root.join("instances").join(&instance.id).join(".minecraft");
+    let native = game.join("versions").join(&v.id).join("natives");
     let mut classpath = vec![];
     for l in v.libraries.iter().filter(|l| is_allowed(l)) {
         if let Some(a) = &l.downloads.artifact {
@@ -316,7 +358,7 @@ pub fn arguments(
         }
     }
     classpath.push(
-        root.join("versions")
+        game.join("versions")
             .join(&v.id)
             .join(format!("{}.jar", v.id))
             .to_string_lossy()
@@ -324,11 +366,11 @@ pub fn arguments(
     );
     let separator = if cfg!(windows) { ";" } else { ":" };
     let mut vars = HashMap::from([
-        ("auth_player_name", account.account.username.clone()),
-        ("auth_uuid", account.account.id.clone()),
+        ("auth_player_name", account.username.clone()),
+        ("auth_uuid", account.uuid.clone()),
         ("auth_access_token", account.access_token.clone()),
-        ("auth_session", account.access_token.clone()),
-        ("user_type", "msa".into()),
+        ("auth_session", account.auth_session.clone()),
+        ("user_type", account.user_type.into()),
         ("user_properties", "{}".into()),
         ("version_name", v.id.clone()),
         ("version_type", v.kind.clone()),
@@ -344,7 +386,7 @@ pub fn arguments(
         ("classpath_separator", separator.into()),
         ("launcher_name", "NekoCrate".into()),
         ("launcher_version", env!("CARGO_PKG_VERSION").into()),
-        ("clientid", account.account.client_id.clone()),
+        ("clientid", account.client_id.clone()),
         ("auth_xuid", account.xuid.clone()),
         ("resolution_width", "1280".into()),
         ("resolution_height", "720".into()),
@@ -435,5 +477,105 @@ mod tests {
             vec!["/tmp/My World; echo secret"]
         );
         assert!(expand(&[Argument::Plain("${unknown}".into())], &vars).is_err());
+    }
+    #[tokio::test]
+    async fn two_versions_keep_clients_and_natives_separate_but_share_game_directory() {
+        use sha1::{Digest, Sha1};
+        use std::fs;
+        let temp = tempfile::tempdir().unwrap();
+        let launcher = crate::Launcher::open(Some(temp.path().into())).unwrap();
+        let instance = launcher.create_instance("多版本", "1.21.1").unwrap();
+        launcher.add_version(&instance.id, "1.20.1").unwrap();
+        let game = launcher.game_dir(&instance.id).unwrap();
+        let downloader = Downloader::new(launcher.root(), Settings::default()).unwrap();
+        let cancel = CancellationToken::new();
+        let sink: EventSink = std::sync::Arc::new(|_| {});
+        let account: LaunchSession = crate::auth::MinecraftSession {
+            account: Account {
+                id: "fixture-player".into(),
+                username: "Fixture".into(),
+                expires_at: 0,
+                client_id: "fixture-client".into(),
+                owned: true,
+                skin: None,
+            },
+            access_token: "fixture-token".into(),
+            refresh_token: "fixture-refresh".into(),
+            xuid: "0".into(),
+        }
+        .into();
+        let mut launch_args = vec![];
+        for (index, id) in ["1.21.1", "1.20.1"].iter().enumerate() {
+            let index_body = format!("{{ \"objects\": {{}} }}{}", " ".repeat(index));
+            let client_body = format!("client-fixture-{id}");
+            let (base, server) = crate::test_http::serve(vec![
+                (200, index_body.clone()),
+                (200, client_body.clone()),
+            ])
+            .await;
+            let mut version = crate::test_http::version_fixture(id);
+            version.asset_index.url = format!("{base}/index");
+            version.asset_index.sha1 = hex::encode(Sha1::digest(index_body.as_bytes()));
+            version.asset_index.size = index_body.len() as u64;
+            version.downloads.insert(
+                "client".into(),
+                Artifact {
+                    url: format!("{base}/client"),
+                    sha1: hex::encode(Sha1::digest(client_body.as_bytes())),
+                    size: client_body.len() as u64,
+                    path: None,
+                },
+            );
+            install_files(
+                launcher.root(),
+                &game,
+                &version,
+                &downloader,
+                &cancel,
+                &sink,
+            )
+            .await
+            .unwrap();
+            assert_eq!(server.await.unwrap().len(), 2);
+            fs::write(game.join("versions").join(id).join("natives/marker"), id).unwrap();
+            launch_args.push(arguments(&version, launcher.root(), &instance, &account).unwrap());
+        }
+        for (index, id) in ["1.21.1", "1.20.1"].iter().enumerate() {
+            let version_dir = game.join("versions").join(id);
+            assert_eq!(
+                fs::read_to_string(version_dir.join("natives/marker")).unwrap(),
+                *id
+            );
+            assert_eq!(
+                fs::read_to_string(version_dir.join(format!("{id}.jar"))).unwrap(),
+                format!("client-fixture-{id}")
+            );
+            let args = &launch_args[index];
+            for (key, value) in [
+                ("--username", "Fixture"),
+                ("--uuid", "fixture-player"),
+                ("--accessToken", "fixture-token"),
+                ("--userType", "msa"),
+                ("--clientId", "fixture-client"),
+                ("--xuid", "0"),
+            ] {
+                let at = args.iter().position(|arg| arg == key).unwrap();
+                assert_eq!(args[at + 1], value);
+            }
+            let game_at = args.iter().position(|arg| arg == "--gameDir").unwrap();
+            assert_eq!(args[game_at + 1], game.to_string_lossy());
+            assert!(
+                args.contains(
+                    &version_dir
+                        .join(format!("{id}.jar"))
+                        .to_string_lossy()
+                        .into_owned()
+                )
+            );
+            assert!(args.contains(&format!(
+                "-Djava.library.path={}",
+                version_dir.join("natives").display()
+            )));
+        }
     }
 }

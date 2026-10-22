@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=猫咪盒子启动器
+Name[en]=NekoCrate Launcher
+Comment=Minecraft Java Edition launcher
+Exec={{exec}}
+Icon={{icon}}
+Terminal=false
+Categories=Game;

@@ -1,0 +1,2 @@
+[alias]
+ui = "run --quiet --package nekocrate-dev --"
