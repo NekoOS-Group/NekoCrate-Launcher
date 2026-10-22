@@ -58,7 +58,7 @@ npm run tauri build
 
 项目默认 bundle 类型是 macOS app。其他平台可通过 `--bundles nsis` / `--bundles deb` 选择平台包，或先执行 `npm run tauri build -- --no-bundle` 验证可执行文件。
 
-开发版本发布由 `.github/workflows/release.yml` 管理：推送 `dev*` 或 `beta*` 标签后，在 macOS ARM64、Windows AMD64、Ubuntu 22.04 AMD64 原生 runner 上分别测试并构建。三个平台全部成功后校验来源提交、架构与 SHA-256，上传 DMG / app ZIP、NSIS EXE、DEB / AppImage，再公开 GitHub 预发布版。构建使用 Rust 1.93.1、Node.js 22 和锁定依赖，`docs/releases/<标签>.md` 保存发布说明。`dev0.1` 对应应用版本 `0.1.0-dev.1`；`beta0.2` 对应 `0.2.0-beta.1`。
+开发版本发布由 `.github/workflows/release.yml` 管理：推送 `dev*` 标签后，在 macOS ARM64、Windows AMD64、Ubuntu 22.04 AMD64 原生 runner 上分别测试并构建。三个平台全部成功后校验来源提交、架构与 SHA-256，上传 DMG / app ZIP、NSIS EXE、DEB / AppImage，再公开 GitHub 预发布版。构建使用 Rust 1.93.1、Node.js 22 和锁定依赖，`docs/releases/<标签>.md` 保存发布说明。`dev0.1` 对应应用版本 `0.1.0-dev.1`；`dev0.2` 对应 `0.2.0-dev.1`。
 
 macOS 开发包采用 [Tauri ad-hoc 签名](https://v2.tauri.app/distribute/sign/macos/#ad-hoc-signing)，未做 Apple 公证；Windows 开发包没有发布者代码签名。Linux 使用英文包名满足包管理器命名要求，桌面入口及窗口仍显示「猫咪盒子启动器」。
 

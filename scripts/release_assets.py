@@ -28,9 +28,9 @@ def write_json(path, value):
 
 
 def version(tag):
-    match = re.fullmatch(r"(dev|beta)(0|[1-9]\d*)\.(0|[1-9]\d*)", tag)
+    match = re.fullmatch(r"(dev)(0|[1-9]\d*)\.(0|[1-9]\d*)", tag)
     if not match:
-        raise ValueError("Expected a preview tag such as dev0.1 or beta0.2")
+        raise ValueError("Expected a preview tag such as dev0.1 or dev0.2")
     channel, major, minor = match.groups()
     expected_version = f"{major}.{minor}.0-{channel}.1"
     config = read_json(ROOT / "app/src-tauri/tauri.conf.json")

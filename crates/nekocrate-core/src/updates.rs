@@ -32,7 +32,7 @@ fn release_version(tag: &str) -> Option<Version> {
     // Public preview tags are compact names; installed packages use SemVer.
     Version::parse(match tag {
         "dev0.1" => "0.1.0-dev.1",
-        "beta0.2" => "0.2.0-beta.1",
+        "dev0.2" => "0.2.0-dev.1",
         _ => tag.strip_prefix('v').unwrap_or(tag),
     })
     .ok()
@@ -170,16 +170,16 @@ mod tests {
         );
     }
     #[test]
-    fn beta_tag_updates_dev_builds_and_recognizes_the_installed_beta() {
-        let releases = vec![release("dev0.1", true), release("beta0.2", true)];
+    fn dev_tag_updates_older_builds_and_recognizes_the_installed_preview() {
+        let releases = vec![release("dev0.1", true), release("dev0.2", true)];
         let dev = select_release(&releases, "0.1.0-dev.1", "macos", "aarch64").unwrap();
         assert!(dev.available);
-        assert_eq!(dev.latest_version, "beta0.2");
-        assert!(dev.download_url.ends_with("beta0.2-mac-appsilicon.dmg"));
-        for current in ["0.2.0-beta.1", "0.2.0-beta.2"] {
-            let beta = select_release(&releases, current, "windows", "x86_64").unwrap();
-            assert!(!beta.available);
-            assert_eq!(beta.latest_version, "beta0.2");
+        assert_eq!(dev.latest_version, "dev0.2");
+        assert!(dev.download_url.ends_with("dev0.2-mac-appsilicon.dmg"));
+        for current in ["0.2.0-dev.1", "0.2.0-dev.2"] {
+            let preview = select_release(&releases, current, "windows", "x86_64").unwrap();
+            assert!(!preview.available);
+            assert_eq!(preview.latest_version, "dev0.2");
         }
         assert!(select_release(&releases, "0.1.0", "linux", "x86_64").is_err());
     }

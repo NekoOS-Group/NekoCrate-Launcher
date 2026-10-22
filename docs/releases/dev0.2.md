@@ -1,4 +1,4 @@
-猫咪盒子启动器 beta 0.2，应用版本 `0.2.0-beta.1`。
+猫咪盒子启动器 dev 0.2，应用版本 `0.2.0-dev.1`。
 
 ## 下载
 
@@ -8,7 +8,7 @@
 | Windows AMD64（Intel / AMD 64 位） | `win-amd64-setup.exe` |
 | Linux AMD64（Intel / AMD 64 位） | `linux-amd64.AppImage`、`linux-amd64.deb` |
 
-文件名均以 `NekoCrate-Launcher-beta0.2-` 开头。`SHA256SUMS` 提供文件校验值，`BUILDINFO.json` 记录源代码提交、版本、目标架构及每个安装包的校验值。
+文件名均以 `NekoCrate-Launcher-dev0.2-` 开头。`SHA256SUMS` 提供文件校验值，`BUILDINFO.json` 记录源代码提交、版本、目标架构及每个安装包的校验值。
 
 ## 本版变化
 
@@ -23,7 +23,7 @@
 
 ## 安装与已知限制
 
-- 这是测试版；三个平台的自动化测试与构建不等于全部功能已完成实机交互和真实游戏进入验收。
+- 这是开发预览版；三个平台的自动化测试与构建不等于全部功能已完成实机交互和真实游戏进入验收。
 - macOS 要求 11.0 或更新版本，采用 ad-hoc 签名，未做 Apple 公证。Windows 安装程序尚无发布者代码签名，使用 WebView2，安装时可能需要联网安装运行时。
 - Linux 包在 Ubuntu 22.04 构建；Debian 包由系统安装依赖，AppImage 需要执行权限，部分发行版还需要 FUSE 2。
 - 微软登录仍需配置有效的 Microsoft Client ID，并满足 Minecraft API 访问要求；见仓库 `docs/authentication.md`。也可不登录，以本地 Player 身份启动游戏。

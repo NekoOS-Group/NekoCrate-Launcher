@@ -2,13 +2,13 @@ name: Build and publish preview release
 
 on:
   push:
-    tags: ["dev*", "beta*"]
+    tags: ["dev*"]
   workflow_dispatch:
     inputs:
       tag:
         description: Existing preview tag to build
         required: true
-        default: beta0.2
+        default: dev0.2
         type: string
 
 permissions:
