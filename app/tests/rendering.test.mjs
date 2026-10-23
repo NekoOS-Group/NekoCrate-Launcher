@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createBackdropGraph } from "../src/flowGraph.ts";
 import { createHexFlow, advanceHexFlow } from "../src/hexFlow.ts";
-import { createFlowPainter } from "../src/flowPainter.ts";
+import { createFlowPainter } from "./helpers/svgFlowPainter.ts";
 import { createDemandRenderer } from "../src/demandRenderer.ts";
 
 const fixture = JSON.parse(

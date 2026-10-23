@@ -6,6 +6,8 @@ import {
   onUnmounted,
   reactive,
   ref,
+  shallowRef,
+  triggerRef,
   watch,
   watchEffect,
 } from "vue";
@@ -49,6 +51,7 @@ import {
   applyWorkflowEvent,
   finishWorkflow,
   setWorkflowPaused,
+  clearWorkflowFiles,
 } from "./downloadWorkflow";
 import SettingsAbout from "./components/SettingsAbout.vue";
 import { vPanelSize } from "./panelSize";
@@ -340,7 +343,14 @@ function dismissError() {
   settingsSaveError.value = "";
   proxyPasswordError.value = "";
 }
-const logs = ref<{ time: string; kind: string; message: string }[]>([]);
+type LogLine = { time: string; kind: string; message: string };
+const logs = shallowRef<LogLine[]>([]);
+function appendLog(line: LogLine, bounded = false) {
+  logs.value.push(line);
+  if (bounded && logs.value.length > 800)
+    logs.value.splice(0, logs.value.length - 800);
+  triggerRef(logs);
+}
 const showLogs = ref(false);
 const modal = ref<"create" | "import" | "edit" | "delete" | "version" | null>(
   null,
@@ -615,7 +625,7 @@ async function reorderInstance(id: string, beforeId: string | null) {
       );
     }
     error.value = message(e);
-    logs.value.push({ time: stamp(), kind: "error", message: error.value });
+    appendLog({ time: stamp(), kind: "error", message: error.value });
   } finally {
     instanceOrderSaving.value = false;
   }
@@ -693,7 +703,7 @@ async function action<T>(
       : 0;
     // Only the current workflow needs its detailed file list. Keep compact
     // history for per-version resume progress without retaining old file maps.
-    for (const previous of tasks.value) previous.workflow.files.clear();
+    for (const previous of tasks.value) clearWorkflowFiles(previous.workflow);
     entry = reactive<Task>({
       id: Date.now(),
       instance_id: typeof data.id === "string" ? data.id : null,
@@ -735,7 +745,7 @@ async function action<T>(
       entry.message = text;
     }
     error.value = text;
-    logs.value.push({ time: stamp(), kind: "error", message: text });
+    appendLog({ time: stamp(), kind: "error", message: text });
   } finally {
     busy.value = false;
     if (entry) current.value = null;
@@ -878,7 +888,7 @@ async function saveEditedInstance() {
   } catch (e) {
     const text = message(e);
     if (isCurrentEditor()) error.value = text;
-    logs.value.push({ time: stamp(), kind: "error", message: text });
+    appendLog({ time: stamp(), kind: "error", message: text });
   } finally {
     instanceWrites.delete(id);
   }
@@ -1068,7 +1078,7 @@ function persistSettings(): Promise<void> {
           await rpc("save_settings", { settings: submitted });
         } catch (e) {
           settingsSaveError.value = message(e);
-          logs.value.push({
+          appendLog({
             time: stamp(),
             kind: "error",
             message: settingsSaveError.value,
@@ -1086,7 +1096,7 @@ function persistSettings(): Promise<void> {
         try {
           await sync();
         } catch (e) {
-          logs.value.push({
+          appendLog({
             time: stamp(),
             kind: "error",
             message: message(e),
@@ -1172,8 +1182,7 @@ function onEvent(e: LauncherEvent) {
       current.value.message = e.message;
   }
   if (!["transfer", "progress", "file", "file_plan"].includes(e.kind)) {
-    logs.value.push({ time: stamp(), kind: e.kind, message: e.message });
-    if (logs.value.length > 800) logs.value.splice(0, logs.value.length - 800);
+    appendLog({ time: stamp(), kind: e.kind, message: e.message }, true);
   }
   if (e.kind === "game_started" || e.kind === "game_exit") void sync();
 }

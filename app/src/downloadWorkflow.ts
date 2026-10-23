@@ -1,4 +1,11 @@
 import type { DownloadFile, LauncherEvent, WorkflowState } from "./types";
+import {
+  createFileOrder,
+  indexFile,
+  finishFileOrder,
+  fileWindowBounds,
+} from "./fileOrder.ts";
+export { fileRowHeight } from "./fileOrder.ts";
 
 export function createWorkflow(
   operation: string,
@@ -30,6 +37,7 @@ export function createWorkflow(
       filesDone: 0,
     })),
     files: new Map(),
+    fileOrder: new Map(),
   };
 }
 
@@ -62,8 +70,13 @@ export function applyWorkflowEvent(
         ? Math.max(previous.downloaded, update.downloaded)
         : update.downloaded;
       Object.assign(previous, update, { downloaded, step: previous.step });
+      indexFile(workflow.fileOrder.get(previous.step!)!, previous);
     } else {
-      workflow.files.set(update.id, { ...update, step: step.id });
+      const file = { ...update, step: step.id };
+      workflow.files.set(update.id, file);
+      if (!workflow.fileOrder.has(step.id))
+        workflow.fileOrder.set(step.id, createFileOrder());
+      indexFile(workflow.fileOrder.get(step.id)!, file);
       step.fileCount++;
       if (update.status === "done") step.filesDone++;
     }
@@ -90,6 +103,12 @@ export function finishWorkflow(
     } else if (["downloading", "verifying"].includes(file.status))
       file.status = "cancelled";
   }
+  for (const order of workflow.fileOrder.values()) finishFileOrder(order);
+}
+
+export function clearWorkflowFiles(workflow: WorkflowState) {
+  workflow.files.clear();
+  workflow.fileOrder.clear();
 }
 
 export function setWorkflowPaused(workflow: WorkflowState, paused: boolean) {
@@ -107,19 +126,12 @@ export function activeFilesFirst(files: readonly DownloadFile[]) {
   return active.concat(remaining);
 }
 
-export const fileRowHeight = 48;
 export function fileWindow(files: readonly DownloadFile[], scrollTop: number) {
-  const start = Math.max(
-    0,
-    Math.min(
-      Math.floor(scrollTop / fileRowHeight) - 3,
-      Math.max(0, files.length - 4),
-    ),
-  );
+  const { start, height } = fileWindowBounds(files.length, scrollTop);
   return {
     start,
     items: files.slice(start, start + 10),
-    height: Math.min(192, files.length * fileRowHeight),
+    height,
   };
 }
 export function filePercent(file: DownloadFile) {

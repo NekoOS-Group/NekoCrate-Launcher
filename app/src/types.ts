@@ -1,3 +1,5 @@
+import type { FileOrder } from "./fileOrder.ts";
+
 export interface Settings {
   microsoft_client_id: string;
   download_source: string;
@@ -98,6 +100,7 @@ export interface WorkflowStep {
 export interface WorkflowState {
   steps: WorkflowStep[];
   files: Map<string, DownloadFile>;
+  fileOrder: Map<string, FileOrder>;
 }
 export interface Challenge {
   user_code: string;

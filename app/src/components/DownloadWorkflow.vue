@@ -13,6 +13,8 @@ import {
 import { t } from "../i18n";
 import DownloadFiles from "./DownloadFiles.vue";
 import type { Task } from "../types";
+import { createFileOrder } from "../fileOrder";
+const emptyFiles = createFileOrder();
 const props = defineProps<{
   task: Task;
   name: string;
@@ -34,15 +36,6 @@ watch(
   },
   { immediate: true },
 );
-const files = computed(() => {
-  const grouped = new Map<string, import("../types").DownloadFile[]>();
-  for (const file of props.task.workflow.files.values()) {
-    const group = grouped.get(file.step!) || [];
-    if (!grouped.has(file.step!)) grouped.set(file.step!, group);
-    group.push(file);
-  }
-  return grouped;
-});
 const labels = {
   pending: "等待中",
   running: "进行中",
@@ -161,7 +154,7 @@ const labels = {
             ><DownloadFiles
               v-if="expanded === step.id && step.fileCount"
               :key="`${task.id}-${step.id}`"
-              :files="files.get(step.id) || []"
+              :order="task.workflow.fileOrder.get(step.id) || emptyFiles"
               :paused="task.status === 'paused'"
           /></Transition>
         </div>

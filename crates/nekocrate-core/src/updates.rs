@@ -239,8 +239,8 @@ mod tests {
         }
     }
     #[test]
-    fn patch_preview_update_selects_the_next_platform_installer() {
-        let releases = vec![release("dev0.3.2", true), release("dev0.3.3", true)];
+    fn preview_update_selects_dev04_from_dev032_for_each_platform() {
+        let releases = vec![release("dev0.3.2", true), release("dev0.4", true)];
         for (os, arch, suffix) in [
             ("macos", "aarch64", "mac-appsilicon.dmg"),
             ("windows", "x86_64", "win-amd64-setup.exe"),
@@ -248,10 +248,10 @@ mod tests {
         ] {
             let update = select_release(&releases, "0.3.2-dev.1", os, arch).unwrap();
             assert!(update.available);
-            assert_eq!(update.latest_version, "dev0.3.3");
-            assert!(update.download_url.ends_with(&format!("dev0.3.3-{suffix}")));
+            assert_eq!(update.latest_version, "dev0.4");
+            assert!(update.download_url.ends_with(&format!("dev0.4-{suffix}")));
             assert!(
-                !select_release(&releases, "0.3.3-dev.1", os, arch)
+                !select_release(&releases, "0.4.0-dev.1", os, arch)
                     .unwrap()
                     .available
             );

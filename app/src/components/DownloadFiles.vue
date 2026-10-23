@@ -2,19 +2,11 @@
 import { computed, ref } from "vue";
 import { Check, CircleAlert } from "lucide-vue-next";
 import { t } from "../i18n";
-import {
-  fileWindow,
-  fileRowHeight,
-  filePercent,
-  formatBytes,
-  activeFilesFirst,
-} from "../downloadWorkflow";
-import type { DownloadFile } from "../types";
-const props = defineProps<{ files: DownloadFile[]; paused?: boolean }>();
+import { fileRowHeight, filePercent, formatBytes } from "../downloadWorkflow";
+import { indexedFileWindow, type FileOrder } from "../fileOrder";
+const props = defineProps<{ order: FileOrder; paused?: boolean }>();
 const scrollTop = ref(0);
-// Track only membership/status here; byte updates do not reorder the list.
-const ordered = computed(() => activeFilesFirst(props.files));
-const visible = computed(() => fileWindow(ordered.value, scrollTop.value));
+const visible = computed(() => indexedFileWindow(props.order, scrollTop.value));
 const labels = {
   queued: "等待中",
   downloading: "下载中",
@@ -35,7 +27,7 @@ const labels = {
   >
     <div
       :style="{
-        height: `${files.length * fileRowHeight}px`,
+        height: `${order.files.length * fileRowHeight}px`,
         position: 'relative',
       }"
     >
@@ -49,7 +41,7 @@ const labels = {
           class="workflow-file"
           role="listitem"
           :aria-posinset="visible.start + index + 1"
-          :aria-setsize="files.length"
+          :aria-setsize="order.files.length"
           :data-status="file.status"
         >
           <div class="workflow-file-copy">

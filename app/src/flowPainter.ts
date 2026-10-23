@@ -1,62 +1,91 @@
 import { restingIntensity, restingWidth, type HexFlow } from "./hexFlow.ts";
 
-export interface FlowPaintTarget {
-  setAttribute: (name: string, value: string) => void;
-  style: { fill: string };
+/** Number(value.toFixed(digits)) without allocating a string on ordinary
+ * frames. Multiplication can round a value onto a decimal half boundary;
+ * keep the specification's conversion there, including either adjacent float.
+ * Flow paint values are finite and nonnegative, with two or three decimals.
+ */
+export function roundFlowValue(value: number, digits: 2 | 3) {
+  const scale = digits === 2 ? 100 : 1000;
+  const scaled = value * scale;
+  const rounded = Math.round(scaled);
+  const uncertainty = Number.EPSILON * Math.max(1, scaled);
+  if (0.5 - Math.abs(scaled - rounded) <= uncertainty)
+    return Number(value.toFixed(digits));
+  return rounded / scale;
 }
 
-/** Keep the same visible SVG paths, precision and update thresholds. */
-export function createFlowPainter(
-  paths: FlowPaintTarget[][],
-  cells: FlowPaintTarget[][],
-) {
-  const intensities = new Float32Array(paths.length).fill(-1);
-  const widths = new Float32Array(paths.length).fill(-1);
-  const opacities = new Float32Array(cells.length).fill(-1);
-  const cyanMixes = new Int16Array(cells.length).fill(-1);
-  const blueMixes = new Int16Array(cells.length).fill(-1);
+/** The same thresholds/rounding as the SVG painter, without per-copy DOM writes. */
+export function createFlowPaintState(edgeCount: number, cellCount: number) {
+  const previousIntensity = new Float32Array(edgeCount).fill(-1);
+  const previousWidth = new Float32Array(edgeCount).fill(-1);
+  const previousOpacity = new Float32Array(cellCount).fill(-1);
+  const intensity = new Float64Array(edgeCount);
+  const width = new Float64Array(edgeCount);
+  const opacity = new Float64Array(cellCount);
+  const cyanMix = new Int16Array(cellCount).fill(-1);
+  const blueMix = new Int16Array(cellCount).fill(-1);
 
-  return (flow: HexFlow, still = false) => {
-    for (let index = 0; index < paths.length; index++) {
-      const copies = paths[index]!;
-      const intensity = still ? restingIntensity() : flow.intensity[index]!;
-      const width = still ? restingWidth() : flow.widths[index]!;
-      if (Math.abs(intensities[index]! - intensity) >= 0.003) {
-        const value = intensity.toFixed(3);
-        for (const path of copies) path.setAttribute("stroke-opacity", value);
-        intensities[index] = intensity;
+  return {
+    intensity,
+    width,
+    opacity,
+    cyanMix,
+    blueMix,
+    update(flow: HexFlow, still = false) {
+      for (let i = 0; i < edgeCount; i++) {
+        const nextIntensity = still ? restingIntensity() : flow.intensity[i]!;
+        const nextWidth = still ? restingWidth() : flow.widths[i]!;
+        if (Math.abs(previousIntensity[i]! - nextIntensity) >= 0.003) {
+          intensity[i] = roundFlowValue(nextIntensity, 3);
+          previousIntensity[i] = nextIntensity;
+        }
+        if (Math.abs(previousWidth[i]! - nextWidth) >= 0.01) {
+          width[i] = roundFlowValue(nextWidth, 2);
+          previousWidth[i] = nextWidth;
+        }
       }
-      if (Math.abs(widths[index]! - width) >= 0.01) {
-        const value = width.toFixed(2);
-        for (const path of copies) path.setAttribute("stroke-width", value);
-        widths[index] = width;
+      for (let i = 0; i < cellCount; i++) {
+        const cyan = flow.dye[i * 3]!;
+        const blue = flow.dye[i * 3 + 1]!;
+        const aqua = flow.dye[i * 3 + 2]!;
+        const total = cyan + blue + aqua;
+        const nextOpacity = still ? 0 : Math.min(0.54, total * 0.6);
+        if (Math.abs(previousOpacity[i]! - nextOpacity) >= 0.002) {
+          opacity[i] = roundFlowValue(nextOpacity, 3);
+          previousOpacity[i] = nextOpacity;
+        }
+        if (nextOpacity < 0.002) continue;
+        cyanMix[i] = Math.round((cyan / total) * 200);
+        blueMix[i] =
+          blue + aqua > 0 ? Math.round((blue / (blue + aqua)) * 200) : -2;
       }
-    }
-    for (let index = 0; index < cells.length; index++) {
-      const copies = cells[index]!;
-      const cyan = flow.dye[index * 3]!;
-      const blue = flow.dye[index * 3 + 1]!;
-      const aqua = flow.dye[index * 3 + 2]!;
-      const total = cyan + blue + aqua;
-      const opacity = still ? 0 : Math.min(0.54, total * 0.6);
-      if (Math.abs(opacities[index]! - opacity) >= 0.002) {
-        const value = opacity.toFixed(3);
-        for (const path of copies) path.setAttribute("fill-opacity", value);
-        opacities[index] = opacity;
-      }
-      if (opacity < 0.002) continue;
-      // Compare the same quantized ratios before allocating CSS color strings.
-      const cyanMix = Math.round((cyan / total) * 200);
-      const blueMix =
-        blue + aqua > 0 ? Math.round((blue / (blue + aqua)) * 200) : -2;
-      if (cyanMixes[index] === cyanMix && blueMixes[index] === blueMix)
-        continue;
-      const cyanPercent = (cyanMix / 2).toFixed(1);
-      const bluePercent = blueMix < 0 ? "50" : (blueMix / 2).toFixed(1);
-      const color = `color-mix(in srgb, var(--cyan) ${cyanPercent}%, color-mix(in srgb, var(--blue) ${bluePercent}%, var(--aqua)))`;
-      for (const path of copies) path.style.fill = color;
-      cyanMixes[index] = cyanMix;
-      blueMixes[index] = blueMix;
-    }
+    },
   };
+}
+
+type RGB = readonly [number, number, number];
+export type FlowPalette = { cyan: RGB; blue: RGB; aqua: RGB };
+
+export function parseFlowColor(color: string): RGB {
+  const match = /^#([\da-f]{6})$/i.exec(color.trim());
+  if (!match) throw new Error(`Expected an opaque sRGB theme color: ${color}`);
+  const value = Number.parseInt(match[1]!, 16);
+  return [value >> 16, (value >> 8) & 255, value & 255];
+}
+
+/** Match the nested CSS color-mix(in srgb, ...) without rounding RGB channels. */
+export function flowCellColor(
+  palette: FlowPalette,
+  cyanMix: number,
+  blueMix: number,
+) {
+  const cyan = cyanMix / 200;
+  const blue = blueMix < 0 ? 0.5 : blueMix / 200;
+  const channels = palette.cyan.map(
+    (value, i) =>
+      value * cyan +
+      (palette.blue[i]! * blue + palette.aqua[i]! * (1 - blue)) * (1 - cyan),
+  );
+  return `rgb(${channels.join(" ")})`;
 }

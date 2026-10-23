@@ -1,4 +1,5 @@
 name: Build and publish preview release
+run-name: "${{ github.event_name == 'push' && 'Queue' || 'Build and publish' }} ${{ inputs.tag || github.ref_name }}"
 
 on:
   push:
@@ -8,7 +9,7 @@ on:
       tag:
         description: Existing preview tag to build
         required: true
-        default: dev0.3.2
+        default: dev0.4
         type: string
 
 permissions:
