@@ -6,7 +6,8 @@ license.workspace = true
 
 [lib]
 name = "nekocrate_desktop"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# Desktop binaries only need the Rust library; mobile library outputs add links.
+crate-type = ["rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

@@ -239,6 +239,26 @@ mod tests {
         }
     }
     #[test]
+    fn patch_preview_update_selects_the_next_platform_installer() {
+        let releases = vec![release("dev0.3.2", true), release("dev0.3.3", true)];
+        for (os, arch, suffix) in [
+            ("macos", "aarch64", "mac-appsilicon.dmg"),
+            ("windows", "x86_64", "win-amd64-setup.exe"),
+            ("linux", "x86_64", "linux-amd64.AppImage"),
+        ] {
+            let update = select_release(&releases, "0.3.2-dev.1", os, arch).unwrap();
+            assert!(update.available);
+            assert_eq!(update.latest_version, "dev0.3.3");
+            assert!(update.download_url.ends_with(&format!("dev0.3.3-{suffix}")));
+            assert!(
+                !select_release(&releases, "0.3.3-dev.1", os, arch)
+                    .unwrap()
+                    .available
+            );
+        }
+    }
+
+    #[test]
     fn chooses_platform_installers_and_rejects_untrusted_release_links() {
         let mut releases = vec![release("v0.2.0", false)];
         for (os, arch, ending) in [

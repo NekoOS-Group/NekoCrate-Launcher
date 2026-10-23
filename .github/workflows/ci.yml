@@ -8,6 +8,11 @@ on:
 permissions:
   contents: read
 
+env:
+  # CI does not ship debug binaries; avoid generating/caching their debug symbols.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -39,6 +44,8 @@ jobs:
         working-directory: app
       - run: npm run build
         working-directory: app
+      - run: python3 scripts/frontend_artifact.py verify app/dist
+      - run: python3 -m unittest discover -s scripts/tests
       - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - uses: actions/upload-artifact@v4

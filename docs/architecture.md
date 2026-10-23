@@ -137,8 +137,8 @@ HTTP／SOCKS5 在下一行显示账号、密码，任一字段为空即不发送
 
 哈希读取放入有界阻塞线程，一次任务顺序读取文件，避免每个小块都切换异步文件线程；每个数据目录最多 8 个检查同时进行。独立文件／批次结束（含失败与取消）原子保存记录，进程意外退出前尚未保存的记录下次会保守地重算，不把断点数据直接视为已验证。界面「校验修复」通过 `install { repair: true }`，CLI `repair` 通过 `Launcher::repair` 强制绕过记录执行完整校验；普通下载使用 `Launcher::install`。
 
-普通 CI 的前端测试、构建和 Rust 格式检查各执行一次，共享前端产物给三个平台的 Rust 测试／Clippy；移除 CI 中额外的 Tauri release 编译。发布流程在准备阶段构建一次前端，三个原生任务下载同一份产物，只执行一次对应目标的 Rust release 编译和打包；不再在发布矩阵重复测试／Clippy／fmt。准备阶段固定提交 SHA，原生打包和发布都检出同一提交。发布前应确保该提交的普通 CI 通过；发布工作流本身不代替源码测试。
+普通 CI 在 Linux 执行一次前端测试、构建、Rust 格式检查、完整测试和 Clippy，Windows/macOS 只运行文件系统专项测试。测试关闭调试符号生成，桌面端只产出 rlib 及可执行文件，移除未使用的移动端库输出。发布等待标签对应提交的 CI 通过，复用其前端产物，三个原生任务只进行一次 release 编译和打包，不重复检查或构建前端。按 artifact ID 下载时明确设置 `merge-multiple: true`，避免多出 `ci-frontend` 子目录。编译前检查入口资源，编译后执行原生程序 `--verify-frontend` 检查内嵌入口、JS 和 CSS；这个命令在打开窗口和用户数据前退出，无需额外编译。
 
-发布专用 `tauri.release.conf.json` 将 [Tauri beforeBuildCommand](https://v2.tauri.app/reference/config/#beforebuildcommand) 置空，防止重复运行前端构建；本地默认配置仍自动构建前端。Rust 缓存按目标区分并启用 [rust-cache 的 workspace 与失败缓存](https://github.com/Swatinem/rust-cache)，重跑可复用编译结果。保留版本一致性、原生架构、macOS 签名验证、产物完整性和 SHA-256 核验，三个平台齐全后才发布。
+发布专用 `tauri.release.conf.json` 将 [Tauri beforeBuildCommand](https://v2.tauri.app/reference/config/#beforebuildcommand) 置空，防止重复运行前端构建；本地默认配置仍自动构建前端。标签任务调度默认分支上的同一发布 workflow，使后续标签能访问同一分支的发布缓存；所有源码步骤仍检出并校验标签的确切 SHA，缓存不作为发布依据。Rust 缓存按目标区分并启用 [rust-cache 的 workspace 与失败缓存](https://github.com/Swatinem/rust-cache)，重跑可复用编译结果。保留版本一致性、原生架构、macOS 签名验证、产物完整性和 SHA-256 核验，三个平台齐全后才发布。
 
 性能回归可运行 `cargo test -p nekocrate-core benchmark_verified_cache_reuse -- --ignored --nocapture`：在临时目录创建 2,048 个 64 KiB 文件，分别测量首次校验与重新加载记录后的复用，断言后者不读取任何文件内容；不访问网络或用户游戏目录。

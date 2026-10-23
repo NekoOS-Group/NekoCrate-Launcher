@@ -199,6 +199,28 @@ async fn command(
 }
 
 pub fn run() {
+    let context = tauri::generate_context!();
+    // Exercise the actual embedded asset map without opening a window or user data.
+    // This runs on each release runner using the already-built executable.
+    if std::env::args_os().any(|arg| arg == "--verify-frontend") {
+        let assets = context.assets();
+        let valid_entry = assets
+            .get(&"index.html".into())
+            .is_some_and(|html| !html.is_empty());
+        let has_script = assets
+            .iter()
+            .any(|(key, bytes)| key.as_ref().ends_with(".js") && !bytes.is_empty());
+        let has_style = assets
+            .iter()
+            .any(|(key, bytes)| key.as_ref().ends_with(".css") && !bytes.is_empty());
+        if !(valid_entry && has_script && has_style) {
+            eprintln!(
+                "Embedded frontend is incomplete: expected index.html, JavaScript and CSS at the frontend root"
+            );
+            std::process::exit(1);
+        }
+        return;
+    }
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -212,7 +234,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![command])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("猫咪盒子启动器启动失败")
         .run(|app, event| {
             if let tauri::RunEvent::Exit = event {
