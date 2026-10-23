@@ -2463,7 +2463,7 @@ dependencies = [
 
 [[package]]
 name = "nekocrate-cli"
-version = "0.3.0-dev.1"
+version = "0.3.1-dev.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2475,7 +2475,7 @@ dependencies = [
 
 [[package]]
 name = "nekocrate-core"
-version = "0.3.0-dev.1"
+version = "0.3.1-dev.1"
 dependencies = [
  "anyhow",
  "directories",
@@ -2498,12 +2498,13 @@ dependencies = [
  "tokio-util",
  "uuid",
  "walkdir",
+ "windows-sys 0.61.2",
  "zip",
 ]
 
 [[package]]
 name = "nekocrate-desktop"
-version = "0.3.0-dev.1"
+version = "0.3.1-dev.1"
 dependencies = [
  "anyhow",
  "nekocrate-core",
@@ -2522,7 +2523,7 @@ dependencies = [
 
 [[package]]
 name = "nekocrate-dev"
-version = "0.3.0-dev.1"
+version = "0.3.1-dev.1"
 
 [[package]]
 name = "new_debug_unreachable"

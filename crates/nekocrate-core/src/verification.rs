@@ -25,9 +25,11 @@ struct Fingerprint {
     created: Option<(u64, u32)>,
     #[cfg(unix)]
     identity: (u64, u64, i64, i64),
+    #[cfg(windows)]
+    identity: (u64, [u8; 16], i64),
 }
 impl Fingerprint {
-    fn read(meta: &fs::Metadata) -> Option<Self> {
+    fn read(meta: &fs::Metadata, _file: Option<&fs::File>) -> Option<Self> {
         let time = |value: SystemTime| {
             value
                 .duration_since(UNIX_EPOCH)
@@ -42,7 +44,73 @@ impl Fingerprint {
             created: meta.created().ok().and_then(time),
             #[cfg(unix)]
             identity: (meta.dev(), meta.ino(), meta.ctime(), meta.ctime_nsec()),
+            #[cfg(windows)]
+            identity: windows_identity(_file?)?,
         })
+    }
+
+    fn read_at(_path: &Path, meta: &fs::Metadata) -> Option<Self> {
+        if !meta.is_file() {
+            return None;
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            use windows_sys::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES;
+            // Metadata-only access: warm cache hits never read file contents.
+            let file = fs::OpenOptions::new()
+                .access_mode(FILE_READ_ATTRIBUTES)
+                .open(_path)
+                .ok()?;
+            Self::read(&file.metadata().ok()?, Some(&file))
+        }
+        #[cfg(not(windows))]
+        Self::read(meta, None)
+    }
+
+    async fn snapshot(path: &Path) -> Result<Option<Self>> {
+        let path = path.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let meta = fs::symlink_metadata(&path)?;
+            Ok(Self::read_at(&path, &meta))
+        })
+        .await?
+    }
+}
+
+#[cfg(windows)]
+fn windows_identity(file: &fs::File) -> Option<(u64, [u8; 16], i64)> {
+    use std::{mem::MaybeUninit, os::windows::io::AsRawHandle};
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_BASIC_INFO, FILE_ID_INFO, FileBasicInfo, FileIdInfo, GetFileInformationByHandleEx,
+    };
+    let mut id = MaybeUninit::<FILE_ID_INFO>::uninit();
+    let mut basic = MaybeUninit::<FILE_BASIC_INFO>::uninit();
+    // SAFETY: the handle remains open and each output buffer matches the requested
+    // Win32 information class and size. Read the buffers only after both calls succeed.
+    unsafe {
+        if GetFileInformationByHandleEx(
+            file.as_raw_handle(),
+            FileIdInfo,
+            id.as_mut_ptr().cast(),
+            size_of::<FILE_ID_INFO>() as u32,
+        ) == 0
+            || GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FileBasicInfo,
+                basic.as_mut_ptr().cast(),
+                size_of::<FILE_BASIC_INFO>() as u32,
+            ) == 0
+        {
+            // Filesystems without reliable identity/change metadata always hash.
+            return None;
+        }
+        let id = id.assume_init();
+        Some((
+            id.VolumeSerialNumber,
+            id.FileId.Identifier,
+            basic.assume_init().ChangeTime,
+        ))
     }
 }
 #[derive(Clone, Serialize, Deserialize)]
@@ -155,10 +223,7 @@ impl VerificationCache {
     // Only for freshly verified objects just renamed/copied by the downloader.
     pub async fn remember(&self, path: &Path, hash: &str, sha256: bool) -> Result<()> {
         self.load().await;
-        let meta = tokio::fs::symlink_metadata(path).await?;
-        if meta.is_file()
-            && let Some(fingerprint) = Fingerprint::read(&meta)
-        {
+        if let Some(fingerprint) = Fingerprint::snapshot(path).await? {
             let mut entries = self.entries.lock().unwrap();
             entries.insert(
                 path.to_owned(),
@@ -187,7 +252,7 @@ impl VerificationCache {
         cancel: &CancellationToken,
     ) -> Result<()> {
         self.load().await;
-        let before = Fingerprint::read(&tokio::fs::symlink_metadata(source).await?);
+        let before = Fingerprint::snapshot(source).await?;
         let trusted = before.as_ref().is_some_and(|stamp| {
             self.entries
                 .lock()
@@ -201,7 +266,7 @@ impl VerificationCache {
         });
         tokio::fs::copy(source, destination).await?;
         crate::download::check_cancel(cancel)?;
-        let after = Fingerprint::read(&tokio::fs::symlink_metadata(source).await?);
+        let after = Fingerprint::snapshot(source).await?;
         if (!trusted || before != after)
             && !self
                 .verify(destination, hash, sha256, 0, true, cancel)
@@ -237,7 +302,7 @@ fn inspect(
     if !meta.is_file() || (size > 0 && meta.len() != size) {
         return Ok(false);
     }
-    let before = Fingerprint::read(&meta);
+    let before = Fingerprint::read_at(path, &meta);
     if let (Some((store, false)), Some(fingerprint)) = (store, &before)
         && store
             .entries
@@ -279,10 +344,10 @@ fn inspect(
     })
     .eq_ignore_ascii_case(hash);
     let unchanged = before.is_some()
-        && before == Fingerprint::read(&file.metadata()?)
+        && before == Fingerprint::read(&file.metadata()?, Some(&file))
         && fs::symlink_metadata(path)
             .ok()
-            .is_some_and(|meta| meta.is_file() && Fingerprint::read(&meta) == before);
+            .is_some_and(|meta| Fingerprint::read_at(path, &meta) == before);
     let usable = matched && (unchanged || before.is_none());
     if let Some((store, _)) = store {
         let mut entries = store.entries.lock().unwrap();
@@ -307,6 +372,54 @@ fn inspect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn legacy_windows_receipts_without_file_identity_are_rehashed() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("asset");
+        fs::write(&path, b"good").unwrap();
+        let hash = hex::encode(Sha1::digest(b"good"));
+        let cancel = CancellationToken::new();
+        let store = VerificationCache::shared(temp.path());
+        assert!(
+            store
+                .verify(&path, &hash, false, 4, false, &cancel)
+                .await
+                .unwrap()
+        );
+        store.flush().await.unwrap();
+        let index_path = store.path.clone();
+        drop(store);
+        let mut index: serde_json::Value =
+            serde_json::from_slice(&fs::read(&index_path).unwrap()).unwrap();
+        for receipt in index["entries"].as_object_mut().unwrap().values_mut() {
+            receipt["fingerprint"]
+                .as_object_mut()
+                .unwrap()
+                .remove("identity");
+        }
+        fs::write(index_path, serde_json::to_vec(&index).unwrap()).unwrap();
+        let store = VerificationCache::shared(temp.path());
+        assert!(
+            store
+                .verify(&path, &hash, false, 4, false, &cancel)
+                .await
+                .unwrap()
+        );
+        assert_eq!(store.hashes.load(Ordering::Relaxed), 1);
+        assert!(
+            store
+                .verify(&path, &hash, false, 4, false, &cancel)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store.hashes.load(Ordering::Relaxed),
+            1,
+            "new receipts still reuse unchanged files"
+        );
+    }
 
     #[tokio::test]
     async fn persisted_receipts_skip_reads_but_repair_and_content_changes_rehash() {
@@ -352,16 +465,15 @@ mod tests {
         );
         let old = fs::metadata(&path).unwrap().modified().unwrap();
         fs::write(&path, b"evil").unwrap();
-        // On Unix even a same-size modification with restored mtime changes ctime.
-        // Other platforms invalidate through the changed modification timestamp.
-        #[cfg(unix)]
+        // Both Unix ctime and Windows ChangeTime detect restored modification times.
+        #[cfg(any(unix, windows))]
         fs::OpenOptions::new()
             .write(true)
             .open(&path)
             .unwrap()
             .set_modified(old)
             .unwrap();
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         fs::OpenOptions::new()
             .write(true)
             .open(&path)

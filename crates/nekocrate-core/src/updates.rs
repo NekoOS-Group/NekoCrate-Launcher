@@ -31,17 +31,16 @@ struct Asset {
 fn release_version(tag: &str) -> Option<Version> {
     // Public preview tags are compact names; installed packages use SemVer.
     if let Some(preview) = tag.strip_prefix("dev") {
-        let (major, minor) = preview.split_once('.')?;
-        if major.is_empty()
-            || minor.is_empty()
-            || !major
-                .bytes()
-                .chain(minor.bytes())
-                .all(|byte| byte.is_ascii_digit())
+        let parts: Vec<_> = preview.split('.').collect();
+        if !(2..=3).contains(&parts.len())
+            || parts
+                .iter()
+                .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
         {
             return None;
         }
-        return Version::parse(&format!("{major}.{minor}.0-dev.1")).ok();
+        let patch = parts.get(2).copied().unwrap_or("0");
+        return Version::parse(&format!("{}.{}.{patch}-dev.1", parts[0], parts[1])).ok();
     }
     Version::parse(tag.strip_prefix('v').unwrap_or(tag)).ok()
 }
@@ -209,12 +208,31 @@ mod tests {
             release_version("dev12.34").unwrap().to_string(),
             "12.34.0-dev.1"
         );
+        assert_eq!(
+            release_version("dev0.3.1").unwrap().to_string(),
+            "0.3.1-dev.1"
+        );
+        let patched = vec![release("dev0.3", true), release("dev0.3.1", true)];
+        let update = select_release(&patched, "0.3.0-dev.1", "windows", "x86_64").unwrap();
+        assert!(update.available);
+        assert_eq!(update.latest_version, "dev0.3.1");
+        assert!(
+            update
+                .download_url
+                .ends_with("dev0.3.1-win-amd64-setup.exe")
+        );
+        assert!(
+            !select_release(&patched, "0.3.1-dev.1", "macos", "aarch64")
+                .unwrap()
+                .available
+        );
         for invalid in [
             "dev",
             "dev.3",
             "dev0.",
             "dev0.03",
-            "dev0.3.1",
+            "dev0.3.01",
+            "dev0.3.1.1",
             "dev0.3-beta",
         ] {
             assert!(release_version(invalid).is_none(), "{invalid}");

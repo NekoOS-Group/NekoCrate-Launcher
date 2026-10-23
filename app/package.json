@@ -1,7 +1,7 @@
 {
   "name": "nekocrate-desktop",
   "private": true,
-  "version": "0.3.0-dev.1",
+  "version": "0.3.1-dev.1",
   "type": "module",
   "scripts": {
     "dev": "vite --port 1420 --strictPort",
