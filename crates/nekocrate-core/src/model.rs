@@ -7,12 +7,30 @@ use std::{
 // Stable persisted IDs, matching app/src/instanceIcons.ts (0–3 are legacy icons).
 pub const INSTANCE_ICON_COUNT: u8 = 16;
 
+/// Write-only IPC input. Never serialize or include credentials in debug output.
+#[derive(Clone, Deserialize)]
+#[serde(transparent)]
+pub struct ProxyPassword(pub String);
+impl std::fmt::Debug for ProxyPassword {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("[redacted]")
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub microsoft_client_id: String,
     pub download_source: String,
+    pub mod_download_source: String,
+    pub proxy_mode: String,
+    pub proxy_url: String,
+    pub proxy_username: String,
+    pub proxy_password_key: Option<String>,
+    #[serde(skip_serializing)]
+    pub proxy_password: Option<ProxyPassword>,
     pub concurrency: usize,
+    pub adaptive_concurrency: bool,
     pub retries: usize,
     pub auto_java: bool,
     pub language: String,
@@ -22,8 +40,15 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             microsoft_client_id: String::new(),
-            download_source: "official".into(),
+            download_source: "auto".into(),
+            mod_download_source: "auto".into(),
+            proxy_mode: "system".into(),
+            proxy_url: String::new(),
+            proxy_username: String::new(),
+            proxy_password_key: None,
+            proxy_password: None,
             concurrency: 8,
+            adaptive_concurrency: false,
             retries: 2,
             auto_java: true,
             language: "system".into(),
@@ -53,6 +78,8 @@ pub struct Instance {
 pub struct InstanceVersion {
     pub id: String,
     pub installed: bool,
+    #[serde(default)]
+    pub download_progress: f64,
 }
 impl Instance {
     pub fn game_dir(&self, root: &Path) -> PathBuf {
@@ -226,6 +253,24 @@ pub struct AssetIndex {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct FileProgress {
+    pub id: String,
+    pub name: String,
+    pub downloaded: u64,
+    pub total: u64,
+    pub status: String,
+    #[serde(skip_serializing_if = "is_false")]
+    pub cached: bool,
+}
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct Event {
     pub kind: String,
     pub message: String,
@@ -233,6 +278,14 @@ pub struct Event {
     pub completed: usize,
     pub total: usize,
     pub bytes: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub total_bytes: u64,
+    #[serde(skip_serializing_if = "is_false")]
+    pub reset_progress: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<FileProgress>,
 }
 impl Event {
     pub fn new(kind: &str, message: impl Into<String>) -> Self {
@@ -243,7 +296,29 @@ impl Event {
             completed: 0,
             total: 0,
             bytes: 0,
+            total_bytes: 0,
+            reset_progress: false,
+            step: None,
+            files: Vec::new(),
         }
+    }
+    pub fn workflow(step: &str, message: &str) -> Self {
+        Self {
+            step: Some(step.into()),
+            ..Self::new("workflow", message)
+        }
+    }
+    pub fn scoped(sink: &EventSink, instance_id: &str, step: Option<&str>) -> EventSink {
+        let sink = sink.clone();
+        let instance_id = instance_id.to_owned();
+        let step = step.map(str::to_owned);
+        std::sync::Arc::new(move |mut event| {
+            event.instance_id = Some(instance_id.clone());
+            if event.step.is_none() {
+                event.step.clone_from(&step);
+            }
+            sink(event);
+        })
     }
 }
 pub type EventSink = std::sync::Arc<dyn Fn(Event) + Send + Sync>;

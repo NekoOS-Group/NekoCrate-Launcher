@@ -13,7 +13,7 @@ const stubs = {
   "@tauri-apps/api/core": `export const isTauri = () => true; export const invoke = (...args) => globalThis.__settingsFixture.invoke(...args);`,
   "@tauri-apps/api/window": `export const getCurrentWindow = () => ({ setTitle: async () => {} });`,
   "@tauri-apps/api/event": `export const listen = async (_, callback) => { globalThis.__settingsFixture.event = callback; return () => {}; };`,
-  "@tauri-apps/plugin-dialog": `export const open = async () => null;`,
+  "@tauri-apps/plugin-dialog": `export const open = async (...args) => globalThis.__settingsFixture.pickFile?.(...args) ?? null;`,
   "@tauri-apps/plugin-opener": `export const openUrl = async () => {};`,
   "./instanceIcons": `export const resolveInstanceIcon = () => 0;`,
   "../package.json": `export const version = ${JSON.stringify(packageVersion)};`,
@@ -74,6 +74,8 @@ export async function settingsFixture() {
   const fixture = {
     handlers: {},
     calls: [],
+    proxyPassword: "",
+    passwordRevision: 0,
     state: {
       root: "/fixture",
       system_locale: "zh-CN",
@@ -82,7 +84,13 @@ export async function settingsFixture() {
         settings: {
           microsoft_client_id: "",
           download_source: "official",
+          mod_download_source: "auto",
+          proxy_mode: "system",
+          proxy_url: "",
+          proxy_username: "",
+          proxy_password_key: null,
           concurrency: 8,
+          adaptive_concurrency: false,
           retries: 2,
           auto_java: true,
           language: "zh-CN",
@@ -115,8 +123,19 @@ export async function settingsFixture() {
       this.calls.push(request);
       if (this.handlers[request.op]) return this.handlers[request.op](request);
       if (request.op === "snapshot") return this.snapshot();
+      if (request.op === "proxy_password") return this.proxyPassword;
       if (request.op === "save_settings") {
-        this.state.database.settings = structuredClone(request.settings);
+        const settings = structuredClone(request.settings);
+        settings.proxy_password_key =
+          this.state.database.settings.proxy_password_key;
+        if (settings.proxy_password !== undefined) {
+          this.proxyPassword = settings.proxy_password;
+          settings.proxy_password_key = this.proxyPassword
+            ? `fixture-${++this.passwordRevision}`
+            : null;
+        }
+        delete settings.proxy_password;
+        this.state.database.settings = settings;
         return true;
       }
       if (request.op === "check_update")

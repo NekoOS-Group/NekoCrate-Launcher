@@ -1,23 +1,27 @@
 pub mod auth;
 pub mod download;
+mod download_concurrency;
 mod game_options;
 pub mod java;
 mod language;
 mod migration;
 pub mod minecraft;
 pub mod model;
+pub mod network;
+mod proxy_credentials;
 pub mod skin;
 pub mod storage;
 #[cfg(test)]
 mod test_http;
 pub mod updates;
+mod verification;
 
 use anyhow::{Context, Result, bail};
 use fs2::FileExt;
 use model::*;
 use serde::Serialize;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
@@ -30,6 +34,7 @@ struct Shared {
     _lock: fs::File,
     db: Mutex<Database>,
     operation: tokio::sync::Mutex<()>,
+    progress_scanned: tokio::sync::Mutex<HashSet<(String, String)>>,
     games: Mutex<HashMap<String, CancellationToken>>,
 }
 impl Drop for Shared {
@@ -86,6 +91,7 @@ impl Launcher {
             _lock: lock,
             db: Mutex::new(db),
             operation: tokio::sync::Mutex::new(()),
+            progress_scanned: tokio::sync::Mutex::new(HashSet::new()),
             games: Mutex::new(HashMap::new()),
         })))
     }
@@ -102,6 +108,57 @@ impl Launcher {
     }
     pub fn settings(&self) -> Settings {
         self.0.db.lock().unwrap().settings.clone()
+    }
+    /// Backfill old interrupted installs once per process without network work.
+    pub async fn recover_download_progress(&self) -> Result<bool> {
+        if self.0.operation.try_lock().is_err() {
+            return Ok(false);
+        }
+        let Ok(mut scanned) = self.0.progress_scanned.try_lock() else {
+            return Ok(false);
+        };
+        let mut changed = false;
+        for instance in self.snapshot().database.instances {
+            for version in &instance.versions {
+                let key = (instance.id.clone(), version.id.clone());
+                if version.installed || version.download_progress > 0.0 || scanned.contains(&key) {
+                    continue;
+                }
+                let game = instance.game_dir(self.root());
+                let progress =
+                    match minecraft::cached_installation_files(self.root(), &game, &version.id)
+                        .await
+                    {
+                        Ok(files) => download::local_progress(self.root(), files).await?,
+                        Err(_) => {
+                            scanned.insert(key);
+                            continue;
+                        }
+                    };
+                // A download may have started while we were reading. Its live
+                // progress wins; retry this scan on a later idle snapshot.
+                let Ok(_guard) = self.0.operation.try_lock() else {
+                    return Ok(changed);
+                };
+                let current = self.instance(&instance.id)?;
+                if current
+                    .versions
+                    .iter()
+                    .find(|entry| entry.id == version.id)
+                    .is_none_or(|entry| {
+                        entry.installed || entry.download_progress != version.download_progress
+                    })
+                {
+                    continue;
+                }
+                if (progress - version.download_progress).abs() >= 0.01 {
+                    self.save_download_progress(&instance.id, &version.id, progress)?;
+                    changed = true;
+                }
+                scanned.insert(key);
+            }
+        }
+        Ok(changed)
     }
     pub fn ui_language(&self) -> &'static str {
         language::resolve(&self.settings().language, &language::system_locale())
@@ -195,6 +252,7 @@ impl Launcher {
                 instance.versions.push(InstanceVersion {
                     id: version.into(),
                     installed: false,
+                    download_progress: 0.0,
                 });
             }
             instance.selected_version = Some(version.into());
@@ -230,18 +288,51 @@ impl Launcher {
                 .and_then(|i| i.versions.iter_mut().find(|v| v.id == version))
                 .context("实例中不存在该版本")?;
             entry.installed = installed;
+            if installed {
+                entry.download_progress = 100.0;
+            }
+            Ok(())
+        })
+    }
+    fn save_download_progress(&self, id: &str, version: &str, progress: f64) -> Result<()> {
+        self.mutate(|db| {
+            let entry = db
+                .instances
+                .iter_mut()
+                .find(|i| i.id == id)
+                .and_then(|i| i.versions.iter_mut().find(|v| v.id == version))
+                .context("实例中不存在该版本")?;
+            entry.download_progress = progress.clamp(0.0, 99.0);
             Ok(())
         })
     }
     pub fn save_settings(&self, mut settings: Settings) -> Result<()> {
+        // Older "official" meant the original publisher, not a distinct catalog.
+        if settings.mod_download_source == "official" {
+            settings.mod_download_source = "auto".into();
+        }
+        self.save_settings_with_vault(settings, &proxy_credentials::SystemVault(self.root()))
+    }
+    pub fn proxy_password(&self) -> Result<String> {
+        use proxy_credentials::ProxyVault;
+        let settings = self.settings();
+        settings.proxy_password_key.as_deref().map_or_else(
+            || Ok(String::new()),
+            |key| proxy_credentials::SystemVault(self.root()).read(key),
+        )
+    }
+    fn save_settings_with_vault(
+        &self,
+        mut settings: Settings,
+        vault: &impl proxy_credentials::ProxyVault,
+    ) -> Result<()> {
         // Active jobs own a Settings snapshot. Persist future preferences under
         // the database lock without waiting for downloads or changing their plan.
         if !(1..=32).contains(&settings.concurrency) || settings.retries > 5 {
             bail!("并发应为 1–32，重试次数应为 0–5");
         }
-        if !["official", "auto", "bmclapi"].contains(&settings.download_source.as_str()) {
-            bail!("未知下载源");
-        }
+        settings.proxy_url = settings.proxy_url.trim().to_owned();
+        network::validate(&settings)?;
         if !["system", "zh-CN", "en-US"].contains(&settings.language.as_str()) {
             bail!("不支持的语言选项");
         }
@@ -249,10 +340,32 @@ impl Launcher {
         if !settings.microsoft_client_id.is_empty() {
             uuid::Uuid::parse_str(&settings.microsoft_client_id).context("Client ID 应为 UUID")?;
         }
-        self.mutate(|db| {
+        let mut created_key = None;
+        let mut obsolete_key = None;
+        let result = self.mutate(|db| {
+            // Never trust a key supplied by IPC. New secrets use an immutable
+            // entry so a failed database write cannot destroy the previous one.
+            settings.proxy_password_key = db.settings.proxy_password_key.clone();
+            if let Some(password) = settings.proxy_password.take() {
+                obsolete_key = settings.proxy_password_key.take();
+                if !password.0.is_empty() {
+                    let key = uuid::Uuid::new_v4().to_string();
+                    vault.write(&key, &password.0)?;
+                    created_key = Some(key.clone());
+                    settings.proxy_password_key = Some(key);
+                }
+            }
             db.settings = settings;
             Ok(())
-        })
+        });
+        if result.is_err() {
+            if let Some(key) = created_key {
+                let _ = vault.remove(&key);
+            }
+        } else if let Some(key) = obsolete_key {
+            let _ = vault.remove(&key);
+        }
+        result
     }
     pub fn create_instance(&self, name: &str, version: &str) -> Result<Instance> {
         let _guard = self
@@ -286,6 +399,7 @@ impl Launcher {
                 vec![InstanceVersion {
                     id: version.into(),
                     installed: false,
+                    download_progress: 0.0,
                 }]
             },
             selected_version: (!version.is_empty()).then(|| version.into()),
@@ -317,11 +431,9 @@ impl Launcher {
         java_path: Option<String>,
         icon: Option<u8>,
     ) -> Result<()> {
-        let _guard = self
-            .0
-            .operation
-            .try_lock()
-            .context("有任务正在运行，请稍后修改实例")?;
+        // Metadata-only edits use the database lock. Install/launch already own
+        // an Instance snapshot; saving preferences must not wait for downloads
+        // or overwrite their version state, directory or installation plan.
         self.idle(id)?;
         if name.trim().is_empty()
             || name.chars().count() > 80
@@ -347,14 +459,8 @@ impl Launcher {
             Ok(())
         })
     }
-    pub async fn import_instance(
-        &self,
-        source: PathBuf,
-        name: String,
-        version: String,
-    ) -> Result<Instance> {
-        let _guard = self.0.operation.lock().await;
-        let source = storage::expand_user_path(&source)?;
+    fn linkable_directory(&self, source: &Path, except_id: Option<&str>) -> Result<PathBuf> {
+        let source = storage::expand_user_path(source)?;
         let source = source
             .canonicalize()
             .with_context(|| format!("无法访问导入目录：{}", source.display()))?;
@@ -385,6 +491,9 @@ impl Launcher {
             bail!("游戏目录不能与启动器数据目录重叠，请选择原有的独立游戏目录");
         }
         for existing in &self.snapshot().database.instances {
+            if except_id == Some(existing.id.as_str()) {
+                continue;
+            }
             let directory = existing.game_dir(self.root());
             let directory = directory.canonicalize().unwrap_or(directory);
             if source.starts_with(&directory) || directory.starts_with(&source) {
@@ -394,6 +503,9 @@ impl Launcher {
                 );
             }
         }
+        Ok(source)
+    }
+    fn discover_versions(source: &Path, version: &str) -> Result<Vec<InstanceVersion>> {
         let mut versions = vec![];
         if source.join("versions").is_dir() {
             for entry in fs::read_dir(source.join("versions"))? {
@@ -410,18 +522,94 @@ impl Launcher {
                     versions.push(InstanceVersion {
                         id,
                         installed: false,
+                        download_progress: 0.0,
                     });
                 }
             }
         }
         versions.sort_by(|a, b| a.id.cmp(&b.id));
         if !version.is_empty() && !versions.iter().any(|v| v.id == version) {
-            storage::safe_version(&version)?;
+            storage::safe_version(version)?;
             versions.push(InstanceVersion {
-                id: version.clone(),
+                id: version.to_owned(),
                 installed: false,
+                download_progress: 0.0,
             });
         }
+        Ok(versions)
+    }
+    /// Change only the association. Never copy, move or delete either game tree.
+    /// Previously installed versions must exist unchanged at the new location.
+    pub async fn relink_instance(&self, id: &str, source: PathBuf) -> Result<Instance> {
+        let _guard = self.0.operation.lock().await;
+        self.idle(id)?;
+        let previous = self.instance(id)?;
+        let source = self.linkable_directory(&source, Some(id))?;
+        let old_game = previous.game_dir(self.root());
+        let mut versions = Self::discover_versions(&source, "")?;
+        for old in &previous.versions {
+            if old.installed {
+                for extension in ["json", "jar"] {
+                    let relative = PathBuf::from("versions")
+                        .join(&old.id)
+                        .join(format!("{}.{extension}", old.id));
+                    if !storage::same_file_contents(
+                        &old_game.join(&relative),
+                        &source.join(&relative),
+                    )? {
+                        bail!(
+                            "目标目录缺少或包含不同的已安装版本 {}；请先核对文件，原关联未修改",
+                            old.id
+                        );
+                    }
+                }
+            }
+            if let Some(found) = versions.iter_mut().find(|v| v.id == old.id) {
+                found.installed = old.installed;
+                found.download_progress = old.download_progress;
+            } else if old.installed {
+                bail!("目标目录无法识别已安装版本 {}，原关联未修改", old.id);
+            } else {
+                versions.push(old.clone());
+            }
+        }
+        versions.sort_by_key(|version| {
+            previous
+                .versions
+                .iter()
+                .position(|old| old.id == version.id)
+                .unwrap_or(usize::MAX)
+        });
+        let selected = previous
+            .selected_version
+            .as_ref()
+            .filter(|id| versions.iter().any(|v| &v.id == *id))
+            .cloned()
+            .or_else(|| versions.first().map(|v| v.id.clone()));
+        let backup = self.instance_dir(id)?.join("directory-link-before.json");
+        storage::write_json(&backup, &previous)?;
+        self.mutate(|db| {
+            let target = db
+                .instances
+                .iter_mut()
+                .find(|i| i.id == id)
+                .context("实例不存在")?;
+            target.game_directory = Some(source);
+            target.versions = versions;
+            target.selected_version = selected;
+            Ok(())
+        })?;
+        self.instance(id)
+    }
+    pub async fn import_instance(
+        &self,
+        source: PathBuf,
+        name: String,
+        version: String,
+    ) -> Result<Instance> {
+        let _guard = self.0.operation.lock().await;
+        let source = self.linkable_directory(&source, None)?;
+        let versions = Self::discover_versions(&source, &version)?;
         let i = self.create_unlocked(&name, "", Some(source))?;
         if let Err(e) = self.mutate(|db| {
             let target = db.instances.iter_mut().find(|x| x.id == i.id).unwrap();
@@ -511,19 +699,88 @@ impl Launcher {
         cancel: &CancellationToken,
         sink: &EventSink,
     ) -> Result<()> {
+        self.install_with_verification(id, cancel, sink, false)
+            .await
+    }
+    pub async fn repair(
+        &self,
+        id: &str,
+        cancel: &CancellationToken,
+        sink: &EventSink,
+    ) -> Result<()> {
+        self.install_with_verification(id, cancel, sink, true).await
+    }
+    async fn install_with_verification(
+        &self,
+        id: &str,
+        cancel: &CancellationToken,
+        sink: &EventSink,
+        full_verification: bool,
+    ) -> Result<()> {
         let _guard = self.0.operation.lock().await;
         self.idle(id)?;
+        let sink = Event::scoped(sink, id, None);
+        sink(Event::workflow("metadata", "解析游戏版本"));
         let instance = self.instance(id)?;
         let selected = instance
             .selected()
             .context("请先为此实例添加并选择一个版本")?;
         let game = self.available_game_dir(id)?;
-        self.set_installed(id, &selected.id, false)?;
+        download::check_cancel(cancel)?;
+        minecraft::check_local_install(&game, &selected.id)?;
         let settings = self.settings();
         let downloader = download::Downloader::new(self.root(), settings.clone())?;
+        let downloader = if full_verification {
+            downloader.with_full_verification()
+        } else {
+            downloader
+        };
         sink(Event::new("stage", "获取官方版本元数据"));
-        let v = minecraft::version(self.root(), &selected.id, &downloader, cancel, sink).await?;
-        minecraft::install_files(self.root(), &game, &v, &downloader, cancel, sink).await?;
+        let v = minecraft::version(self.root(), &selected.id, &downloader, cancel, &sink).await?;
+        // Resolving metadata does not change the game tree or its installed state.
+        self.set_installed(id, &selected.id, false)?;
+        sink(Event::workflow("files", "下载与校验游戏文件"));
+        let progress = Arc::new(Mutex::new((
+            selected.download_progress.min(99.0),
+            std::time::Instant::now(),
+        )));
+        let captured = progress.clone();
+        let launcher = self.clone();
+        let instance_id = id.to_owned();
+        let version_id = selected.id.clone();
+        let forward = Event::scoped(&sink, id, Some("files"));
+        let file_sink: EventSink = Arc::new(move |event| {
+            if event.kind == "progress" && event.total > 0 {
+                let percentage = if event.total_bytes > 0 {
+                    event.bytes as f64 / event.total_bytes as f64 * 100.0
+                } else {
+                    event.completed as f64 / event.total as f64 * 100.0
+                };
+                let mut state = captured.lock().unwrap();
+                state.0 = if event.reset_progress {
+                    percentage.clamp(0.0, 99.0)
+                } else {
+                    state.0.max(percentage.min(99.0))
+                };
+                if event.reset_progress
+                    || state.1.elapsed() >= std::time::Duration::from_secs(1)
+                    || event.completed == event.total
+                {
+                    if let Err(error) =
+                        launcher.save_download_progress(&instance_id, &version_id, state.0)
+                    {
+                        forward(Event::new("warning", format!("保存下载进度失败：{error}")));
+                    }
+                    state.1 = std::time::Instant::now();
+                }
+            }
+            forward(event);
+        });
+        let result = minecraft::install_files(&game, &v, &downloader, cancel, &file_sink).await;
+        // Also save the final fraction on a quick cancellation or error.
+        self.save_download_progress(id, &selected.id, progress.lock().unwrap().0)?;
+        result?;
+        sink(Event::workflow("java", "准备 Java"));
         let java = java::ensure(
             self.root(),
             v.java_version.as_ref().map_or(8, |j| j.major),
@@ -531,10 +788,11 @@ impl Launcher {
             settings.auto_java,
             &downloader,
             cancel,
-            sink,
+            &Event::scoped(&sink, id, Some("java")),
         )
         .await?;
         download::check_cancel(cancel)?;
+        sink(Event::workflow("finalize", "保存安装信息"));
         let version_dir = self.game_dir(id)?.join("versions").join(&selected.id);
         storage::write_json(&version_dir.join(format!("{}.json", selected.id)), &v)?;
         storage::write_json(&version_dir.join("runtime.json"), &java)?;
@@ -631,7 +889,9 @@ impl Launcher {
             .find(|account| account.id == id)
             .context("账户不存在")?;
         match account.skin {
-            Some(skin) => Ok(Some(skin::load(self.root(), &skin).await?)),
+            Some(skin) => Ok(Some(
+                skin::load(self.root(), &skin, &self.settings()).await?,
+            )),
             None => Ok(None),
         }
     }
@@ -654,6 +914,8 @@ impl Launcher {
     ) -> Result<u32> {
         let _guard = self.0.operation.lock().await;
         self.idle(id)?;
+        let sink = Event::scoped(&sink, id, None);
+        sink(Event::workflow("prepare", "检查启动配置"));
         let instance = self.instance(id)?;
         let game = self.available_game_dir(id)?;
         let selected = instance.selected().context("请先选择游戏版本")?;
@@ -672,6 +934,7 @@ impl Launcher {
         }
         let settings = self.settings();
         let downloader = download::Downloader::new(self.root(), settings.clone())?;
+        sink(Event::workflow("java", "准备 Java"));
         let java = java::ensure(
             self.root(),
             v.java_version.as_ref().map_or(8, |j| j.major),
@@ -679,10 +942,12 @@ impl Launcher {
             settings.auto_java,
             &downloader,
             cancel,
-            &sink,
+            &Event::scoped(&sink, id, Some("java")),
         )
         .await?;
+        sink(Event::workflow("account", "准备游戏身份"));
         let session = tokio::select! {_=cancel.cancelled()=>bail!("启动已取消"),r=self.launch_session(&sink)=>r?};
+        sink(Event::workflow("start", "启动游戏"));
         let args = minecraft::arguments(&v, self.root(), &instance, &session)?;
         let log_dir = self.instance_dir(id)?.join("launcher-logs");
         fs::create_dir_all(&log_dir)?;
@@ -828,6 +1093,241 @@ async fn pipe_logs<R: tokio::io::AsyncRead + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn cancelled_install_persists_byte_progress_across_launcher_restarts() {
+        use sha1::{Digest, Sha1};
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("launcher");
+        let launcher = Launcher::open(Some(root.clone())).unwrap();
+        let instance = launcher.create_instance("Resume", "1.21.1").unwrap();
+        let game = launcher.game_dir(&instance.id).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            assert!(stream.read(&mut request).await.unwrap() > 0);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nabcdef")
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+        });
+        let mut version = test_http::version_fixture("1.21.1");
+        version.downloads.insert(
+            "client".into(),
+            Artifact {
+                url,
+                sha1: hex::encode(Sha1::digest(b"abcdefghi")),
+                size: 9,
+                path: None,
+            },
+        );
+        let index = b"{\"objects\":{}}";
+        version.asset_index.sha1 = hex::encode(Sha1::digest(index));
+        version.asset_index.size = index.len() as u64;
+        fs::create_dir_all(game.join("assets/indexes")).unwrap();
+        fs::write(game.join("assets/indexes/1.21.1.json"), index).unwrap();
+        let metadata = serde_json::to_vec(&version).unwrap();
+        fs::create_dir_all(root.join("metadata/versions")).unwrap();
+        fs::write(root.join("metadata/versions/1.21.1.json"), &metadata).unwrap();
+        storage::write_json(
+            &root.join("metadata/manifest.json"),
+            &VersionManifest {
+                latest: HashMap::new(),
+                versions: vec![VersionEntry {
+                    id: version.id,
+                    kind: version.kind,
+                    url: "http://127.0.0.1:9/must-not-fetch".into(),
+                    sha1: hex::encode(Sha1::digest(&metadata)),
+                }],
+            },
+        )
+        .unwrap();
+        let mut settings = launcher.settings();
+        settings.proxy_mode = "none".into();
+        launcher.save_settings(settings).unwrap();
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        let sink: EventSink = Arc::new(move |event| {
+            if event.files.iter().any(|file| {
+                file.name.ends_with(".jar") && file.status == "downloading" && file.downloaded == 6
+            }) {
+                token.cancel();
+            }
+        });
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(4),
+            launcher.install(&instance.id, &cancel, &sink),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(error.to_string().contains("取消"));
+        server.abort();
+        drop(launcher);
+        let launcher = Launcher::open(Some(root)).unwrap();
+        let restored = launcher.instance(&instance.id).unwrap();
+        assert!(!restored.selected().unwrap().installed);
+        assert!((restored.selected().unwrap().download_progress - 100.0 * 6.0 / 9.0).abs() < 0.01);
+        launcher
+            .update_instance(&instance.id, "Renamed", 4096, None, None)
+            .unwrap();
+        assert_eq!(
+            launcher
+                .instance(&instance.id)
+                .unwrap()
+                .selected()
+                .unwrap()
+                .download_progress,
+            restored.selected().unwrap().download_progress
+        );
+        // Older builds had no persisted progress. Recover without downloading
+        // or touching any of the existing game files or partial object bytes.
+        launcher
+            .save_download_progress(&instance.id, "1.21.1", 0.0)
+            .unwrap();
+        assert!(launcher.recover_download_progress().await.unwrap());
+        assert!(
+            (launcher
+                .instance(&instance.id)
+                .unwrap()
+                .selected()
+                .unwrap()
+                .download_progress
+                - 100.0 * 6.0 / 9.0)
+                .abs()
+                < 0.01
+        );
+        assert!(!launcher.recover_download_progress().await.unwrap());
+        assert!(!game.join("versions/1.21.1/1.21.1.jar").exists());
+    }
+
+    #[tokio::test]
+    async fn unsupported_local_install_fails_before_network_or_changing_installed_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let game = temp.path().join("original/.minecraft");
+        let version_path = game.join("versions/RLCraft/RLCraft.json");
+        let mut metadata = test_http::version_fixture("RLCraft");
+        metadata.main_class = "net.minecraft.launchwrapper.Launch".into();
+        metadata.arguments = None;
+        metadata.minecraft_arguments = Some("--version 1.12.2".into());
+        storage::write_json(&version_path, &metadata).unwrap();
+        let original = fs::read(&version_path).unwrap();
+        let launcher = Launcher::open(Some(temp.path().join("launcher"))).unwrap();
+        let instance = launcher
+            .import_instance(game.clone(), "RLCraft".into(), String::new())
+            .await
+            .unwrap();
+        launcher
+            .set_installed(&instance.id, "RLCraft", true)
+            .unwrap();
+        // Invalid proxy would fail client construction if preflight ran too late.
+        launcher
+            .mutate(|db| {
+                db.settings.proxy_mode = "http".into();
+                db.settings.proxy_url = "invalid proxy".into();
+                Ok(())
+            })
+            .unwrap();
+        let sink: EventSink = Arc::new(|_| {});
+        let error = launcher
+            .install(&instance.id, &CancellationToken::new(), &sink)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("自定义加载器"));
+        assert!(
+            launcher
+                .instance(&instance.id)
+                .unwrap()
+                .selected()
+                .unwrap()
+                .installed
+        );
+        assert_eq!(fs::read(version_path).unwrap(), original);
+        assert!(!launcher.root().join("metadata/manifest.json").exists());
+    }
+
+    #[test]
+    fn instance_preferences_save_during_another_install_and_survive_its_completion() {
+        let temp = tempfile::tempdir().unwrap();
+        let launcher = Launcher::open(Some(temp.path().into())).unwrap();
+        let downloading = launcher.create_instance("Downloading", "1.21.1").unwrap();
+        let other = launcher.create_instance("Other", "1.20.1").unwrap();
+        let operation = launcher.0.operation.try_lock().unwrap();
+        let active_snapshot = launcher.instance(&downloading.id).unwrap();
+        launcher
+            .set_installed(&downloading.id, "1.21.1", false)
+            .unwrap();
+        launcher
+            .update_instance(
+                &other.id,
+                " Renamed ",
+                4096,
+                Some("/custom/bin/java".into()),
+                Some(3),
+            )
+            .unwrap();
+        assert!(
+            launcher
+                .update_instance(&other.id, "", 4096, None, Some(3))
+                .is_err()
+        );
+        launcher
+            .set_installed(&downloading.id, "1.21.1", true)
+            .unwrap();
+        assert_eq!(active_snapshot.name, "Downloading");
+        assert_eq!(active_snapshot.memory_mb, downloading.memory_mb);
+        assert_eq!(active_snapshot.java_path, downloading.java_path);
+        drop(operation);
+        drop(launcher);
+        let launcher = Launcher::open(Some(temp.path().into())).unwrap();
+        let saved = launcher.instance(&other.id).unwrap();
+        assert_eq!(saved.name, "Renamed");
+        assert_eq!(saved.memory_mb, 4096);
+        assert_eq!(saved.java_path.as_deref(), Some("/custom/bin/java"));
+        assert_eq!(saved.icon, Some(3));
+        assert_eq!(
+            saved.game_dir(launcher.root()),
+            other.game_dir(launcher.root())
+        );
+        assert_eq!(saved.selected_version, other.selected_version);
+        assert!(!saved.selected().unwrap().installed);
+        assert!(
+            launcher
+                .instance(&downloading.id)
+                .unwrap()
+                .selected()
+                .unwrap()
+                .installed
+        );
+    }
+
+    #[test]
+    fn instance_metadata_updates_still_reject_a_running_game() {
+        let temp = tempfile::tempdir().unwrap();
+        let launcher = Launcher::open(Some(temp.path().into())).unwrap();
+        let running = launcher.create_instance("Running", "1.21.1").unwrap();
+        let other = launcher.create_instance("Other", "1.21.1").unwrap();
+        launcher
+            .0
+            .games
+            .lock()
+            .unwrap()
+            .insert(running.id.clone(), CancellationToken::new());
+        assert!(
+            launcher
+                .update_instance(&running.id, "Changed", 4096, None, None)
+                .is_err()
+        );
+        launcher
+            .update_instance(&other.id, "Other changed", 4096, None, None)
+            .unwrap();
+        assert_eq!(launcher.instance(&running.id).unwrap().name, "Running");
+        assert_eq!(launcher.instance(&other.id).unwrap().name, "Other changed");
+    }
+
     #[test]
     fn settings_can_be_saved_during_download_without_changing_its_snapshot() {
         let temp = tempfile::tempdir().unwrap();
@@ -850,7 +1350,13 @@ mod tests {
         };
         launcher.save_settings(preferences).unwrap();
         // The active operation keeps its original source; the next uses the saved source.
-        assert_eq!(active_download.urls(url), vec![url]);
+        assert_eq!(
+            active_download.urls(url),
+            vec![
+                url,
+                "https://bmclapi2.bangbang93.com/mc/game/version_manifest_v2.json"
+            ]
+        );
         let next_download =
             download::Downloader::new(launcher.root(), launcher.settings()).unwrap();
         assert!(next_download.urls(url)[0].starts_with("https://bmclapi2.bangbang93.com/"));
@@ -1380,6 +1886,100 @@ printf '%s\n' 'offline session 0 started'
         assert_eq!(persisted.versions.len(), 2);
         assert_eq!(persisted.selected_version.as_deref(), Some("1.21.1"));
         assert!(persisted.selected().unwrap().installed);
+    }
+
+    #[tokio::test]
+    async fn relink_preserves_identity_and_games_and_rejects_missing_installed_versions() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("launcher");
+        let source = temp.path().join("original/.minecraft");
+        fs::create_dir_all(source.join("saves/world")).unwrap();
+        fs::write(source.join("saves/world/level.dat"), b"original-world").unwrap();
+        let launcher = Launcher::open(Some(root.clone())).unwrap();
+        let instance = launcher.create_instance("Existing", "1.21.1").unwrap();
+        launcher
+            .update_instance(
+                &instance.id,
+                "My game",
+                4096,
+                Some("my-java".into()),
+                Some(8),
+            )
+            .unwrap();
+        let old_game = launcher.game_dir(&instance.id).unwrap();
+        let relative = PathBuf::from("versions/1.21.1");
+        let metadata = crate::test_http::version_fixture("1.21.1");
+        storage::write_json(&old_game.join(&relative).join("1.21.1.json"), &metadata).unwrap();
+        fs::write(old_game.join(&relative).join("1.21.1.jar"), b"client").unwrap();
+        fs::write(old_game.join("keep-me"), b"old-copy").unwrap();
+        launcher
+            .set_installed(&instance.id, "1.21.1", true)
+            .unwrap();
+        let before = fs::read(root.join("database.json")).unwrap();
+        assert!(
+            launcher
+                .relink_instance(&instance.id, source.clone())
+                .await
+                .is_err()
+        );
+        assert_eq!(fs::read(root.join("database.json")).unwrap(), before);
+        storage::write_json(&source.join(&relative).join("1.21.1.json"), &metadata).unwrap();
+        fs::write(source.join(&relative).join("1.21.1.jar"), b"other!").unwrap();
+        assert!(
+            launcher
+                .relink_instance(&instance.id, source.clone())
+                .await
+                .is_err()
+        );
+        assert_eq!(fs::read(root.join("database.json")).unwrap(), before);
+        fs::write(source.join(&relative).join("1.21.1.jar"), b"client").unwrap();
+        let linked = launcher
+            .relink_instance(&instance.id, source.clone())
+            .await
+            .unwrap();
+        assert_eq!(linked.id, instance.id);
+        assert_eq!(linked.name, "My game");
+        assert_eq!(linked.memory_mb, 4096);
+        assert_eq!(linked.java_path.as_deref(), Some("my-java"));
+        assert_eq!(linked.icon, Some(8));
+        assert_eq!(linked.selected_version, instance.selected_version);
+        assert!(linked.selected().unwrap().installed);
+        assert_eq!(linked.game_directory, Some(source.canonicalize().unwrap()));
+        assert_eq!(fs::read(old_game.join("keep-me")).unwrap(), b"old-copy");
+        assert!(!source.join("keep-me").exists());
+        assert_eq!(
+            fs::read(source.join("saves/world/level.dat")).unwrap(),
+            b"original-world"
+        );
+        let backup: Instance = storage::read_json(
+            &launcher
+                .instance_dir(&instance.id)
+                .unwrap()
+                .join("directory-link-before.json"),
+        )
+        .unwrap();
+        assert_eq!(backup.game_directory, None);
+        let second = launcher.create_instance("Other", "").unwrap();
+        assert!(
+            launcher
+                .relink_instance(&second.id, source.clone())
+                .await
+                .is_err()
+        );
+        drop(launcher);
+        let reopened = Launcher::open(Some(root)).unwrap();
+        assert_eq!(
+            reopened.game_dir(&instance.id).unwrap(),
+            source.canonicalize().unwrap()
+        );
+        assert!(
+            reopened
+                .instance(&instance.id)
+                .unwrap()
+                .selected()
+                .unwrap()
+                .installed
+        );
     }
 
     #[tokio::test]

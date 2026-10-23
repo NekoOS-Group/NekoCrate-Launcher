@@ -8,15 +8,21 @@ import {
   ref,
   watch,
 } from "vue";
-import { Check, ChevronDown } from "lucide-vue-next";
+import { Check, ChevronDown, FolderOpen } from "lucide-vue-next";
+import { floatingMenuPosition } from "../floatingMenu";
 
 const props = defineProps<{
   id: string;
   modelValue: string;
-  disabled: boolean;
+  disabled?: boolean;
   options: readonly { value: string; label: string; detail?: string }[];
+  actionLabel?: string;
+  floating?: boolean;
 }>();
-const emit = defineEmits<{ "update:modelValue": [value: string] }>();
+const emit = defineEmits<{
+  "update:modelValue": [value: string];
+  action: [];
+}>();
 const selected = computed(
   () =>
     props.options.find((source) => source.value === props.modelValue) ||
@@ -26,36 +32,80 @@ const root = ref<HTMLElement>();
 const trigger = ref<HTMLButtonElement>();
 const list = ref<HTMLElement>();
 const expanded = ref(false);
+const availableHeight = ref<number>();
+const portalTarget = ref<HTMLElement>();
+const floatingStyle = ref<ReturnType<typeof floatingMenuPosition>>();
+let trackingFrame: number | undefined;
+function fitMenu() {
+  if (!expanded.value || !trigger.value) return;
+  if (props.floating) {
+    const position = floatingMenuPosition(
+      trigger.value.getBoundingClientRect(),
+      {
+        width: window.innerWidth,
+        height: window.innerHeight,
+      },
+    );
+    if (JSON.stringify(position) !== JSON.stringify(floatingStyle.value))
+      floatingStyle.value = position;
+    return;
+  }
+  availableHeight.value = Math.max(
+    80,
+    window.innerHeight - trigger.value.getBoundingClientRect().bottom - 24,
+  );
+}
+function trackMenu() {
+  trackingFrame = undefined;
+  if (!expanded.value || !props.floating) return;
+  fitMenu();
+  // Follow the animated panel and scrolling while open; no idle render loop.
+  trackingFrame = requestAnimationFrame(trackMenu);
+}
 
 function optionButtons() {
   return Array.from(
-    list.value?.querySelectorAll<HTMLButtonElement>("[role='option']") || [],
+    list.value?.querySelectorAll<HTMLButtonElement>(
+      "[role='option'], [data-select-action]",
+    ) || [],
   );
 }
 function focusOption(index: number) {
   const items = optionButtons();
-  items[(index + items.length) % items.length]?.focus({ preventScroll: true });
+  const item = items[(index + items.length) % items.length];
+  item?.focus({ preventScroll: true });
+  item?.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
 async function open(position: "selected" | "first" | "last" = "selected") {
   if (props.disabled) return;
+  if (props.floating)
+    portalTarget.value = root.value?.closest("dialog") || document.body;
   expanded.value = true;
+  fitMenu();
+  if (props.floating) trackMenu();
   await nextTick();
   if (expanded.value)
     focusOption(
       position === "first"
         ? 0
         : position === "last"
-          ? props.options.length - 1
+          ? optionButtons().length - 1
           : props.options.indexOf(selected.value),
     );
 }
 function close(restoreFocus = false) {
   expanded.value = false;
+  if (trackingFrame !== undefined) cancelAnimationFrame(trackingFrame);
+  trackingFrame = undefined;
   if (restoreFocus) trigger.value?.focus({ preventScroll: true });
 }
 function choose(value: string) {
   emit("update:modelValue", value);
   close(true);
+}
+function runAction() {
+  close(true);
+  emit("action");
 }
 function navigate(event: KeyboardEvent) {
   if (event.key === "Escape") {
@@ -85,18 +135,23 @@ function navigate(event: KeyboardEvent) {
     event.key === "Home"
       ? 0
       : event.key === "End"
-        ? props.options.length - 1
+        ? optionButtons().length - 1
         : index + (event.key === "ArrowDown" ? 1 : -1),
   );
 }
 function outside(event: PointerEvent) {
-  if (event.target instanceof Node && !root.value?.contains(event.target))
+  if (
+    event.target instanceof Node &&
+    !root.value?.contains(event.target) &&
+    !list.value?.contains(event.target)
+  )
     close();
 }
 function leave(event: FocusEvent) {
   if (
     !(event.relatedTarget instanceof Node) ||
-    !root.value?.contains(event.relatedTarget)
+    (!root.value?.contains(event.relatedTarget) &&
+      !list.value?.contains(event.relatedTarget))
   )
     close();
 }
@@ -106,10 +161,15 @@ watch(
     if (disabled) close();
   },
 );
-onMounted(() => document.addEventListener("pointerdown", outside, true));
-onBeforeUnmount(() =>
-  document.removeEventListener("pointerdown", outside, true),
-);
+onMounted(() => {
+  document.addEventListener("pointerdown", outside, true);
+  window.addEventListener("resize", fitMenu);
+});
+onBeforeUnmount(() => {
+  close();
+  document.removeEventListener("pointerdown", outside, true);
+  window.removeEventListener("resize", fitMenu);
+});
 </script>
 
 <template>
@@ -124,38 +184,74 @@ onBeforeUnmount(() =>
       aria-haspopup="listbox"
       :aria-controls="`${id}-options`"
       :aria-expanded="expanded"
+      :title="selected.detail ? t(selected.detail) : t(selected.label)"
       @click="expanded ? close() : open()"
     >
       <span :id="`${id}-value`">{{ t(selected.label) }}</span>
       <ChevronDown :size="16" />
     </button>
-    <Transition name="source-menu">
-      <div
-        v-if="expanded"
-        :id="`${id}-options`"
-        ref="list"
-        class="source-select-menu glass-surface"
-        role="listbox"
-        :aria-labelledby="`${id}-label`"
-      >
-        <button
-          v-for="source in options"
-          :key="source.value"
-          type="button"
-          class="source-select-option"
-          role="option"
-          :aria-selected="source.value === modelValue"
-          tabindex="-1"
-          :disabled="disabled"
-          @click="choose(source.value)"
+    <Teleport
+      :to="portalTarget || 'body'"
+      :disabled="!floating || !portalTarget"
+    >
+      <Transition name="source-menu">
+        <div
+          v-if="expanded"
+          ref="list"
+          class="source-select-menu glass-surface"
+          :class="{ 'source-select-floating': floating }"
+          @keydown.stop="navigate"
+          @focusout.stop="leave"
+          :style="
+            floating
+              ? floatingStyle
+              : availableHeight === undefined
+                ? undefined
+                : { maxHeight: `${availableHeight}px` }
+          "
         >
-          <span class="source-select-copy"
-            ><span>{{ t(source.label) }}</span
-            ><small v-if="source.detail">{{ t(source.detail) }}</small></span
+          <div
+            :id="`${id}-options`"
+            class="source-select-options"
+            role="listbox"
+            :aria-labelledby="`${id}-label`"
           >
-          <Check v-if="source.value === modelValue" :size="16" />
-        </button>
-      </div>
-    </Transition>
+            <button
+              v-for="source in options"
+              :key="source.value"
+              type="button"
+              class="source-select-option"
+              role="option"
+              :aria-selected="source.value === modelValue"
+              :title="source.detail ? t(source.detail) : t(source.label)"
+              tabindex="-1"
+              :disabled="disabled"
+              @pointerdown.prevent
+              @click="choose(source.value)"
+            >
+              <span class="source-select-copy"
+                ><span>{{ t(source.label) }}</span
+                ><small v-if="source.detail">{{
+                  t(source.detail)
+                }}</small></span
+              >
+              <Check v-if="source.value === modelValue" :size="16" />
+            </button>
+          </div>
+          <button
+            v-if="actionLabel"
+            type="button"
+            class="source-select-action"
+            data-select-action
+            :disabled="disabled"
+            tabindex="-1"
+            @pointerdown.prevent
+            @click="runAction"
+          >
+            <FolderOpen :size="15" />{{ actionLabel }}
+          </button>
+        </div>
+      </Transition>
+    </Teleport>
   </div>
 </template>

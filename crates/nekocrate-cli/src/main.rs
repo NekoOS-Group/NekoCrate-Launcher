@@ -54,6 +54,11 @@ enum Commands {
         #[arg(long, default_value = "")]
         version: String,
     },
+    /// Associate an existing instance with its original directory without moving files.
+    Relink {
+        id: String,
+        source: PathBuf,
+    },
     Java,
     Login,
     Refresh,
@@ -83,7 +88,7 @@ async fn main() -> Result<()> {
         signal.cancel();
     });
     let sink: EventSink = Arc::new(|e| {
-        if e.kind != "transfer"
+        if !["transfer", "file", "file_plan"].contains(&e.kind.as_str())
             && (e.kind != "progress" || e.completed % 100 == 0 || e.completed == e.total)
         {
             eprintln!(
@@ -120,9 +125,8 @@ async fn main() -> Result<()> {
             serde_json::to_string_pretty(&launcher.add_version(&id, &version)?)?
         ),
         Commands::SelectVersion { id, version } => launcher.select_version(&id, &version)?,
-        Commands::Install { id } | Commands::Repair { id } => {
-            launcher.install(&id, &cancel, &sink).await?
-        }
+        Commands::Install { id } => launcher.install(&id, &cancel, &sink).await?,
+        Commands::Repair { id } => launcher.repair(&id, &cancel, &sink).await?,
         Commands::Clone { id } => println!(
             "{}",
             serde_json::to_string_pretty(&launcher.clone_instance(&id).await?)?
@@ -136,6 +140,10 @@ async fn main() -> Result<()> {
             serde_json::to_string_pretty(&launcher.import_instance(source, name, version).await?)?
         ),
         Commands::Delete { id } => launcher.delete_instance(&id)?,
+        Commands::Relink { id, source } => println!(
+            "{}",
+            serde_json::to_string_pretty(&launcher.relink_instance(&id, source).await?)?
+        ),
         Commands::Java => println!(
             "{}",
             serde_json::to_string_pretty(&nekocrate_core::java::discover(launcher.root()).await)?

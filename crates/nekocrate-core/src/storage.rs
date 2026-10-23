@@ -15,6 +15,18 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     serde_json::from_slice(&fs::read(path).with_context(|| format!("无法读取 {}", path.display()))?)
         .with_context(|| format!("JSON 损坏：{}，请保留原文件后恢复备份", path.display()))
 }
+pub(crate) fn same_file_contents(a: &Path, b: &Path) -> Result<bool> {
+    use sha2::{Digest, Sha256};
+    if !a.is_file() || !b.is_file() || fs::metadata(a)?.len() != fs::metadata(b)?.len() {
+        return Ok(false);
+    }
+    let hash = |path: &Path| -> Result<_> {
+        let mut hash = Sha256::new();
+        std::io::copy(&mut fs::File::open(path)?, &mut hash)?;
+        Ok(hash.finalize())
+    };
+    Ok(hash(a)? == hash(b)?)
+}
 pub fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
     atomic_write(path, &serde_json::to_vec_pretty(value)?)
 }

@@ -14,9 +14,9 @@
 | 凭据 | 刷新令牌存入 macOS Keychain / Windows Credential Manager / Linux Secret Service；数据库与前端不接收令牌 |
 | 游戏 | 官方版本目录、版本元数据、客户端、库、资源索引、资源对象、原生库、日志配置；按规则构建 JVM 与游戏参数 |
 | Java | 检测 JAVA_HOME、PATH、托管运行时；按游戏要求选择 Java；通过 Adoptium 自动下载并验证 SHA-256；实例可指定路径 |
-| 下载 | 1–32 并发、重试、取消、SHA-1/SHA-256 和长度校验、共享内容缓存；官方/BMCLAPI 优先与失败回退 |
+| 下载 | 1–32 并发与自适应、暂停/继续、重试、取消、HTTP Range 续传、SHA-1/SHA-256 和长度校验、共享内容缓存；游戏源自动测速与回退、官方/BMCLAPI 手动选择；独立 Mod 源设置与系统/手动代理 |
 | 修复 | 校验游戏文件；损坏文件优先从已校验缓存恢复，再重新下载；安装中断后不标记为可启动 |
-| 实例 | 每个实例对应一个 `.minecraft`；已有目录直接关联原路径；同一实例添加、切换多个版本，共用存档/配置；Java/内存设置 |
+| 实例 | 每个实例对应一个 `.minecraft`；已有目录直接关联原路径并在其中读写资源和依赖；同一实例添加、切换多个版本，共用存档/配置；Java/内存设置 |
 | 进程 | 直接启动 Java，不经过 shell；工作目录隔离；实时 stdout/stderr、脱敏日志、停止游戏、退出状态 |
 | 界面 | 简体中文 / English / 跟随系统；可同步 Minecraft 语言；实例拖拽排序；官方发布更新检查 |
 
@@ -24,7 +24,7 @@
 
 - 原型支持官方原版 Java Edition 1.13 及更新版本的元数据协议。Apple Silicon 使用带原生 ARM 库的 1.19+。并未逐个版本验证。
 - Forge、Fabric、NeoForge、Quilt、外置认证、Bedrock 尚未实现。迁入的模组会保留，但原版不会加载这些模组。
-- 下载恢复以完整文件为单位。已校验文件复用；未完成的单文件重新下载，不提供 HTTP Range 字节级续传。
+- 下载恢复支持 HTTP Range 字节级续传；未变化的完整文件复用持久化校验记录，主动修复仍完整校验。服务器不支持续传时安全地重新下载对应文件。
 - 关联目录移除后仍保留原处，只取消关联；启动器内新建的托管实例移除后移至 `trash/`，不永久删除。
 - 自动 Java 下载依赖 Adoptium/GitHub 网络。无法访问时，可在实例设置中指定对应主版本的本地 Java。
 - macOS 是本地验证平台；Windows/Linux 配置了 CI 构建检查，未经本机实测。
@@ -58,7 +58,7 @@ npm run tauri build
 
 项目默认 bundle 类型是 macOS app。其他平台可通过 `--bundles nsis` / `--bundles deb` 选择平台包，或先执行 `npm run tauri build -- --no-bundle` 验证可执行文件。
 
-开发版本发布由 `.github/workflows/release.yml` 管理：推送 `dev*` 标签后，在 macOS ARM64、Windows AMD64、Ubuntu 22.04 AMD64 原生 runner 上分别测试并构建。三个平台全部成功后校验来源提交、架构与 SHA-256，上传 DMG / app ZIP、NSIS EXE、DEB / AppImage，再公开 GitHub 预发布版。构建使用 Rust 1.93.1、Node.js 22 和锁定依赖，`docs/releases/<标签>.md` 保存发布说明。`dev0.1` 对应应用版本 `0.1.0-dev.1`；`dev0.2` 对应 `0.2.0-dev.1`。
+开发版本发布由 `.github/workflows/release.yml` 管理：推送 `dev*` 标签后，先构建一次共享前端，再在 macOS ARM64、Windows AMD64、Ubuntu 22.04 AMD64 原生 runner 上分别编译并打包。源码测试、格式检查与 Clippy 由普通 CI 执行，发布不重复运行。三个平台全部成功后校验来源提交、架构与 SHA-256，上传 DMG / app ZIP、NSIS EXE、DEB / AppImage，再公开 GitHub 预发布版。构建使用 Rust 1.93.1、Node.js 22 和锁定依赖，`docs/releases/<标签>.md` 保存发布说明。`dev0.1` 对应应用版本 `0.1.0-dev.1`；`dev0.2` 对应 `0.2.0-dev.1`；`dev0.3` 对应 `0.3.0-dev.1`。
 
 macOS 开发包采用 [Tauri ad-hoc 签名](https://v2.tauri.app/distribute/sign/macos/#ad-hoc-signing)，未做 Apple 公证；Windows 开发包没有发布者代码签名。Linux 使用英文包名满足包管理器命名要求，桌面入口及窗口仍显示「猫咪盒子启动器」。
 
@@ -110,3 +110,7 @@ scripts/                可复现的真实网络检查
 ```
 
 参见 [架构说明](docs/architecture.md)。
+
+## 许可证
+
+Copyright © NekoOS Group。启动器代码采用 [GNU GPL v3.0](LICENSE)（`GPL-3.0-only`）。第三方依赖和 Minecraft 原版素材保留各自的许可与权利声明；原版方块素材来源见 [provenance.json](app/src/assets/blocks/provenance.json)。

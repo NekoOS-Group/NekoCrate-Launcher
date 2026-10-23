@@ -22,10 +22,11 @@ if instance is None:
     instance = json.loads(cli('create', '原型安装验证', '--version', args.version, capture=True).stdout)
 cli('select-version', instance['id'], args.version)
 cli('install', instance['id'])
-version = json.loads((root / 'instances' / instance['id'] / '.minecraft' / 'versions' / args.version / (args.version + '.json')).read_text())
-index = json.loads((root / 'assets' / 'indexes' / (version['assetIndex']['id'] + '.json')).read_text())
+game = root / 'instances' / instance['id'] / '.minecraft'
+version = json.loads((game / 'versions' / args.version / (args.version + '.json')).read_text())
+index = json.loads((game / 'assets' / 'indexes' / (version['assetIndex']['id'] + '.json')).read_text())
 asset = next(iter(index['objects'].values()))
-asset_path = root / 'assets' / 'objects' / asset['hash'][:2] / asset['hash']
+asset_path = game / 'assets' / 'objects' / asset['hash'][:2] / asset['hash']
 asset_path.write_bytes(b'nekocrate corruption test')
 cli('repair', instance['id'])
 assert hashlib.sha1(asset_path.read_bytes()).hexdigest() == asset['hash']

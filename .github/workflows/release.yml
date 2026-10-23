@@ -8,7 +8,7 @@ on:
       tag:
         description: Existing preview tag to build
         required: true
-        default: dev0.2
+        default: dev0.3
         type: string
 
 permissions:
@@ -23,8 +23,44 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  frontend:
+    name: Prepare shared frontend
+    runs-on: ubuntu-22.04
+    outputs:
+      commit: ${{ steps.revision.outputs.commit }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+      - id: revision
+        run: echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check release version
+        run: python scripts/release_assets.py check-version --tag "$RELEASE_TAG"
+      - run: npm ci
+        working-directory: app
+      - run: npm run build
+        working-directory: app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: app/dist
+          if-no-files-found: error
+          retention-days: 1
+
   build:
     name: Build ${{ matrix.platform }}
+    needs: frontend
     strategy:
       fail-fast: false
       matrix:
@@ -49,11 +85,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: refs/tags/${{ env.RELEASE_TAG }}
+          ref: ${{ needs.frontend.outputs.commit }}
       - uses: dtolnay/rust-toolchain@1.93.1
         with:
           targets: ${{ matrix.target }}
-          components: rustfmt, clippy
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -65,23 +100,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}
+          cache-on-failure: true
+          cache-workspace-crates: true
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libssl-dev librsvg2-dev libayatana-appindicator3-dev libdbus-1-dev libfuse2 patchelf
-      - name: Install frontend dependencies
+      - name: Install Tauri CLI dependencies
         run: npm ci
         working-directory: app
-      - name: Verify source
-        run: |
-          python scripts/release_assets.py check-version --tag "$RELEASE_TAG"
-          npm --prefix app test
-          cargo fmt --all -- --check
-          cargo test --workspace --locked
-          cargo clippy --workspace --all-targets --locked -- -D warnings
+      - uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: app/dist
       - name: Build release installers
-        run: npm run tauri build -- --target "${{ matrix.target }}" --bundles "${{ matrix.bundles }}" --ci -- --locked
+        run: npm run tauri build -- --config src-tauri/tauri.release.conf.json --target "${{ matrix.target }}" --bundles "${{ matrix.bundles }}" --ci -- --locked
         working-directory: app
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
@@ -97,14 +131,14 @@ jobs:
 
   publish:
     name: Publish preview release
-    needs: build
+    needs: [frontend, build]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: refs/tags/${{ env.RELEASE_TAG }}
+          ref: ${{ needs.frontend.outputs.commit }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"

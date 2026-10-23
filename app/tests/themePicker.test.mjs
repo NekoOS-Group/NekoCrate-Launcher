@@ -3,7 +3,7 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 import { parse, compileScript } from "@vue/compiler-sfc";
 import ts from "typescript";
-import { createRenderer, h, nextTick, ref } from "vue";
+import { createRenderer, h, nextTick, ref, toRaw } from "vue";
 
 // Exercise the actual Vue handlers without a browser or desktop automation.
 const source = readFileSync(
@@ -148,6 +148,7 @@ test("主题选择跨过 Safari 空焦点事件后仍在松手时提交一次，
     await nextTick();
     assert.deepEqual(choices, ["sage"]);
     assert.equal(options.props.inert, true);
+    assert.equal(document.activeElement, null, "鼠标选择不应强制聚焦触发按钮");
     root.props.onPointerenter({ pointerType: "mouse" });
     await nextTick();
     const next = buttons()[0];
@@ -161,6 +162,11 @@ test("主题选择跨过 Safari 空焦点事件后仍在松手时提交一次，
     next.props.onClick({ detail: 0 });
     await nextTick();
     assert.deepEqual(choices, ["sage", "tide"]);
+    assert.equal(
+      toRaw(document.activeElement),
+      root.children[0],
+      "键盘选择后焦点返回触发按钮",
+    );
   } finally {
     app.unmount();
     globalThis.document = previousDocument;

@@ -6,11 +6,98 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use std::{
     collections::HashMap,
+    future::Future,
     path::{Path, PathBuf},
+    time::Duration,
 };
 use tokio_util::sync::CancellationToken;
 
 pub const MANIFEST: &str = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
+const MANIFEST_MISS_TTL: Duration = Duration::from_secs(15 * 60);
+const UNKNOWN_VERSION: &str = "未在官方版本目录中找到此版本；自定义加载器版本暂不支持";
+const CUSTOM_VERSION: &str = "该本地版本使用自定义加载器，启动器暂不支持安装或修复";
+const LEGACY_VERSION: &str =
+    "当前原型支持 Minecraft 1.13 及更新的官方版本；旧版本启动协议将在后续加入。";
+
+/// Read only enough local metadata to reject an unsupported install before any
+/// network work. Missing/broken JSON may be repaired using official metadata.
+pub fn check_local_install(game: &Path, id: &str) -> Result<()> {
+    storage::safe_version(id)?;
+    let path = game.join("versions").join(id).join(format!("{id}.json"));
+    let Ok(value) = storage::read_json::<serde_json::Value>(&path) else {
+        return Ok(());
+    };
+    let inherits = value["inheritsFrom"]
+        .as_str()
+        .is_some_and(|id| !id.is_empty());
+    let loader_main = value["mainClass"].as_str().is_some_and(|main| {
+        [
+            "net.minecraft.launchwrapper.",
+            "cpw.mods.",
+            "net.minecraftforge.",
+            "net.neoforged.",
+            "net.fabricmc.",
+            "org.quiltmc.",
+            "optifine.",
+        ]
+        .iter()
+        .any(|prefix| main.starts_with(prefix))
+    });
+    let loader_library = value["libraries"].as_array().is_some_and(|libraries| {
+        libraries
+            .iter()
+            .filter_map(|library| library["name"].as_str())
+            .any(|name| {
+                [
+                    "net.minecraftforge:forge:",
+                    "net.minecraftforge:fmlloader:",
+                    "net.neoforged:",
+                    "net.fabricmc:fabric-loader:",
+                    "org.quiltmc:quilt-loader:",
+                    "optifine:OptiFine:",
+                ]
+                .iter()
+                .any(|prefix| name.starts_with(prefix))
+            })
+    });
+    if inherits || loader_main || loader_library {
+        bail!(CUSTOM_VERSION);
+    }
+    if value["arguments"].is_null() && value["minecraftArguments"].is_string() {
+        bail!(LEGACY_VERSION);
+    }
+    Ok(())
+}
+
+async fn version_entry(
+    root: &Path,
+    id: &str,
+    refresh: impl Future<Output = Result<VersionManifest>>,
+) -> Result<VersionEntry> {
+    storage::safe_version(id)?;
+    let path = root.join("metadata/manifest.json");
+    if let Ok(cached) = storage::read_json::<VersionManifest>(&path) {
+        if let Some(entry) = cached.versions.into_iter().find(|entry| entry.id == id) {
+            return Ok(entry);
+        }
+        // A recent complete manifest also caches negative results. Old misses
+        // must refresh so newly published versions are not permanently rejected.
+        let fresh = std::fs::metadata(&path)
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|age| age < MANIFEST_MISS_TTL);
+        if fresh {
+            bail!(UNKNOWN_VERSION);
+        }
+    }
+    refresh
+        .await?
+        .versions
+        .into_iter()
+        .find(|entry| entry.id == id)
+        .context(UNKNOWN_VERSION)
+}
 pub fn os_name() -> &'static str {
     if cfg!(target_os = "macos") {
         "osx"
@@ -91,27 +178,9 @@ pub async fn version(
     cancel: &CancellationToken,
     sink: &EventSink,
 ) -> Result<Version> {
-    let manifest = match manifest(root, downloader, cancel).await {
-        Ok(v) => v,
-        Err(e) => {
-            check_cancel(cancel)?;
-            let cache = root.join("metadata/manifest.json");
-            if !cache.exists() {
-                return Err(e);
-            }
-            sink(Event::new("warning", "网络不可用，使用已缓存版本目录"));
-            storage::read_json(&cache)?
-        }
-    };
-    let entry = manifest
-        .versions
-        .iter()
-        .find(|v| v.id == id)
-        .context("未找到该官方游戏版本；原型暂不支持自定义加载器版本")?;
-    let relative = storage::safe_relative(id)?;
-    if relative.components().count() != 1 {
-        bail!("无效游戏版本");
-    }
+    check_cancel(cancel)?;
+    let entry = version_entry(root, id, manifest(root, downloader, cancel)).await?;
+    check_cancel(cancel)?;
     let path = root.join("metadata/versions").join(format!("{id}.json"));
     downloader
         .file(
@@ -131,7 +200,7 @@ pub async fn version(
         bail!("当前原型仅支持独立的官方 Java 版元数据");
     }
     if v.arguments.is_none() {
-        bail!("当前原型支持 Minecraft 1.13 及更新的官方版本；旧版本启动协议将在后续加入。");
+        bail!(LEGACY_VERSION);
     }
     if cfg!(all(target_os = "macos", target_arch = "aarch64"))
         && v.libraries
@@ -162,14 +231,22 @@ pub fn native_artifact(l: &Library) -> Option<&Artifact> {
     );
     l.downloads.classifiers.get(&key)
 }
-pub async fn install_files(
-    root: &Path,
-    game: &Path,
-    v: &Version,
-    downloader: &Downloader,
-    cancel: &CancellationToken,
-    sink: &EventSink,
-) -> Result<()> {
+fn asset_index_file(game: &Path, v: &Version) -> Result<FileSpec> {
+    Ok(FileSpec {
+        url: v.asset_index.url.clone(),
+        path: game
+            .join("assets/indexes")
+            .join(storage::safe_relative(&format!(
+                "{}.json",
+                v.asset_index.id
+            ))?),
+        hash: v.asset_index.sha1.clone(),
+        sha256: false,
+        size: v.asset_index.size,
+    })
+}
+
+fn installation_files(game: &Path, v: &Version, index: &AssetIndex) -> Result<Vec<FileSpec>> {
     let mut files = vec![];
     files.push(artifact_file(
         v.downloads.get("client").context("元数据缺少客户端文件")?,
@@ -179,32 +256,12 @@ pub async fn install_files(
     ));
     for library in v.libraries.iter().filter(|l| is_allowed(l)) {
         if let Some(a) = &library.downloads.artifact {
-            files.push(artifact_file(a, library_path(root, a)?));
+            files.push(artifact_file(a, library_path(game, a)?));
         }
         if let Some(a) = native_artifact(library) {
-            files.push(artifact_file(a, library_path(root, a)?));
+            files.push(artifact_file(a, library_path(game, a)?));
         }
     }
-    let index_path = root
-        .join("assets/indexes")
-        .join(storage::safe_relative(&format!(
-            "{}.json",
-            v.asset_index.id
-        ))?);
-    downloader
-        .file(
-            &FileSpec {
-                url: v.asset_index.url.clone(),
-                path: index_path.clone(),
-                hash: v.asset_index.sha1.clone(),
-                sha256: false,
-                size: v.asset_index.size,
-            },
-            cancel,
-            sink,
-        )
-        .await?;
-    let index: AssetIndex = storage::read_json(&index_path)?;
     for object in index.objects.values() {
         if object.hash.len() != 40 || !object.hash.bytes().all(|b| b.is_ascii_hexdigit()) {
             bail!("资源索引校验值无效");
@@ -212,7 +269,7 @@ pub async fn install_files(
         let path = format!("{}/{}", &object.hash[..2], object.hash);
         files.push(FileSpec {
             url: format!("https://resources.download.minecraft.net/{path}"),
-            path: root.join("assets/objects").join(&path),
+            path: game.join("assets/objects").join(&path),
             hash: object.hash.clone(),
             sha256: false,
             size: object.size,
@@ -223,7 +280,7 @@ pub async fn install_files(
         let id = a["id"].as_str().context("日志配置 ID 无效")?;
         files.push(FileSpec {
             url: a["url"].as_str().context("日志配置 URL 无效")?.into(),
-            path: root
+            path: game
                 .join("assets/log_configs")
                 .join(storage::safe_relative(id)?),
             hash: a["sha1"].as_str().context("日志配置校验值无效")?.into(),
@@ -231,12 +288,65 @@ pub async fn install_files(
             size: a["size"].as_u64().unwrap_or(0),
         });
     }
+    Ok(files)
+}
+
+/// Rebuild an interrupted official install's plan using verified local metadata.
+/// This does not fetch, copy or change anything in the game directory.
+pub async fn cached_installation_files(
+    root: &Path,
+    game: &Path,
+    id: &str,
+) -> Result<Vec<FileSpec>> {
+    storage::safe_version(id)?;
+    let manifest: VersionManifest = storage::read_json(&root.join("metadata/manifest.json"))?;
+    let entry = manifest
+        .versions
+        .iter()
+        .find(|entry| entry.id == id)
+        .context(UNKNOWN_VERSION)?;
+    let path = root.join("metadata/versions").join(format!("{id}.json"));
+    if !Downloader::verified(&path, &entry.sha1, false, 0).await? {
+        bail!("版本元数据未缓存");
+    }
+    let v: Version = storage::read_json(&path)?;
+    if v.id != id || v.inherits_from.is_some() {
+        bail!(CUSTOM_VERSION);
+    }
+    let index_file = asset_index_file(game, &v)?;
+    let path = if Downloader::verified(&index_file.path, &index_file.hash, false, index_file.size)
+        .await?
+    {
+        index_file.path
+    } else {
+        let cache = crate::download::object_path(&root.join("cache/objects"), &index_file)?;
+        if !Downloader::verified(&cache, &index_file.hash, false, index_file.size).await? {
+            bail!("资源索引未缓存");
+        }
+        cache
+    };
+    let index = storage::read_json(&path)?;
+    installation_files(game, &v, &index)
+}
+
+pub async fn install_files(
+    game: &Path,
+    v: &Version,
+    downloader: &Downloader,
+    cancel: &CancellationToken,
+    sink: &EventSink,
+) -> Result<()> {
+    let index_file = asset_index_file(game, v)?;
+    downloader.file(&index_file, cancel, sink).await?;
+    let index: AssetIndex = storage::read_json(&index_file.path)?;
+    let files = installation_files(game, v, &index)?;
     sink(Event::new(
         "stage",
         format!("校验并下载 {} 个游戏文件", files.len()),
     ));
     downloader.batch(files, cancel, sink).await?;
     check_cancel(cancel)?;
+    sink(Event::workflow("natives", "准备原生库与资源映射"));
     let natives = game.join("versions").join(&v.id).join("natives");
     if natives.exists() {
         std::fs::remove_dir_all(&natives)?;
@@ -245,7 +355,7 @@ pub async fn install_files(
     for library in v.libraries.iter().filter(|l| is_allowed(l)) {
         if let Some(a) = native_artifact(library) {
             extract_natives(
-                &library_path(root, a)?,
+                &library_path(game, a)?,
                 &natives,
                 library.extract.as_ref(),
                 cancel,
@@ -256,14 +366,14 @@ pub async fn install_files(
         for (name, object) in &index.objects {
             check_cancel(cancel)?;
             let relative = storage::safe_relative(name)?;
-            let source = root
+            let source = game
                 .join("assets/objects")
                 .join(&object.hash[..2])
                 .join(&object.hash);
             let dest = if index.map_to_resources {
                 game.join("resources")
             } else {
-                root.join("assets/virtual").join(&v.asset_index.id)
+                game.join("assets/virtual").join(&v.asset_index.id)
             }
             .join(relative);
             std::fs::create_dir_all(dest.parent().unwrap())?;
@@ -351,10 +461,32 @@ pub fn arguments(
 ) -> Result<Vec<String>> {
     let game = instance.game_dir(root);
     let native = game.join("versions").join(&v.id).join("natives");
+    // New installations live entirely in their .minecraft directory. Keep a
+    // read-only fallback for games installed by releases with shared storage.
+    let index = storage::safe_relative(&format!("{}.json", v.asset_index.id))?;
+    let assets = if game.join("assets/indexes").join(&index).is_file()
+        || !root.join("assets/indexes").join(&index).is_file()
+    {
+        game.join("assets")
+    } else {
+        root.join("assets")
+    };
+    let libraries = if game.join("libraries").is_dir() || !root.join("libraries").is_dir() {
+        game.join("libraries")
+    } else {
+        root.join("libraries")
+    };
     let mut classpath = vec![];
     for l in v.libraries.iter().filter(|l| is_allowed(l)) {
         if let Some(a) = &l.downloads.artifact {
-            classpath.push(library_path(root, a)?.to_string_lossy().to_string());
+            let local = library_path(&game, a)?;
+            let legacy = library_path(root, a)?;
+            let path = if local.is_file() || !legacy.is_file() {
+                local
+            } else {
+                legacy
+            };
+            classpath.push(path.to_string_lossy().to_string());
         }
     }
     classpath.push(
@@ -375,13 +507,10 @@ pub fn arguments(
         ("version_name", v.id.clone()),
         ("version_type", v.kind.clone()),
         ("game_directory", game.to_string_lossy().into()),
-        ("assets_root", root.join("assets").to_string_lossy().into()),
+        ("assets_root", assets.to_string_lossy().into()),
         ("assets_index_name", v.asset_index.id.clone()),
         ("natives_directory", native.to_string_lossy().into()),
-        (
-            "library_directory",
-            root.join("libraries").to_string_lossy().into(),
-        ),
+        ("library_directory", libraries.to_string_lossy().into()),
         ("classpath", classpath.join(separator)),
         ("classpath_separator", separator.into()),
         ("launcher_name", "NekoCrate".into()),
@@ -393,7 +522,8 @@ pub fn arguments(
     ]);
     vars.insert(
         "game_assets",
-        root.join("assets/virtual")
+        assets
+            .join("virtual")
             .join(&v.asset_index.id)
             .to_string_lossy()
             .into(),
@@ -407,10 +537,17 @@ pub fn arguments(
         args.push(
             argument.replace(
                 "${path}",
-                &root
-                    .join("assets/log_configs")
-                    .join(storage::safe_relative(id)?)
-                    .to_string_lossy(),
+                &{
+                    let relative = storage::safe_relative(id)?;
+                    let local = game.join("assets/log_configs").join(&relative);
+                    let legacy = root.join("assets/log_configs").join(&relative);
+                    if local.is_file() || !legacy.is_file() {
+                        local
+                    } else {
+                        legacy
+                    }
+                }
+                .to_string_lossy(),
             ),
         );
     }
@@ -454,6 +591,203 @@ fn expand(args: &[Argument], vars: &HashMap<&str, String>) -> Result<Vec<String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn manifest_fixture(id: &str) -> VersionManifest {
+        VersionManifest {
+            latest: HashMap::from([("release".into(), id.into())]),
+            versions: vec![VersionEntry {
+                id: id.into(),
+                kind: "release".into(),
+                url: "http://127.0.0.1:9/unexpected-network".into(),
+                sha1: "0".repeat(40),
+            }],
+        }
+    }
+
+    fn expire_manifest(root: &Path) {
+        let file = std::fs::File::options()
+            .write(true)
+            .open(root.join("metadata/manifest.json"))
+            .unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(
+            std::time::SystemTime::now() - MANIFEST_MISS_TTL - Duration::from_secs(60),
+        ))
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cached_entries_and_recent_misses_do_not_refresh_the_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("metadata/manifest.json");
+        storage::write_json(&path, &manifest_fixture("1.21.1")).unwrap();
+        let entry = version_entry(temp.path(), "1.21.1", async {
+            panic!("cache hit must not fetch")
+        })
+        .await
+        .unwrap();
+        assert_eq!(entry.id, "1.21.1");
+        let error = version_entry(temp.path(), "RLCraft", async {
+            panic!("recent miss must not fetch")
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.to_string(), UNKNOWN_VERSION);
+        expire_manifest(temp.path());
+        let entry = version_entry(temp.path(), "1.21.1", async {
+            panic!("stale positive hit must not fetch")
+        })
+        .await
+        .unwrap();
+        assert_eq!(entry.id, "1.21.1");
+        let error = version_entry(temp.path(), "../invalid", async {
+            panic!("invalid path must not fetch")
+        })
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("路径"));
+    }
+
+    #[tokio::test]
+    async fn missing_corrupt_or_stale_negative_cache_refreshes_and_preserves_network_errors() {
+        for state in ["missing", "corrupt", "stale"] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("metadata/manifest.json");
+            if state != "missing" {
+                storage::write_json(&path, &manifest_fixture("1.21.1")).unwrap();
+                if state == "corrupt" {
+                    std::fs::write(&path, b"broken JSON").unwrap();
+                } else {
+                    expire_manifest(temp.path());
+                }
+            }
+            let mut refreshes = 0;
+            let entry = version_entry(temp.path(), "26.1", async {
+                refreshes += 1;
+                Ok(manifest_fixture("26.1"))
+            })
+            .await
+            .unwrap();
+            assert_eq!(entry.id, "26.1");
+            assert_eq!(refreshes, 1);
+            let error = version_entry(temp.path(), "26.1", async {
+                bail!("fixture network unavailable")
+            })
+            .await
+            .unwrap_err();
+            assert_eq!(error.to_string(), "fixture network unavailable");
+            let error = version_entry(temp.path(), "Unknown", async {
+                Ok(manifest_fixture("26.1"))
+            })
+            .await
+            .unwrap_err();
+            assert_eq!(error.to_string(), UNKNOWN_VERSION);
+        }
+    }
+
+    #[tokio::test]
+    async fn cached_version_is_verified_without_any_network_and_corruption_is_repaired() {
+        use sha1::{Digest, Sha1};
+        let temp = tempfile::tempdir().unwrap();
+        let version_path = temp.path().join("metadata/versions/1.21.1.json");
+        let body = serde_json::to_vec(&crate::test_http::version_fixture("1.21.1")).unwrap();
+        std::fs::create_dir_all(version_path.parent().unwrap()).unwrap();
+        std::fs::write(&version_path, &body).unwrap();
+        let mut manifest = manifest_fixture("1.21.1");
+        manifest.versions[0].sha1 = hex::encode(Sha1::digest(&body));
+        storage::write_json(&temp.path().join("metadata/manifest.json"), &manifest).unwrap();
+        expire_manifest(temp.path());
+        let mut downloader = Downloader::new(
+            temp.path(),
+            Settings {
+                proxy_mode: "none".into(),
+                retries: 0,
+                ..Settings::default()
+            },
+        )
+        .unwrap();
+        // Route any accidental request (including the public manifest) to this
+        // local socket. The hit must finish without even opening a connection.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        downloader.client = reqwest::Client::builder()
+            .no_proxy()
+            .proxy(
+                reqwest::Proxy::all(format!("http://{}", listener.local_addr().unwrap())).unwrap(),
+            )
+            .build()
+            .unwrap();
+        let cancel = CancellationToken::new();
+        let sink: EventSink = std::sync::Arc::new(|_| {});
+        let v = tokio::time::timeout(
+            Duration::from_secs(2),
+            version(temp.path(), "1.21.1", &downloader, &cancel, &sink),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(v.id, "1.21.1");
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+
+        std::fs::write(&version_path, b"corrupted metadata").unwrap();
+        let (url, server) =
+            crate::test_http::serve(vec![(200, String::from_utf8(body.clone()).unwrap())]).await;
+        manifest.versions[0].url = url;
+        storage::write_json(&temp.path().join("metadata/manifest.json"), &manifest).unwrap();
+        let downloader = Downloader::new(
+            temp.path(),
+            Settings {
+                proxy_mode: "none".into(),
+                ..Settings::default()
+            },
+        )
+        .unwrap();
+        let v = version(temp.path(), "1.21.1", &downloader, &cancel, &sink)
+            .await
+            .unwrap();
+        assert_eq!(v.id, "1.21.1");
+        assert_eq!(server.await.unwrap().len(), 1);
+        assert_eq!(std::fs::read(version_path).unwrap(), body);
+    }
+
+    #[test]
+    fn local_loader_metadata_is_rejected_without_guessing_from_version_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("versions/RLCraft/RLCraft.json");
+        for value in [
+            serde_json::json!({"inheritsFrom": "1.20.1"}),
+            serde_json::json!({"mainClass": "net.minecraft.launchwrapper.Launch", "minecraftArguments": "--version 1.12.2"}),
+            serde_json::json!({"mainClass": "net.fabricmc.loader.impl.launch.knot.KnotClient"}),
+            serde_json::json!({"libraries": [{"name": "net.neoforged:neoforge:21.1.1"}]}),
+        ] {
+            storage::write_json(&path, &value).unwrap();
+            assert_eq!(
+                check_local_install(temp.path(), "RLCraft")
+                    .unwrap_err()
+                    .to_string(),
+                CUSTOM_VERSION
+            );
+        }
+        storage::write_json(
+            &path,
+            &serde_json::json!({"minecraftArguments": "--version 1.12.2"}),
+        )
+        .unwrap();
+        assert_eq!(
+            check_local_install(temp.path(), "RLCraft")
+                .unwrap_err()
+                .to_string(),
+            LEGACY_VERSION
+        );
+        storage::write_json(&path, &crate::test_http::version_fixture("RLCraft")).unwrap();
+        check_local_install(temp.path(), "RLCraft").unwrap();
+        std::fs::write(&path, b"broken JSON").unwrap();
+        check_local_install(temp.path(), "RLCraft").unwrap();
+        check_local_install(temp.path(), "Missing").unwrap();
+    }
+
     #[test]
     fn ordered_rules_and_features() {
         let rules: Vec<Rule> = serde_json::from_value(
@@ -478,6 +812,128 @@ mod tests {
         );
         assert!(expand(&[Argument::Plain("${unknown}".into())], &vars).is_err());
     }
+    #[tokio::test]
+    async fn install_and_launch_use_original_directory_for_libraries_and_assets() {
+        use sha1::{Digest, Sha1};
+        use std::fs;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("launcher");
+        let game = temp.path().join("original/.minecraft");
+        let launcher = crate::Launcher::open(Some(root.clone())).unwrap();
+        fs::create_dir_all(game.join("saves")).unwrap();
+        let instance = launcher
+            .import_instance(game.clone(), "Original".into(), "1.21.1".into())
+            .await
+            .unwrap();
+        let game = launcher.game_dir(&instance.id).unwrap();
+        let mut v = crate::test_http::version_fixture("1.21.1");
+        let hash = |bytes: &[u8]| hex::encode(Sha1::digest(bytes));
+        let object = b"original-asset";
+        let object_hash = hash(object);
+        let object_path = format!("assets/objects/{}/{}", &object_hash[..2], object_hash);
+        let index = serde_json::to_vec(
+            &serde_json::json!({"objects": {"test": {"hash":object_hash,"size":object.len()}}}),
+        )
+        .unwrap();
+        let library = b"original-library";
+        let log = b"log-config";
+        let client = b"client";
+        let lib_path = "fixture/client/1/client-1.jar";
+        v.asset_index.sha1 = hash(&index);
+        v.asset_index.size = index.len() as u64;
+        v.asset_index.url = "http://127.0.0.1:9/no-network".into();
+        v.downloads.insert(
+            "client".into(),
+            Artifact {
+                url: "http://127.0.0.1:9/no-network".into(),
+                sha1: hash(client),
+                size: client.len() as u64,
+                path: None,
+            },
+        );
+        v.libraries.push(serde_json::from_value(serde_json::json!({
+            "name": "fixture:client:1", "downloads": {"artifact": {"path":lib_path,"url":"http://127.0.0.1:9/no-network","sha1":hash(library),"size":library.len()}}
+        })).unwrap());
+        v.logging = Some(
+            serde_json::json!({"client":{"argument":"-Dlog=${path}","file":{"id":"client.xml","url":"http://127.0.0.1:9/no-network","sha1":hash(log),"size":log.len()}}}),
+        );
+        v.arguments.as_mut().unwrap().game.extend([
+            Argument::Plain("--assetsDir".into()),
+            Argument::Plain("${assets_root}".into()),
+            Argument::Plain("--libraryDir".into()),
+            Argument::Plain("${library_directory}".into()),
+        ]);
+        let files = [
+            ("assets/indexes/1.21.1.json".to_owned(), index.as_slice()),
+            (object_path.clone(), object.as_slice()),
+            (format!("libraries/{lib_path}"), library.as_slice()),
+            ("assets/log_configs/client.xml".to_owned(), log.as_slice()),
+            ("versions/1.21.1/1.21.1.jar".to_owned(), client.as_slice()),
+        ];
+        for (relative, bytes) in &files {
+            let path = game.join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, bytes).unwrap();
+        }
+        // A missing game file can be restored from the cache into the game tree.
+        fs::remove_file(game.join(&object_path)).unwrap();
+        let cache = root
+            .join("cache/objects/sha1")
+            .join(&object_hash[..2])
+            .join(&object_hash);
+        fs::create_dir_all(cache.parent().unwrap()).unwrap();
+        fs::write(cache, object).unwrap();
+        let downloader = Downloader::new(&root, Settings::default()).unwrap();
+        let sink: EventSink = std::sync::Arc::new(|_| {});
+        install_files(&game, &v, &downloader, &CancellationToken::new(), &sink)
+            .await
+            .unwrap();
+        for (relative, bytes) in &files {
+            assert_eq!(fs::read(game.join(relative)).unwrap(), *bytes);
+            assert!(!root.join(relative).exists());
+        }
+        let args = arguments(&v, &root, &instance, &LaunchSession::guest()).unwrap();
+        for path in [game.join("assets"), game.join("libraries"), game.clone()] {
+            assert!(args.contains(&path.to_string_lossy().into_owned()));
+        }
+        assert!(args.iter().any(|arg| {
+            arg.contains(
+                &game
+                    .join("libraries")
+                    .join(lib_path)
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        }));
+        assert!(args.contains(&format!(
+            "-Dlog={}",
+            game.join("assets/log_configs/client.xml").display()
+        )));
+        assert!(
+            !launcher
+                .instance_dir(&instance.id)
+                .unwrap()
+                .join(".minecraft")
+                .exists()
+        );
+        // Releases before this fix stored shared resources in the app directory.
+        for name in ["libraries", "assets"] {
+            fs::remove_dir_all(root.join(name)).unwrap();
+            fs::rename(game.join(name), root.join(name)).unwrap();
+        }
+        let legacy_args = arguments(&v, &root, &instance, &LaunchSession::guest()).unwrap();
+        assert!(legacy_args.contains(&root.join("assets").to_string_lossy().into_owned()));
+        assert!(legacy_args.iter().any(|arg| {
+            arg.contains(
+                &root
+                    .join("libraries")
+                    .join(lib_path)
+                    .to_string_lossy()
+                    .into_owned(),
+            )
+        }));
+    }
+
     #[tokio::test]
     async fn two_versions_keep_clients_and_natives_separate_but_share_game_directory() {
         use sha1::{Digest, Sha1};
@@ -536,16 +992,9 @@ mod tests {
                         path: None,
                     },
                 );
-                install_files(
-                    launcher.root(),
-                    &game,
-                    &version,
-                    &downloader,
-                    &cancel,
-                    &sink,
-                )
-                .await
-                .unwrap();
+                install_files(&game, &version, &downloader, &cancel, &sink)
+                    .await
+                    .unwrap();
                 assert_eq!(server.await.unwrap().len(), 2);
                 fs::write(game.join("versions").join(id).join("natives/marker"), id).unwrap();
                 launch_args

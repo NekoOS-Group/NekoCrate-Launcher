@@ -1,10 +1,32 @@
 <script setup lang="ts">
 import { t } from "../i18n";
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Box, ChevronUp, Plus } from "lucide-vue-next";
-import type { Instance } from "../types";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  watch,
+} from "vue";
+import { ChevronUp, Plus } from "lucide-vue-next";
+import type { Instance, Task } from "../types";
+import VersionStatusIcon from "./VersionStatusIcon.vue";
+import { versionDownloadState } from "../versionProgress";
 
-const props = defineProps<{ instance?: Instance; disabled: boolean }>();
+const props = defineProps<{
+  instance?: Instance;
+  disabled: boolean;
+  locked: boolean;
+  tasks: readonly Task[];
+}>();
+const versions = computed(
+  () =>
+    props.instance?.versions.map((version) => ({
+      ...version,
+      selected: version.id === props.instance?.selected_version,
+      download: versionDownloadState(props.instance!.id, version, props.tasks),
+    })) ?? [],
+);
 const emit = defineEmits<{ select: [version: string]; download: [] }>();
 const root = ref<HTMLElement>();
 const trigger = ref<HTMLButtonElement>();
@@ -66,10 +88,12 @@ function navigate(event: KeyboardEvent) {
   focusItem(next);
 }
 function choose(version: string) {
+  if (props.locked) return;
   close(true);
   emit("select", version);
 }
 function download() {
+  if (props.locked) return;
   close(true);
   emit("download");
 }
@@ -147,19 +171,29 @@ onBeforeUnmount(() =>
             {{ t("暂无游戏版本") }}
           </p>
           <button
-            v-for="version in instance?.versions"
+            v-for="version in versions"
             :key="version.id"
             class="version-menu-item"
             role="menuitemradio"
-            :aria-checked="version.id === instance?.selected_version"
-            :title="version.id"
+            :aria-checked="version.selected"
+            :aria-disabled="locked"
+            :title="
+              version.installed
+                ? version.id
+                : `${version.id} · ${t('已下载约 {progress}%', { progress: Math.round(version.download.progress) })}`
+            "
             tabindex="-1"
             data-menu-item
             @click="choose(version.id)"
           >
-            <Box class="version-menu-icon" :size="16" />
+            <VersionStatusIcon
+              :selected="version.selected"
+              :installed="version.installed"
+              :progress="version.download.progress"
+              :indeterminate="version.download.indeterminate"
+            />
             <span class="version-menu-name">{{ version.id }}</span>
-            <small v-if="!version.installed"> {{ t("待下载") }} </small>
+            <small v-if="!version.installed">{{ t("待下载") }}</small>
           </button>
         </div>
         <div
@@ -170,6 +204,7 @@ onBeforeUnmount(() =>
         <button
           class="version-menu-item version-menu-download"
           role="menuitem"
+          :aria-disabled="locked"
           tabindex="-1"
           data-menu-item
           @click="download"

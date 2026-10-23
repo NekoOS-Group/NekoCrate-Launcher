@@ -43,9 +43,9 @@ function close(restoreFocus = false) {
   expanded.value = false;
   if (restoreFocus) trigger.value?.focus({ preventScroll: true });
 }
-function choose(theme: string) {
+function choose(theme: string, restoreFocus = false) {
   emit("update:modelValue", theme);
-  close(true);
+  close(restoreFocus);
 }
 function leave(event: FocusEvent) {
   // Safari may blur a focused button to body on pointerdown without focusing
@@ -159,7 +159,6 @@ onBeforeUnmount(() => {
       class="theme-swatch active"
       :style="{ '--swatch': current.color }"
       :aria-label="t('{name}主题，展开配色选项', { name: t(current.name) })"
-      :title="`${t(current.name)} · ${t(current.pattern)}`"
       :aria-expanded="expanded"
       :aria-controls="optionsId"
       @pointerdown="triggerPointerType = $event.pointerType"
@@ -194,12 +193,11 @@ onBeforeUnmount(() => {
             pattern: t(color.pattern),
           })
         "
-        :title="`${t(color.name)} · ${t(color.pattern)}`"
         @pointerdown="startPress($event, color.id)"
         @pointerup="releasePress"
         @pointercancel="cancelPress"
         @lostpointercapture="cancelPress"
-        @click="if ($event.detail === 0) choose(color.id);"
+        @click="if ($event.detail === 0) choose(color.id, true);"
       >
         <svg
           viewBox="0 0 12 14"

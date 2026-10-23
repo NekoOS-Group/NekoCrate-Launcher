@@ -28,6 +28,8 @@ let disposed = false;
 let generation = 0;
 let drawing: ReturnType<typeof createDemandRenderer> | undefined;
 let contextLost = false;
+let outline:
+  ReturnType<typeof import("../skinOutline").createSkinOutline> | undefined;
 function invalidate() {
   drawing?.invalidate();
 }
@@ -99,7 +101,10 @@ async function loadSkin() {
 }
 onMounted(async () => {
   try {
-    const { SkinViewer } = await import("skinview3d");
+    const [{ SkinViewer }, { createSkinOutline }] = await Promise.all([
+      import("skinview3d"),
+      import("../skinOutline"),
+    ]);
     if (disposed || !canvas.value || !host.value) return;
     viewer = new SkinViewer({
       canvas: canvas.value,
@@ -123,8 +128,12 @@ onMounted(async () => {
     viewer.cameraLight.intensity = 0.7;
     drawing = createDemandRenderer(
       () => viewer?.controls.update() ?? false,
-      () => viewer?.render(),
+      () => {
+        outline?.resize();
+        viewer?.render();
+      },
     );
+    outline = createSkinOutline(viewer, canvas.value, invalidate);
     viewer.controls.addEventListener("change", invalidate);
     canvas.value.addEventListener("webglcontextlost", loseContext);
     canvas.value.addEventListener("webglcontextrestored", restoreContext);
@@ -161,6 +170,7 @@ onBeforeUnmount(() => {
   canvas.value?.removeEventListener("webglcontextlost", loseContext);
   canvas.value?.removeEventListener("webglcontextrestored", restoreContext);
   document.removeEventListener("visibilitychange", updatePause);
+  outline?.dispose();
   viewer?.dispose();
 });
 </script>

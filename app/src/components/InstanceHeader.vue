@@ -55,11 +55,19 @@ function cancelRename() {
 }
 function closeIcons(restoreFocus = false) {
   choosingIcon.value = false;
-  if (restoreFocus) iconButton.value?.focus();
+  if (restoreFocus) iconButton.value?.focus({ preventScroll: true });
 }
-function chooseIcon(icon: number) {
+function chooseIcon(icon: number, event: MouseEvent) {
   emit("update:icon", icon);
-  closeIcons(true);
+  closeIcons(event.detail === 0);
+}
+function enterChoices(element: Element) {
+  element.removeAttribute("inert");
+  element.removeAttribute("aria-hidden");
+}
+function leaveChoices(element: Element) {
+  element.setAttribute("inert", "");
+  element.setAttribute("aria-hidden", "true");
 }
 function outside(event: PointerEvent) {
   if (
@@ -98,31 +106,47 @@ defineExpose({ finishRename });
         :title="t('切换实例图标')"
         :aria-expanded="choosingIcon"
         aria-controls="instance-icon-choices"
+        @pointerdown.prevent
         @click="choosingIcon = !choosingIcon"
       >
-        <InstanceIcon :icon="icon" />
+        <Transition name="instance-icon-swap">
+          <span :key="icon" class="instance-heading-art">
+            <InstanceIcon :icon="icon" />
+          </span>
+        </Transition>
       </button>
-      <div
-        v-if="choosingIcon"
-        id="instance-icon-choices"
-        class="instance-icon-choices glass-surface"
-        role="group"
-        :aria-label="t('实例图标')"
+      <Transition
+        name="icon-picker"
+        :duration="{ enter: 320, leave: 180 }"
+        @before-enter="enterChoices"
+        @before-leave="leaveChoices"
       >
-        <button
-          v-for="material in instanceIcons"
-          :key="material.id"
-          class="instance-tile"
-          :class="{ selected: icon === material.id }"
-          :disabled="disabled"
-          :aria-label="t(material.name)"
-          :title="t(material.name)"
-          :aria-pressed="icon === material.id"
-          @click="chooseIcon(material.id)"
+        <div
+          v-if="choosingIcon"
+          id="instance-icon-choices"
+          class="instance-icon-choices glass-surface"
+          role="group"
+          :aria-label="t('实例图标')"
         >
-          <InstanceIcon :icon="material.id" />
-        </button>
-      </div>
+          <button
+            v-for="(material, index) in instanceIcons"
+            :key="material.id"
+            class="instance-tile"
+            :class="{ selected: icon === material.id }"
+            :style="{
+              '--icon-delay': `${(Math.floor(index / 4) + (index % 4)) * 12}ms`,
+            }"
+            :disabled="disabled"
+            :aria-label="t(material.name)"
+            :title="t(material.name)"
+            :aria-pressed="icon === material.id"
+            @pointerdown.prevent
+            @click="chooseIcon(material.id, $event)"
+          >
+            <InstanceIcon :icon="material.id" />
+          </button>
+        </div>
+      </Transition>
     </div>
     <div class="settings-heading-details">
       <h2>

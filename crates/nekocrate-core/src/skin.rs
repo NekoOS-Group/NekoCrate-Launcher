@@ -61,7 +61,11 @@ fn validate_png(bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
-pub async fn load(root: &Path, skin: &AccountSkin) -> Result<Vec<u8>> {
+pub async fn load(
+    root: &Path,
+    skin: &AccountSkin,
+    settings: &crate::model::Settings,
+) -> Result<Vec<u8>> {
     let (url, hash) = texture_url(&skin.url)?;
     let cache = root.join("cache/skins").join(format!("{hash}.png"));
     if let Ok(bytes) = tokio::fs::read(&cache).await
@@ -70,7 +74,7 @@ pub async fn load(root: &Path, skin: &AccountSkin) -> Result<Vec<u8>> {
         return Ok(bytes);
     }
     // Texture requests carry no account credentials and cannot redirect to another host.
-    let client = reqwest::Client::builder()
+    let client = crate::network::client_builder(root, settings)?
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(20))
         .build()?;

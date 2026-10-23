@@ -3,7 +3,7 @@
   "source": "https://piston-data.mojang.com/v1/objects/30c73b1c5da787909b2f73340419fdf13b9def88/client.jar",
   "client_sha1": "30c73b1c5da787909b2f73340419fdf13b9def88",
   "copyright": "Mojang Studios / Microsoft. Unmodified Minecraft game textures; not covered by this repository's code license.",
-  "usage": "Original textures projected onto three SVG cube faces. No game client code is included.",
+  "usage": "Original textures projected onto SVG cube faces. Grass top and side overlay receive the default grass color (#7cbd6b) at render time; slime includes its inset core. Texture files are unmodified. No game client code is included.",
   "assets": [
     {
       "asset": "oak_planks.png",
@@ -79,6 +79,51 @@
       "asset": "hay_block_side.png",
       "archive_entry": "assets/minecraft/textures/block/hay_block_side.png",
       "sha256": "b0181d301e7819daa8719067c616ca47aab766e538cdaf1f722a711efac3ea6f"
+    },
+    {
+      "asset": "grass_block_top.png",
+      "archive_entry": "assets/minecraft/textures/block/grass_block_top.png",
+      "sha256": "52f44b64ce884a13dfe35e4b4da2e35898b790dd4d7a5ea536f1b0c0d56d29b4"
+    },
+    {
+      "asset": "grass_block_side.png",
+      "archive_entry": "assets/minecraft/textures/block/grass_block_side.png",
+      "sha256": "ab572ac7ebd373abdeb961de1f3cba0afcd91e1acb700745ece4f719790bae3d"
+    },
+    {
+      "asset": "grass_block_side_overlay.png",
+      "archive_entry": "assets/minecraft/textures/block/grass_block_side_overlay.png",
+      "sha256": "43d98318407d9d122b83468cf183d18722e548c2144f9c2ffe2021b5c3e770e0"
+    },
+    {
+      "asset": "ice.png",
+      "archive_entry": "assets/minecraft/textures/block/ice.png",
+      "sha256": "4d158c24f2ec563d52806642ac7f4e20a5bda168af8c2ae528ed8e9ef1a58771"
+    },
+    {
+      "asset": "bricks.png",
+      "archive_entry": "assets/minecraft/textures/block/bricks.png",
+      "sha256": "33f9411f1cb233a2020df0cf3fda32c0f67a4b0fac3751bde2ba6f2fee81b169"
+    },
+    {
+      "asset": "crafting_table_top.png",
+      "archive_entry": "assets/minecraft/textures/block/crafting_table_top.png",
+      "sha256": "8046b35b6ed5696ec21a0135b8a897f35acd7f2500b6b2e4b5b28ae4d25ac76c"
+    },
+    {
+      "asset": "crafting_table_side.png",
+      "archive_entry": "assets/minecraft/textures/block/crafting_table_side.png",
+      "sha256": "c962364f8165a2702ceb42eed59f1983194e4b7fd0a08de8790617f6c06bbaab"
+    },
+    {
+      "asset": "crafting_table_front.png",
+      "archive_entry": "assets/minecraft/textures/block/crafting_table_front.png",
+      "sha256": "16c23b5802c71aa439b9d5a5707d304f1cf84d45a08c146aa4078cd5073067f2"
+    },
+    {
+      "asset": "slime_block.png",
+      "archive_entry": "assets/minecraft/textures/block/slime_block.png",
+      "sha256": "9175dd2ac2a6e93c0e5c3b46e5006fd9f230ee005b7da3ea109f6d872e30209d"
     }
   ]
 }

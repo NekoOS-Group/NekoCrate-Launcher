@@ -3,8 +3,45 @@ on:
   push:
     branches: [neko_dev, main]
   pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  frontend:
+    name: Frontend and formatting
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.1
+        with:
+          components: rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: cargo fmt --all -- --check
+      - run: npm ci
+        working-directory: app
+      - run: npm test
+        working-directory: app
+      - run: npm run build
+        working-directory: app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ci-frontend
+          path: app/dist
+          if-no-files-found: error
+          retention-days: 1
+
   build:
+    name: Rust checks (${{ matrix.os }})
+    needs: frontend
     strategy:
       fail-fast: false
       matrix:
@@ -14,23 +51,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.93.1
         with:
-          components: rustfmt, clippy
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: app/package-lock.json
+          components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libssl-dev librsvg2-dev libayatana-appindicator3-dev libdbus-1-dev
-      - run: npm ci
-        working-directory: app
-      - run: npm test
-        working-directory: app
-      - run: npm run build
-        working-directory: app
-      - run: cargo fmt --all -- --check
+      - uses: actions/download-artifact@v4
+        with:
+          name: ci-frontend
+          path: app/dist
       - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: npm run tauri build -- --no-bundle
-        working-directory: app

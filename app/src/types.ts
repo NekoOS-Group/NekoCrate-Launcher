@@ -1,7 +1,15 @@
 export interface Settings {
   microsoft_client_id: string;
   download_source: string;
+  mod_download_source: string;
+  proxy_mode: string;
+  proxy_url: string;
+  proxy_username: string;
+  proxy_password_key: string | null;
+  /** Write-only change: undefined keeps the saved password, empty clears it. */
+  proxy_password?: string;
   concurrency: number;
+  adaptive_concurrency: boolean;
   retries: number;
   auto_java: boolean;
   language: string;
@@ -11,6 +19,11 @@ export interface UpdateStatus {
   latest_version: string;
   available: boolean;
   download_url: string;
+}
+export interface JavaInfo {
+  path: string;
+  major: number;
+  version: string;
 }
 export interface Instance {
   id: string;
@@ -27,6 +40,7 @@ export interface Instance {
 export interface InstanceVersion {
   id: string;
   installed: boolean;
+  download_progress?: number;
 }
 export interface Account {
   id: string;
@@ -58,6 +72,32 @@ export interface LauncherEvent {
   completed: number;
   total: number;
   bytes: number;
+  total_bytes?: number;
+  reset_progress?: boolean;
+  step?: string;
+  files?: DownloadFile[];
+}
+export type FileStatus =
+  "queued" | "downloading" | "verifying" | "done" | "error" | "cancelled";
+export interface DownloadFile {
+  id: string;
+  name: string;
+  downloaded: number;
+  total: number;
+  status: FileStatus;
+  cached?: boolean;
+  step?: string;
+}
+export interface WorkflowStep {
+  id: string;
+  label: string;
+  status: "pending" | "running" | "paused" | "done" | "error" | "cancelled";
+  fileCount: number;
+  filesDone: number;
+}
+export interface WorkflowState {
+  steps: WorkflowStep[];
+  files: Map<string, DownloadFile>;
 }
 export interface Challenge {
   user_code: string;
@@ -68,11 +108,14 @@ export interface Challenge {
 export interface Task {
   id: number;
   instance_id: string | null;
+  version_id: string | null;
+  download_progress: number;
   cancellable: boolean;
   title: string;
-  status: "running" | "done" | "error" | "cancelled";
+  status: "running" | "paused" | "done" | "error" | "cancelled";
   message: string;
   progress: number;
   indeterminate: boolean;
   started: string;
+  workflow: WorkflowState;
 }

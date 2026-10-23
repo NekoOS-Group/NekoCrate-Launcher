@@ -10,11 +10,25 @@ export const backendEnglish: Readonly<Record<string, string>> = {
   更新服务器返回错误: "The update server returned an error",
   无法读取更新信息: "Could not read update information",
   操作已取消: "Operation cancelled",
+  当前没有可暂停的下载任务: "There is no download to pause",
+  下载任务已结束: "The download has finished",
+  校验本地文件: "Verifying local files",
+  下载缺失文件: "Downloading missing files",
+  复用缓存并下载缺失文件: "Reusing cached files and downloading missing files",
+  "保存文件校验记录失败：{error}":
+    "Could not save file verification records: {error}",
+  "下载源未支持续传，重新下载此文件：{0}":
+    "The source does not support resuming; restarting this file: {0}",
+  "下载源拒绝续传范围，重新下载此文件：{0}":
+    "The source rejected the resume range; restarting this file: {0}",
   "无法获取元数据，请检查网络或切换下载源：{last}":
     "Could not fetch metadata. Check your connection or change the download source: {last}",
   资源校验值无效: "Invalid resource checksum",
   文件大小超过元数据声明: "File exceeds the size declared in metadata",
   下载文件校验失败: "Downloaded file failed verification",
+  下载源返回的续传范围无效:
+    "The download source returned an invalid resume range",
+  "保存下载进度失败：{error}": "Could not save download progress: {error}",
   "重试 {0}（{1}/{2}）": "Retrying {0} ({1}/{2})",
   "下载失败 {0}：{error}": "Download failed for {0}: {error}",
   无效下载目标: "Invalid download target",
@@ -147,6 +161,10 @@ export const backendEnglish: Readonly<Record<string, string>> = {
     "Network unavailable. Using the cached version list",
   "未找到该官方游戏版本；原型暂不支持自定义加载器版本":
     "Official game version not found. Custom loaders are not supported yet",
+  "未在官方版本目录中找到此版本；自定义加载器版本暂不支持":
+    "This version is not in the official version list. Custom loaders are not supported yet",
+  "该本地版本使用自定义加载器，启动器暂不支持安装或修复":
+    "This local version uses a custom loader. Installing or repairing it is not supported yet",
   无效游戏版本: "Invalid game version",
   "当前原型仅支持独立的官方 Java 版元数据":
     "This prototype supports standalone official Java Edition metadata only",
@@ -215,6 +233,8 @@ export const backendEnglish: Readonly<Record<string, string>> = {
   请先为此实例添加并选择一个版本:
     "Add and select a version for this instance first",
   获取官方版本元数据: "Fetching official version metadata",
+  下载与校验游戏文件: "Downloading and verifying game files",
+  保存安装信息: "Saving installation details",
   "游戏文件与 Java 已准备好": "Game files and Java are ready",
   账户不存在: "Account not found",
   "有任务正在使用账户，请稍后移除":

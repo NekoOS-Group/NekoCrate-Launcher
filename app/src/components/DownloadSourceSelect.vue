@@ -1,16 +1,31 @@
 <script setup lang="ts">
 import GlassSelect from "./GlassSelect.vue";
-defineProps<{ modelValue: string; disabled: boolean }>();
+import { computed } from "vue";
+const props = defineProps<{
+  modelValue: string;
+  kind: "game" | "mod";
+  disabled?: boolean;
+}>();
 defineEmits<{ "update:modelValue": [value: string] }>();
-const sources = [
-  { value: "official", label: "Minecraft 官方", detail: "仅使用官方来源" },
-  { value: "auto", label: "官方优先", detail: "失败时切换至 BMCLAPI" },
-  { value: "bmclapi", label: "BMCLAPI 优先", detail: "失败时切换至官方来源" },
-];
+const sources = computed(() =>
+  props.kind === "game"
+    ? [
+        { value: "auto", label: "自动选择" },
+        { value: "official", label: "Minecraft 官方" },
+        { value: "bmclapi", label: "BMCLAPI" },
+      ]
+    : [
+        { value: "auto", label: "自动选择" },
+        { value: "modrinth", label: "Modrinth" },
+        { value: "curseforge", label: "CurseForge" },
+        { value: "bbsmc", label: "BBSMC" },
+      ],
+);
 </script>
 <template>
   <GlassSelect
-    id="download-source"
+    floating
+    :id="`${kind}-download-source`"
     :model-value="modelValue"
     :disabled="disabled"
     :options="sources"

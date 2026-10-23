@@ -30,12 +30,20 @@ struct Asset {
 
 fn release_version(tag: &str) -> Option<Version> {
     // Public preview tags are compact names; installed packages use SemVer.
-    Version::parse(match tag {
-        "dev0.1" => "0.1.0-dev.1",
-        "dev0.2" => "0.2.0-dev.1",
-        _ => tag.strip_prefix('v').unwrap_or(tag),
-    })
-    .ok()
+    if let Some(preview) = tag.strip_prefix("dev") {
+        let (major, minor) = preview.split_once('.')?;
+        if major.is_empty()
+            || minor.is_empty()
+            || !major
+                .bytes()
+                .chain(minor.bytes())
+                .all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+        return Version::parse(&format!("{major}.{minor}.0-dev.1")).ok();
+    }
+    Version::parse(tag.strip_prefix('v').unwrap_or(tag)).ok()
 }
 fn select_release(
     releases: &[Release],
@@ -78,9 +86,11 @@ fn select_release(
     })
 }
 
-pub async fn check() -> Result<UpdateStatus> {
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("NekoCrate/", env!("CARGO_PKG_VERSION")))
+pub async fn check(
+    root: &std::path::Path,
+    settings: &crate::model::Settings,
+) -> Result<UpdateStatus> {
+    let client = crate::network::client_builder(root, settings)?
         .connect_timeout(Duration::from_secs(8))
         .timeout(Duration::from_secs(15))
         .build()?;
@@ -182,6 +192,33 @@ mod tests {
             assert_eq!(preview.latest_version, "dev0.2");
         }
         assert!(select_release(&releases, "0.1.0", "linux", "x86_64").is_err());
+    }
+    #[test]
+    fn compact_preview_tags_support_dev03_and_future_versions() {
+        let releases = vec![release("dev0.2", true), release("dev0.3", true)];
+        let update = select_release(&releases, "0.2.0-dev.1", "macos", "aarch64").unwrap();
+        assert!(update.available);
+        assert_eq!(update.latest_version, "dev0.3");
+        assert!(update.download_url.ends_with("dev0.3-mac-appsilicon.dmg"));
+        assert!(
+            !select_release(&releases, "0.3.0-dev.1", "windows", "x86_64")
+                .unwrap()
+                .available
+        );
+        assert_eq!(
+            release_version("dev12.34").unwrap().to_string(),
+            "12.34.0-dev.1"
+        );
+        for invalid in [
+            "dev",
+            "dev.3",
+            "dev0.",
+            "dev0.03",
+            "dev0.3.1",
+            "dev0.3-beta",
+        ] {
+            assert!(release_version(invalid).is_none(), "{invalid}");
+        }
     }
     #[test]
     fn chooses_platform_installers_and_rejects_untrusted_release_links() {

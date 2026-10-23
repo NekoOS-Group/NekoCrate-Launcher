@@ -5,11 +5,23 @@ use tokio::{
 };
 
 pub async fn serve(replies: Vec<(u16, String)>) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+    serve_with_headers(
+        replies
+            .into_iter()
+            .map(|(status, body)| (status, String::new(), body))
+            .collect(),
+    )
+    .await
+}
+
+pub async fn serve_with_headers(
+    replies: Vec<(u16, String, String)>,
+) -> (String, tokio::task::JoinHandle<Vec<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = format!("http://{}", listener.local_addr().unwrap());
     let task = tokio::spawn(async move {
         let mut requests = Vec::new();
-        for (status, body) in replies {
+        for (status, headers, body) in replies {
             let (mut stream, _) =
                 tokio::time::timeout(std::time::Duration::from_secs(5), listener.accept())
                     .await
@@ -38,7 +50,7 @@ pub async fn serve(replies: Vec<(u16, String)>) -> (String, tokio::task::JoinHan
             }
             requests.push(String::from_utf8(bytes).unwrap());
             let response = format!(
-                "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                "HTTP/1.1 {status} Test\r\n{headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
             stream.write_all(response.as_bytes()).await.unwrap();

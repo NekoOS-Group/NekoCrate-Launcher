@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main window, directory selection and external Microsoft sign-in",
+  "description": "Main window, directory selection, Microsoft sign-in and launcher project links",
   "windows": ["main"],
   "permissions": [
     "core:default",
@@ -15,7 +15,11 @@
         { "url": "https://login.microsoftonline.com/*" },
         { "url": "https://login.live.com/*" },
         { "url": "https://learn.microsoft.com/*" },
-        { "url": "https://github.com/NekoOS-Group/NekoCrate-Launcher/releases/*" }
+        { "url": "https://github.com/NekoOS-Group/NekoCrate-Launcher" },
+        { "url": "https://github.com/NekoOS-Group/NekoCrate-Launcher/issues" },
+        {
+          "url": "https://github.com/NekoOS-Group/NekoCrate-Launcher/releases/*"
+        }
       ]
     }
   ]
