@@ -355,9 +355,16 @@ mod tests {
         // On Unix even a same-size modification with restored mtime changes ctime.
         // Other platforms invalidate through the changed modification timestamp.
         #[cfg(unix)]
-        fs::File::open(&path).unwrap().set_modified(old).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
         #[cfg(not(unix))]
-        fs::File::open(&path)
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
             .unwrap()
             .set_modified(old + std::time::Duration::from_secs(2))
             .unwrap();
@@ -440,7 +447,10 @@ mod tests {
         let old = fs::metadata(&path).unwrap().modified().unwrap();
         let replacement = temp.path().join("replacement");
         fs::write(&replacement, b"evil").unwrap();
-        fs::File::open(&replacement)
+        // Windows requires a writable handle to change file timestamps.
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&replacement)
             .unwrap()
             .set_modified(old)
             .unwrap();

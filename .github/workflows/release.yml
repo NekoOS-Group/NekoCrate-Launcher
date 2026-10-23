@@ -13,6 +13,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: release-${{ inputs.tag || github.ref_name }}
@@ -23,11 +24,14 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  frontend:
-    name: Prepare shared frontend
+  prepare:
+    name: Reuse checked frontend
     runs-on: ubuntu-22.04
+    timeout-minutes: 35
     outputs:
       commit: ${{ steps.revision.outputs.commit }}
+      ci_run: ${{ steps.ci.outputs.run }}
+      frontend_artifact: ${{ steps.ci.outputs.artifact }}
     defaults:
       run:
         shell: bash
@@ -37,30 +41,58 @@ jobs:
           ref: refs/tags/${{ env.RELEASE_TAG }}
       - id: revision
         run: echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: app/package-lock.json
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
       - name: Check release version
         run: python scripts/release_assets.py check-version --tag "$RELEASE_TAG"
-      - run: npm ci
-        working-directory: app
-      - run: npm run build
-        working-directory: app
-      - uses: actions/upload-artifact@v4
+      - name: Wait for successful CI on this exact commit
+        id: ci
+        uses: actions/github-script@v7
+        env:
+          RELEASE_COMMIT: ${{ steps.revision.outputs.commit }}
         with:
-          name: frontend-dist
-          path: app/dist
-          if-no-files-found: error
-          retention-days: 1
+          script: |
+            const sha = process.env.RELEASE_COMMIT;
+            for (let attempt = 0; attempt < 120; attempt++) {
+              const { data } = await github.rest.actions.listWorkflowRuns({
+                ...context.repo, workflow_id: 'ci.yml', head_sha: sha, per_page: 100,
+              });
+              const run = data.workflow_runs.filter(run =>
+                run.head_sha === sha &&
+                run.head_repository?.full_name === `${context.repo.owner}/${context.repo.repo}` &&
+                ((run.event === 'push' && ['neko_dev', 'main'].includes(run.head_branch)) ||
+                  run.event === 'workflow_dispatch')
+              ).sort((a, b) => b.id - a.id)[0];
+              if (run?.status === 'completed') {
+                if (run.conclusion !== 'success') {
+                  throw new Error(`CI did not pass (${run.conclusion}): ${run.html_url}`);
+                }
+                const { data: { artifacts } } = await github.rest.actions.listWorkflowRunArtifacts({
+                  ...context.repo, run_id: run.id, name: 'ci-frontend', per_page: 100,
+                });
+                const artifact = artifacts.find(item =>
+                  item.name === 'ci-frontend' && !item.expired && item.size_in_bytes > 0
+                );
+                if (!artifact) {
+                  throw new Error(`Frontend artifact expired or missing; rerun CI: ${run.html_url}`);
+                }
+                core.setOutput('run', run.id);
+                core.setOutput('artifact', artifact.id);
+                core.info(`Reusing frontend checked at ${sha}: ${run.html_url}`);
+                return;
+              }
+              if (!run && attempt >= 3) {
+                throw new Error(`No CI run for ${sha}; push this commit to neko_dev/main or run Check source on this ref.`);
+              }
+              core.info(`Waiting for CI at ${sha}: ${run?.status ?? 'not registered yet'}`);
+              await new Promise(resolve => setTimeout(resolve, 15000));
+            }
+            throw new Error('Timed out waiting for CI; rerun this release after CI passes.');
 
   build:
     name: Build ${{ matrix.platform }}
-    needs: frontend
+    needs: prepare
     strategy:
       fail-fast: false
       matrix:
@@ -85,7 +117,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.frontend.outputs.commit }}
+          ref: ${{ needs.prepare.outputs.commit }}
       - uses: dtolnay/rust-toolchain@1.93.1
         with:
           targets: ${{ matrix.target }}
@@ -107,15 +139,18 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libssl-dev librsvg2-dev libayatana-appindicator3-dev libdbus-1-dev libfuse2 patchelf
-      - name: Install Tauri CLI dependencies
-        run: npm ci
-        working-directory: app
+      - name: Install only the locked Tauri CLI
+        run: |
+          TAURI_CLI_VERSION=$(node -p 'require("./app/package-lock.json").packages["node_modules/@tauri-apps/cli"].version')
+          npm install --prefix "$RUNNER_TEMP/tauri-cli" --no-audit --no-fund --package-lock=false "@tauri-apps/cli@$TAURI_CLI_VERSION"
       - uses: actions/download-artifact@v4
         with:
-          name: frontend-dist
+          artifact-ids: ${{ needs.prepare.outputs.frontend_artifact }}
+          run-id: ${{ needs.prepare.outputs.ci_run }}
+          github-token: ${{ github.token }}
           path: app/dist
       - name: Build release installers
-        run: npm run tauri build -- --config src-tauri/tauri.release.conf.json --target "${{ matrix.target }}" --bundles "${{ matrix.bundles }}" --ci -- --locked
+        run: node "$RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" build --config src-tauri/tauri.release.conf.json --target "${{ matrix.target }}" --bundles "${{ matrix.bundles }}" --ci -- --locked
         working-directory: app
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
@@ -131,14 +166,14 @@ jobs:
 
   publish:
     name: Publish preview release
-    needs: [frontend, build]
+    needs: [prepare, build]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.frontend.outputs.commit }}
+          ref: ${{ needs.prepare.outputs.commit }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
