@@ -14,6 +14,7 @@
 ## 安装与更新
 
 - 保留 dev0.3.2 的 Windows 前端嵌入修复，以及发布过程的跨版本 Rust 缓存复用。
+- Linux CI 与打包统一使用 Ubuntu 官方 HTTPS 软件源，避开本次 Azure 镜像下载停滞；增加连接超时和重试限制，依赖与检查项目保持不变。
 - macOS Apple Silicon：DMG / app ZIP；Windows AMD64：EXE；Linux AMD64：AppImage / DEB。
 - 从 dev0.3.2 的全局设置「启动器版本」检查更新，应识别 dev0.4，并打开对应平台安装包的下载入口。安装仍需手动完成，不会自动替换正在运行的应用。
 - 保留实例、账户和设置，没有游戏目录迁移。macOS 为临时签名、未公证；Windows 无发布者签名。
