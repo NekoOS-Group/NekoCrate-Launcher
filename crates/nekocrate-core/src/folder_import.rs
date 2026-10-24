@@ -5,7 +5,7 @@ use crate::{
     model::{Instance, InstanceVersion},
     storage,
 };
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use std::{
     collections::HashSet,
@@ -57,7 +57,51 @@ pub(crate) fn is_game_directory(path: &Path) -> bool {
         .any(|entry| path.join(entry).is_dir())
         || path.join("options.txt").is_file()
 }
+pub(crate) fn resolve_game_directory(path: &Path) -> Result<PathBuf> {
+    let source = storage::expand_user_path(path)?;
+    let source = source
+        .canonicalize()
+        .with_context(|| format!("无法访问导入目录：{}", source.display()))?;
+    if !source.is_dir() {
+        bail!("导入来源必须是一个目录：{}", source.display());
+    }
+    // Explicitly selected standard game folders may be empty. Discovery by
+    // recursive drag-and-drop still requires game content to avoid empty backups.
+    let standard_name = |path: &Path| {
+        path.file_name().is_some_and(|name| {
+            let name = name.to_string_lossy();
+            name.eq_ignore_ascii_case(".minecraft") || name.eq_ignore_ascii_case("minecraft")
+        })
+    };
+    let source = if is_game_directory(&source) {
+        source
+    } else {
+        [".minecraft", "minecraft", "game"]
+            .into_iter()
+            .map(|name| source.join(name))
+            .find(|path| path.is_dir())
+            .unwrap_or(source)
+    };
+    if !is_game_directory(&source) && !standard_name(&source) {
+        bail!("请选择含 saves、mods、versions 或 options.txt 的游戏目录");
+    }
+    Ok(source.canonicalize()?)
+}
 pub(crate) fn default_name(path: &Path) -> String {
+    default_name_with_official(
+        path,
+        crate::instance_discovery::official_directory().as_deref(),
+    )
+}
+
+fn default_name_with_official(path: &Path, official: Option<&Path>) -> String {
+    // Canonical paths also recognize an official folder reached through a symlink
+    // or the native folder picker, not just the automatic suggestion button.
+    if let Some(official) = official.and_then(|path| path.canonicalize().ok())
+        && path.canonicalize().is_ok_and(|path| path == official)
+    {
+        return crate::instance_discovery::OFFICIAL_INSTANCE_NAME.into();
+    }
     let name = path
         .parent()
         .and_then(Path::file_name)
@@ -203,9 +247,7 @@ impl Launcher {
             let mut seen = HashSet::new();
             for path in paths {
                 let attempt = (|| -> Result<()> {
-                    let source = storage::expand_user_path(&path)?
-                        .canonicalize()
-                        .with_context(|| format!("无法访问目录：{}", path.display()))?;
+                    let source = resolve_game_directory(&path)?;
                     if !seen.insert(source.clone()) {
                         return Ok(());
                     }
@@ -246,6 +288,32 @@ impl Launcher {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn official_directory_name_is_shared_by_discovery_and_import() {
+        let temp = tempfile::tempdir().unwrap();
+        let official = temp.path().join("Library/Application Support/minecraft");
+        let pack = temp.path().join("RLCraft/.minecraft");
+        fs::create_dir_all(&official).unwrap();
+        fs::create_dir_all(&pack).unwrap();
+        assert_eq!(
+            default_name_with_official(&official, Some(&official)),
+            "官方启动器"
+        );
+        assert_eq!(
+            default_name_with_official(&pack, Some(&official)),
+            "RLCraft"
+        );
+        #[cfg(unix)]
+        {
+            let alias = temp.path().join("linked-game");
+            std::os::unix::fs::symlink(&official, &alias).unwrap();
+            assert_eq!(
+                default_name_with_official(&alias, Some(&official)),
+                "官方启动器"
+            );
+        }
+    }
 
     fn game(path: &Path, versions: &[&str]) {
         fs::create_dir_all(path.join("saves/world")).unwrap();

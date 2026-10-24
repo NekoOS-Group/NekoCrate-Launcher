@@ -4,6 +4,8 @@ mod download_concurrency;
 pub mod fabric;
 pub mod folder_import;
 mod game_options;
+mod instance_creation;
+pub mod instance_discovery;
 pub mod java;
 pub mod java_compatibility;
 mod language;
@@ -23,6 +25,7 @@ mod test_http;
 pub mod updates;
 mod verification;
 pub mod version;
+pub mod version_management;
 
 use anyhow::{Context, Result, bail};
 use fs2::FileExt;
@@ -146,6 +149,7 @@ impl Launcher {
                     // Readiness is only a cheap discovery hint; a prior completed
                     // install is not downgraded by this scan. Launch validates it.
                     found.installed |= existing.installed;
+                    found.name = existing.name.clone();
                     found.download_progress = if found.installed {
                         100.0
                     } else {
@@ -449,16 +453,11 @@ impl Launcher {
         game_directory: Option<PathBuf>,
     ) -> Result<Instance> {
         let name = name.trim();
-        if name.is_empty() || name.chars().count() > 80 {
-            bail!("实例名称应为 1–80 个字符");
-        }
-        if !version.is_empty() {
-            storage::safe_version(version)?;
-        }
+        instance_creation::validate(name, version)?;
         let i = Instance {
             id: uuid::Uuid::new_v4().to_string(),
             name: name.into(),
-            icon: None,
+            icon: Some(0),
             game_directory,
             versions: if version.is_empty() {
                 vec![]
@@ -545,30 +544,13 @@ impl Launcher {
         })
     }
     fn linkable_directory(&self, source: &Path, except_id: Option<&str>) -> Result<PathBuf> {
-        let source = storage::expand_user_path(source)?;
-        let source = source
-            .canonicalize()
-            .with_context(|| format!("无法访问导入目录：{}", source.display()))?;
-        if !source.is_dir() {
-            bail!("导入来源必须是一个目录：{}", source.display());
-        }
-        let source = if folder_import::is_game_directory(&source) {
-            source
-        } else if source.join(".minecraft").is_dir() {
-            source.join(".minecraft")
-        } else if source.join("minecraft").is_dir() {
-            source.join("minecraft")
-        } else if source.join("game").is_dir() {
-            source.join("game")
-        } else {
-            source
-        };
-        if !folder_import::is_game_directory(&source) {
-            bail!("请选择含 saves、mods、versions 或 options.txt 的游戏目录");
-        }
-        let source = source.canonicalize()?;
-        if source.starts_with(self.root()) || self.root().starts_with(&source) {
-            bail!("游戏目录不能与启动器数据目录重叠，请选择原有的独立游戏目录");
+        let source = folder_import::resolve_game_directory(source)?;
+        self.check_external_directory(&source, except_id)?;
+        Ok(source)
+    }
+    fn check_external_directory(&self, source: &Path, except_id: Option<&str>) -> Result<()> {
+        if source.starts_with(self.root()) || self.root().starts_with(source) {
+            bail!("游戏目录不能与启动器数据目录重叠，请选择其他位置");
         }
         for existing in &self.snapshot().database.instances {
             if except_id == Some(existing.id.as_str()) {
@@ -576,14 +558,14 @@ impl Launcher {
             }
             let directory = existing.game_dir(self.root());
             let directory = directory.canonicalize().unwrap_or(directory);
-            if source.starts_with(&directory) || directory.starts_with(&source) {
+            if source.starts_with(&directory) || directory.starts_with(source) {
                 bail!(
                     "此目录已由实例「{}」使用，不能重复添加或嵌套关联",
                     existing.name
                 );
             }
         }
-        Ok(source)
+        Ok(())
     }
     fn discover_versions(&self, source: &Path, version: &str) -> Result<Vec<InstanceVersion>> {
         self.discover_versions_cancellable(source, version, None)
@@ -658,6 +640,7 @@ impl Launcher {
             }
             if let Some(found) = versions.iter_mut().find(|v| v.id == old.id) {
                 found.installed = old.installed;
+                found.name = old.name.clone();
                 found.download_progress = old.download_progress;
             } else if old.installed {
                 bail!("目标目录无法识别已安装版本 {}，原关联未修改", old.id);
@@ -863,6 +846,7 @@ impl Launcher {
                 .find(|i| i.id == id)
                 .context("实例不存在")?;
             if let Some(existing) = instance.versions.iter_mut().find(|v| v.id == profile_id) {
+                entry.name = existing.name.clone();
                 entry.download_progress = existing.download_progress;
                 *existing = entry;
             } else {
@@ -1187,7 +1171,7 @@ impl Launcher {
         let log = Arc::new(tokio::sync::Mutex::new(
             tokio::fs::File::create(log_dir.join(format!("{}.log", storage::now()))).await?,
         ));
-        let mut command = tokio::process::Command::new(&java.path);
+        let mut command = java::background_command(&java::game_executable(Path::new(&java.path)));
         command
             .args(args)
             .current_dir(&working_directory)
@@ -1195,7 +1179,10 @@ impl Launcher {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         #[cfg(windows)]
-        command.creation_flags(0x08000000);
+        {
+            // The JVM also exposes its working directory as user.dir.
+            command.current_dir(java::argument_path(&working_directory));
+        }
         download::check_cancel(cancel)?;
         game_options::apply_language(&working_directory, &settings)?;
         let mut child = command
@@ -1319,7 +1306,7 @@ async fn pipe_logs<R: tokio::io::AsyncRead + Unpin>(
         let mut line = if overflow {
             "[超长日志行已省略]".to_owned()
         } else {
-            String::from_utf8_lossy(&bytes).trim_end().to_string()
+            java::decode_output(&bytes).trim_end().to_string()
         };
         for secret in secrets.iter().filter(|s| !s.is_empty()) {
             line = line.replace(secret, "[REDACTED]");
@@ -1747,7 +1734,7 @@ mod tests {
         let launcher = Launcher::open(Some(temp.path().into())).unwrap();
         let instance = launcher.create_instance("原名称", "").unwrap();
         let directory = launcher.game_dir(&instance.id).unwrap();
-        assert_eq!(instance.icon, None);
+        assert_eq!(instance.icon, Some(0));
         launcher
             .update_instance(&instance.id, "  新名称  ", 4096, None, Some(2))
             .unwrap();

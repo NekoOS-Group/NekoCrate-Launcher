@@ -8,11 +8,11 @@ import {
   ref,
   watch,
 } from "vue";
-import { ChevronUp, Plus } from "lucide-vue-next";
+import { ChevronUp, Plus, SlidersHorizontal } from "lucide-vue-next";
 import type { Instance, Task } from "../types";
 import VersionStatusIcon from "./VersionStatusIcon.vue";
 import { versionDownloadState } from "../versionProgress";
-import { versionDescription } from "../versionDescription";
+import { versionDescription, versionName } from "../versionDescription";
 
 const props = defineProps<{
   instance?: Instance;
@@ -28,7 +28,17 @@ const versions = computed(
       download: versionDownloadState(props.instance!.id, version, props.tasks),
     })) ?? [],
 );
-const emit = defineEmits<{ select: [version: string]; download: [] }>();
+const emit = defineEmits<{
+  select: [version: string];
+  download: [];
+  manage: [];
+}>();
+const selectedName = computed(() => {
+  const version = props.instance?.versions.find(
+    (v) => v.id === props.instance?.selected_version,
+  );
+  return version ? versionName(version) : props.instance?.selected_version;
+});
 const root = ref<HTMLElement>();
 const trigger = ref<HTMLButtonElement>();
 const menu = ref<HTMLElement>();
@@ -147,7 +157,7 @@ onBeforeUnmount(() =>
       :title="
         instance?.selected_version
           ? t('当前 {version} · 选择版本', {
-              version: instance.selected_version,
+              version: selectedName || instance.selected_version,
             })
           : t('选择或下载版本')
       "
@@ -180,8 +190,8 @@ onBeforeUnmount(() =>
             :aria-disabled="locked"
             :title="
               version.installed
-                ? version.id
-                : `${version.id} · ${t('已下载约 {progress}%', { progress: Math.round(version.download.progress) })}`
+                ? versionName(version)
+                : `${versionName(version)} · ${t('已下载约 {progress}%', { progress: Math.round(version.download.progress) })}`
             "
             tabindex="-1"
             data-menu-item
@@ -194,7 +204,7 @@ onBeforeUnmount(() =>
               :indeterminate="version.download.indeterminate"
             />
             <span class="version-menu-label">
-              <span class="version-menu-name">{{ version.id }}</span>
+              <span class="version-menu-name">{{ versionName(version) }}</span>
               <small class="version-menu-detail">{{
                 versionDescription(version)
               }}</small>
@@ -209,16 +219,32 @@ onBeforeUnmount(() =>
           class="version-menu-divider"
           role="separator"
         />
-        <button
-          class="version-menu-item version-menu-download"
-          role="menuitem"
-          :aria-disabled="locked"
-          tabindex="-1"
-          data-menu-item
-          @click="download"
-        >
-          <Plus :size="16" /><span> {{ t("下载新的版本") }} </span>
-        </button>
+        <div class="version-menu-footer" role="none">
+          <button
+            class="version-menu-item version-menu-download"
+            role="menuitem"
+            :aria-disabled="locked"
+            tabindex="-1"
+            data-menu-item
+            @click="download"
+          >
+            <Plus :size="16" /><span> {{ t("下载新的版本") }} </span>
+          </button>
+          <button
+            class="version-menu-item version-menu-manage"
+            role="menuitem"
+            tabindex="-1"
+            data-menu-item
+            :aria-label="t('管理版本')"
+            :title="t('管理版本')"
+            @click="
+              close(true);
+              emit('manage');
+            "
+          >
+            <SlidersHorizontal :size="16" />
+          </button>
+        </div>
       </div>
     </Transition>
   </div>

@@ -216,6 +216,15 @@ pub fn library_path(root: &Path, artifact: &Artifact) -> Result<PathBuf> {
         artifact.path.as_deref().context("库文件缺少路径")?,
     )?))
 }
+/// LWJGL 2's base platform artifact is an empty ZIP, often omitted by launchers.
+/// Skip only that known empty artifact, never real Java classes packaged beside
+/// natives (e.g. LWJGL 3/text2speech), or self-extracting native jars.
+pub fn classpath_artifact(library: &Library) -> Option<&Artifact> {
+    const EMPTY_ZIP_SHA1: &str = "b04f3ee8f5e43fa3b162981b50bb72fe1acabb33";
+    library.downloads.artifact.as_ref().filter(|artifact| {
+        library.natives.is_empty() || !artifact.sha1.eq_ignore_ascii_case(EMPTY_ZIP_SHA1)
+    })
+}
 pub fn native_artifact(l: &Library) -> Option<&Artifact> {
     let key = l.natives.get(os_name())?.replace(
         "${arch}",
@@ -254,7 +263,7 @@ fn installation_files(game: &Path, v: &Version, index: &AssetIndex) -> Result<Ve
         .iter()
         .filter(|l| is_allowed_on(l, runtime_arch))
     {
-        if let Some(a) = &library.downloads.artifact {
+        if let Some(a) = classpath_artifact(library) {
             files.push(artifact_file(a, library_path(game, a)?));
         }
         if let Some(a) = native_artifact(library) {
@@ -519,7 +528,7 @@ pub fn arguments_with_memory(
         .iter()
         .filter(|l| is_allowed_on(l, runtime_arch))
     {
-        if let Some(a) = &l.downloads.artifact {
+        if let Some(a) = classpath_artifact(l) {
             let local = library_path(&game, a)?;
             let legacy = library_path(root, a)?;
             let path = if local.is_file() || !legacy.is_file() {
@@ -527,14 +536,10 @@ pub fn arguments_with_memory(
             } else {
                 legacy
             };
-            classpath.push(path.to_string_lossy().to_string());
+            classpath.push(crate::java::argument_path(&path));
         }
     }
-    classpath.push(
-        version::client_path(&game, v)?
-            .to_string_lossy()
-            .into_owned(),
-    );
+    classpath.push(crate::java::argument_path(&version::client_path(&game, v)?));
     let separator = if cfg!(windows) { ";" } else { ":" };
     let mut vars = HashMap::from([
         ("auth_player_name", account.username.clone()),
@@ -545,15 +550,18 @@ pub fn arguments_with_memory(
         ("user_properties", "{}".into()),
         ("version_name", v.id.clone()),
         ("version_type", v.kind.clone()),
-        ("game_directory", working_directory.to_string_lossy().into()),
+        (
+            "game_directory",
+            crate::java::argument_path(&working_directory),
+        ),
         (
             "primary_jar_name",
             format!("{}.jar", v.jar.as_deref().unwrap_or(&v.id)),
         ),
-        ("assets_root", assets.to_string_lossy().into()),
+        ("assets_root", crate::java::argument_path(&assets)),
         ("assets_index_name", v.asset_index.id.clone()),
-        ("natives_directory", native.to_string_lossy().into()),
-        ("library_directory", libraries.to_string_lossy().into()),
+        ("natives_directory", crate::java::argument_path(&native)),
+        ("library_directory", crate::java::argument_path(&libraries)),
         ("classpath", classpath.join(separator)),
         ("classpath_separator", separator.into()),
         ("launcher_name", "NekoCrate".into()),
@@ -565,11 +573,7 @@ pub fn arguments_with_memory(
     ]);
     vars.insert(
         "game_assets",
-        assets
-            .join("virtual")
-            .join(&v.asset_index.id)
-            .to_string_lossy()
-            .into(),
+        crate::java::argument_path(&assets.join("virtual").join(&v.asset_index.id)),
     );
     let mut args = Vec::new();
     if let Some(config) = &v.arguments {
@@ -594,22 +598,19 @@ pub fn arguments_with_memory(
     if let Some(log) = v.logging.as_ref().and_then(|l| l.get("client"))
         && let (Some(argument), Some(id)) = (log["argument"].as_str(), log["file"]["id"].as_str())
     {
-        args.push(
-            argument.replace(
-                "${path}",
-                &{
-                    let relative = storage::safe_relative(id)?;
-                    let local = game.join("assets/log_configs").join(&relative);
-                    let legacy = root.join("assets/log_configs").join(&relative);
-                    if local.is_file() || !legacy.is_file() {
-                        local
-                    } else {
-                        legacy
-                    }
+        args.push(argument.replace(
+            "${path}",
+            &crate::java::argument_path(&{
+                let relative = storage::safe_relative(id)?;
+                let local = game.join("assets/log_configs").join(&relative);
+                let legacy = root.join("assets/log_configs").join(&relative);
+                if local.is_file() || !legacy.is_file() {
+                    local
+                } else {
+                    legacy
                 }
-                .to_string_lossy(),
-            ),
-        );
+            }),
+        ));
     }
     args.push(v.main_class.clone());
     if let Some(legacy) = &v.minecraft_arguments {
@@ -755,6 +756,51 @@ fn expand_for_arch(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn installation_plan_keeps_real_classes_beside_natives_and_skips_empty_platform_artifact() {
+        use serde_json::json;
+        let mut v = crate::test_http::version_fixture("1.12.2");
+        v.downloads.insert(
+            "client".into(),
+            serde_json::from_value(json!({
+                "url":"http://127.0.0.1:9/client","sha1":"","size":100
+            }))
+            .unwrap(),
+        );
+        let native = json!({"path":"platform-natives.jar","url":"http://127.0.0.1:9/native","sha1":"","size":100});
+        let mut platform: Library = serde_json::from_value(json!({
+            "name":"org.lwjgl.lwjgl:lwjgl-platform:2.9.4-nightly-20150209",
+            "natives":{os_name():"selected"},
+            "downloads":{
+                "artifact":{"path":"empty-platform.jar","url":"http://127.0.0.1:9/empty","size":22,"sha1":"b04f3ee8f5e43fa3b162981b50bb72fe1acabb33"},
+                "classifiers":{"selected":native}}
+        })).unwrap();
+        v.libraries.push(platform.clone());
+        let index: AssetIndex = serde_json::from_value(json!({"objects":{}})).unwrap();
+        let files = installation_files(Path::new("game"), &v, &index).unwrap();
+        assert_eq!(files.len(), 2); // client + natives; no empty base JAR
+        assert!(
+            files
+                .iter()
+                .any(|f| f.path.ends_with("platform-natives.jar"))
+        );
+        assert!(!files.iter().any(|f| f.path.ends_with("empty-platform.jar")));
+        // A combined descriptor with real classes must still fetch both files.
+        platform.name = "org.lwjgl:lwjgl:3.2.2".into();
+        let artifact = platform.downloads.artifact.as_mut().unwrap();
+        artifact.path = Some("lwjgl.jar".into());
+        artifact.sha1 = "1".repeat(40);
+        artifact.size = 100;
+        v.libraries = vec![platform];
+        let files = installation_files(Path::new("game"), &v, &index).unwrap();
+        assert_eq!(files.len(), 3);
+        assert!(files.iter().any(|f| f.path.ends_with("lwjgl.jar")));
+        assert!(
+            files
+                .iter()
+                .any(|f| f.path.ends_with("platform-natives.jar"))
+        );
+    }
 
     fn manifest_fixture(id: &str) -> VersionManifest {
         VersionManifest {
@@ -1058,20 +1104,16 @@ mod tests {
         }
         let args = arguments(&v, &root, &instance, &LaunchSession::guest()).unwrap();
         for path in [game.join("assets"), game.join("libraries"), game.clone()] {
-            assert!(args.contains(&path.to_string_lossy().into_owned()));
+            assert!(args.contains(&crate::java::argument_path(&path)));
         }
         assert!(args.iter().any(|arg| {
-            arg.contains(
-                &game
-                    .join("libraries")
-                    .join(lib_path)
-                    .to_string_lossy()
-                    .into_owned(),
-            )
+            arg.contains(&crate::java::argument_path(
+                &game.join("libraries").join(lib_path),
+            ))
         }));
         assert!(args.contains(&format!(
             "-Dlog={}",
-            game.join("assets/log_configs/client.xml").display()
+            crate::java::argument_path(&game.join("assets/log_configs/client.xml"))
         )));
         assert!(
             !launcher
@@ -1086,15 +1128,11 @@ mod tests {
             fs::rename(game.join(name), root.join(name)).unwrap();
         }
         let legacy_args = arguments(&v, &root, &instance, &LaunchSession::guest()).unwrap();
-        assert!(legacy_args.contains(&root.join("assets").to_string_lossy().into_owned()));
+        assert!(legacy_args.contains(&crate::java::argument_path(&root.join("assets"))));
         assert!(legacy_args.iter().any(|arg| {
-            arg.contains(
-                &root
-                    .join("libraries")
-                    .join(lib_path)
-                    .to_string_lossy()
-                    .into_owned(),
-            )
+            arg.contains(&crate::java::argument_path(
+                &root.join("libraries").join(lib_path),
+            ))
         }));
     }
 
@@ -1187,18 +1225,13 @@ mod tests {
                     assert_eq!(args[at + 1], value);
                 }
                 let game_at = args.iter().position(|arg| arg == "--gameDir").unwrap();
-                assert_eq!(args[game_at + 1], game.to_string_lossy());
-                assert!(
-                    args.contains(
-                        &version_dir
-                            .join(format!("{id}.jar"))
-                            .to_string_lossy()
-                            .into_owned()
-                    )
-                );
+                assert_eq!(args[game_at + 1], crate::java::argument_path(&game));
+                assert!(args.contains(&crate::java::argument_path(
+                    &version_dir.join(format!("{id}.jar"))
+                )));
                 assert!(args.contains(&format!(
                     "-Djava.library.path={}",
-                    version_dir.join("natives").display()
+                    crate::java::argument_path(&version_dir.join("natives"))
                 )));
             }
             if linked {

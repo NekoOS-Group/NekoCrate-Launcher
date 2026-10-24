@@ -11,10 +11,129 @@ fn save(game: &Path, value: &Value) {
     )
     .unwrap();
 }
-#[cfg(unix)]
 fn write(path: &Path, bytes: &[u8]) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, bytes).unwrap();
+}
+
+#[tokio::test]
+async fn legacy_forge_import_is_ready_without_the_unused_lwjgl_platform_jar() {
+    let temp = tempfile::tempdir().unwrap();
+    let game = temp.path().join("原目录/.minecraft");
+    let mut profile = base("RLCraft");
+    profile["arguments"] = Value::Null;
+    profile["minecraftArguments"] = json!("--gameDir ${game_directory}");
+    profile["mainClass"] = json!("net.minecraft.launchwrapper.Launch");
+    let platform = "org.lwjgl.lwjgl:lwjgl-platform:2.9.4-nightly-20150209";
+    let unused = maven_path(platform, None).unwrap();
+    let native = maven_path(platform, Some("natives-windows")).unwrap();
+    // Shape of the 1.12.2 Windows metadata. Map to the host too so this
+    // regression runs on every CI runner, not only Windows.
+    profile["libraries"] = json!([
+        {"name":"net.minecraftforge:forge:1.12.2-14.23.5.2860","downloads":{}},
+        {"name":platform,
+         "natives":{"windows":"natives-windows", "osx":"natives-windows", "linux":"natives-windows"},
+         "downloads":{
+             "artifact":{"path":unused,"url":"http://127.0.0.1:9/unused.jar","sha1":"b04f3ee8f5e43fa3b162981b50bb72fe1acabb33","size":22},
+             "classifiers":{"natives-windows":{"path":native,"url":"http://127.0.0.1:9/native.jar","size":0}}}},
+        // Modern self-extracting natives must remain on the classpath.
+        {"name":"org.lwjgl:lwjgl:3.3.1:natives-windows","downloads":{"artifact":{
+            "path":"org/lwjgl/lwjgl/3.3.1/lwjgl-3.3.1-natives-windows.jar","url":"http://127.0.0.1:9/modern.jar","size":0}}}
+    ]);
+    save(&game, &profile);
+    let original = fs::read(metadata_path(&game, "RLCraft").unwrap()).unwrap();
+    write(&game.join("versions/RLCraft/RLCraft.jar"), b"client");
+    let forge = game
+        .join("libraries")
+        .join(maven_path("net.minecraftforge:forge:1.12.2-14.23.5.2860", None).unwrap());
+    let modern = game.join("libraries/org/lwjgl/lwjgl/3.3.1/lwjgl-3.3.1-natives-windows.jar");
+    let native_path = game.join("libraries").join(&native);
+    write(&forge, b"forge");
+    write(&modern, b"modern native");
+    write(&native_path, b"native");
+    assert!(!game.join("libraries").join(&unused).exists());
+    let launcher = Launcher::open(Some(temp.path().join("launcher"))).unwrap();
+    let instance = launcher
+        .import_instance(game.clone(), "RLCraft".into(), String::new())
+        .await
+        .unwrap();
+    assert!(instance.selected().unwrap().installed);
+    let resolved = resolve(launcher.root(), &game, "RLCraft").unwrap();
+    let args = minecraft::arguments_with_memory(
+        &resolved.version,
+        launcher.root(),
+        &instance,
+        &LaunchSession::guest(),
+        2048,
+    )
+    .unwrap();
+    let cp = &args[args.iter().position(|arg| arg == "-cp").unwrap() + 1];
+    assert!(cp.contains("forge-1.12.2-14.23.5.2860.jar"));
+    assert!(cp.contains("lwjgl-3.3.1-natives-windows.jar"));
+    assert!(!cp.contains("lwjgl-platform"));
+    fs::remove_file(&native_path).unwrap();
+    assert!(!describe(launcher.root(), &game, "RLCraft").installed);
+    assert!(
+        check_launch_files(launcher.root(), &game, &resolved)
+            .unwrap_err()
+            .to_string()
+            .contains("natives-windows.jar")
+    );
+    write(&native_path, b"native");
+    fs::remove_file(&forge).unwrap();
+    assert!(!describe(launcher.root(), &game, "RLCraft").installed);
+    assert_eq!(
+        fs::read(metadata_path(&game, "RLCraft").unwrap()).unwrap(),
+        original
+    );
+    assert!(!launcher.root().join("metadata/manifest.json").exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn forge_launch_arguments_never_export_verbatim_paths_to_java() {
+    let temp = tempfile::tempdir().unwrap();
+    let directory = temp
+        .path()
+        .join("2026.5-逆转未来 猫咪盒子")
+        .join(".minecraft");
+    fs::create_dir_all(&directory).unwrap();
+    let game = directory.canonicalize().unwrap();
+    assert!(game.to_string_lossy().starts_with(r"\\?\"));
+    let mut profile = base("逆转未来");
+    profile["mainClass"] = json!("cpw.mods.bootstraplauncher.BootstrapLauncher");
+    profile["libraries"] = json!([{"name":"cpw.mods:bootstraplauncher:1.1.2"}]);
+    profile["arguments"] = json!({
+        "jvm":["-Djava.library.path=${natives_directory}", "-DlibraryDirectory=${library_directory}",
+            "-p","${library_directory}/cpw/mods/bootstraplauncher/1.1.2/bootstraplauncher-1.1.2.jar", "-cp", "${classpath}"],
+        "game":["--gameDir","${game_directory}","--assetsDir","${assets_root}","--gameAssets","${game_assets}"]
+    });
+    profile["logging"] = json!({"client":{"argument":"-Dlog=${path}","file":{"id":"client.xml"}}});
+    let resolved = resolve_chain(&[profile]).unwrap();
+    let instance: Instance = serde_json::from_value(json!({"id":"fixture","name":"Fixture","game_directory":game,"versions":[],"selected_version":null,"memory_mb":2048,"java_path":null,"created_at":0,"last_played":null})).unwrap();
+    let args = minecraft::arguments_with_memory(
+        &resolved.version,
+        temp.path(),
+        &instance,
+        &LaunchSession::guest(),
+        2048,
+    )
+    .unwrap();
+    assert!(args.iter().all(|arg| !arg.contains(r"\\?\")));
+    assert_eq!(
+        Path::new(&args[args.iter().position(|a| a == "--gameDir").unwrap() + 1])
+            .canonicalize()
+            .unwrap(),
+        game
+    );
+    let module = &args[args.iter().position(|a| a == "-p").unwrap() + 1];
+    assert!(module.contains("2026.5-逆转未来 猫咪盒子"));
+    assert!(module.ends_with("bootstraplauncher-1.1.2.jar"));
+    assert!(
+        args.iter()
+            .any(|arg| arg.starts_with("-Dlog=") && arg.ends_with("client.xml"))
+    );
+    assert_eq!(instance.game_dir(temp.path()), game);
 }
 
 #[test]
@@ -391,6 +510,17 @@ async fn fabric_installs_verifies_and_repairs_from_cache_without_replacing_origi
         .await
         .unwrap();
     assert!(!added.selected().unwrap().installed);
+    launcher
+        .rename_version(&instance.id, &profile_id, "My Fabric")
+        .unwrap();
+    let readded = launcher
+        .add_fabric_version(&instance.id, parent_id, loader, &cancel, &sink)
+        .await
+        .unwrap();
+    assert_eq!(
+        readded.selected().unwrap().name.as_deref(),
+        Some("My Fabric")
+    );
     let java = temp.path().join("java");
     fake_java(&java, 8);
     launcher

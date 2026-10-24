@@ -1,6 +1,10 @@
 import type { InstanceVersion } from "./types";
 import { t } from "./i18n.ts";
 
+export function versionName(version?: InstanceVersion): string {
+  return version?.name || version?.id || "";
+}
+
 export function versionDescription(version: InstanceVersion): string {
   const game = version.minecraft_version || version.id;
   if (!version.loader) return `${game} · ${t("原版")}`;

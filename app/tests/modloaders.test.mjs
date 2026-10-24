@@ -42,7 +42,10 @@ test("version subtitles use resolved game/loader metadata rather than guessing p
 test("Fabric selection ignores late responses and stops submitting unsupported versions", async () => {
   const { fixture, context: ui, dispose } = await settingsFixture();
   try {
-    ui.manifest.value = { latest: { release: "1.21.1" }, versions: [] };
+    ui.manifest.value = {
+      latest: { release: "1.21.1" },
+      versions: [{ id: "1.21.1", type: "release", url: "", sha1: "" }],
+    };
     ui.newVersion(fixture.state.database.instances[0]);
     ui.form.loader = "fabric";
     await flush();
@@ -56,7 +59,9 @@ test("Fabric selection ignores late responses and stops submitting unsupported v
     first.resolve([{ version: "0.99.1", stable: true }]);
     await pending;
     assert.equal(ui.form.fabric_version, "");
-    assert.equal(ui.fabricUnavailable.value, true);
+    assert.equal(ui.form.loader, "vanilla");
+    assert.equal(ui.fabricUnavailable.value, false);
+    assert.equal(ui.fabricNotice.value, "此游戏版本暂无可用的 Fabric");
     await ui.submit();
     assert.equal(
       fixture.calls.some((r) => r.op === "add_fabric_version"),
@@ -66,6 +71,7 @@ test("Fabric selection ignores late responses and stops submitting unsupported v
       { version: "0.17.0-beta.1", stable: false },
       { version: "0.16.14", stable: true },
     ];
+    ui.form.loader = "fabric";
     await ui.loadFabricVersions();
     assert.equal(ui.form.fabric_version, "0.16.14");
     assert.equal(ui.fabricUnavailable.value, false);
@@ -80,7 +86,10 @@ test("Fabric selection ignores late responses and stops submitting unsupported v
 test("Fabric creation hands its new child version to the existing download workflow", async () => {
   const { fixture, context: ui, dispose } = await settingsFixture();
   try {
-    ui.manifest.value = { latest: { release: "1.21.1" }, versions: [] };
+    ui.manifest.value = {
+      latest: { release: "1.21.1" },
+      versions: [{ id: "1.21.1", type: "release", url: "", sha1: "" }],
+    };
     const instance = fixture.state.database.instances[0];
     ui.newVersion(instance);
     ui.form.loader = "fabric";

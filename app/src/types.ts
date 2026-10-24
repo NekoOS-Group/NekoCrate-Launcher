@@ -67,12 +67,31 @@ export interface Instance {
   created_at: number;
   last_played: number | null;
 }
+export interface SuggestedInstance {
+  path: string;
+  name: string;
+  source: "official" | "portable";
+}
 export interface InstanceVersion {
   id: string;
+  name?: string | null;
   minecraft_version?: string;
   loader?: { kind: string; version: string };
   installed: boolean;
   download_progress?: number;
+}
+export type ContentKind = "mods" | "datapacks" | "resourcepacks" | "saves";
+export type VersionContentCounts = Record<ContentKind, number>;
+export interface LocalContentFile {
+  file_name: string;
+  name: string;
+  version: string | null;
+  enabled: boolean;
+  size: number;
+}
+export interface VersionContent {
+  directory: string;
+  files: LocalContentFile[];
 }
 export interface FabricLoaderVersion {
   version: string;

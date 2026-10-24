@@ -2078,6 +2078,9 @@ input:read-only {
   flex-shrink: 0;
   margin-top: 2px;
 }
+.error-notice.info-notice > svg {
+  color: var(--blue);
+}
 .error-notice p {
   min-width: 0;
   max-height: min(200px, 35vh);
@@ -2664,23 +2667,6 @@ input:read-only {
 .source-menu-leave-active {
   pointer-events: none;
 }
-.download-destination {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  min-height: 40px;
-  margin-bottom: 16px;
-  font-size: 12px;
-  line-height: 20px;
-  color: var(--muted);
-}
-.download-destination span {
-  overflow-wrap: anywhere;
-}
-.download-destination strong {
-  color: var(--ink);
-}
 .delete-message {
   padding: 8px var(--panel-inset) 16px;
   font-size: 14px;
@@ -2822,11 +2808,6 @@ input:read-only {
 .version-menu-state {
   margin-left: auto;
 }
-.fabric-version-heading {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
 .version-menu-item small {
   flex-shrink: 0;
   font-size: 11px;
@@ -2836,6 +2817,22 @@ input:read-only {
   flex-shrink: 0;
   color: var(--blue);
   font-size: 13px;
+}
+.version-menu-footer {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.version-menu-footer .version-menu-download {
+  flex: 1;
+  width: auto;
+  min-width: 0;
+}
+.version-menu-manage {
+  width: 40px;
+  flex: 0 0 40px;
+  justify-content: center;
+  padding: 10px;
 }
 .version-menu-divider {
   flex-shrink: 0;

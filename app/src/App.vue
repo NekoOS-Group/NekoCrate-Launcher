@@ -69,16 +69,23 @@ import {
 import SkinStage from "./components/SkinStage.vue";
 import WorldBackdrop from "./components/WorldBackdrop.vue";
 import VersionMenu from "./components/VersionMenu.vue";
+import VersionDownload from "./components/VersionDownload.vue";
+import VersionManager from "./components/VersionManager.vue";
+import { versionName } from "./versionDescription";
 import AccountAvatar from "./components/AccountAvatar.vue";
 import InstanceHeader from "./components/InstanceHeader.vue";
 import DownloadSourceSelect from "./components/DownloadSourceSelect.vue";
 import GlassSelect from "./components/GlassSelect.vue";
 import ThemePicker from "./components/ThemePicker.vue";
 import InstanceIcon from "./components/InstanceIcon.vue";
+import InstancePicker from "./components/InstancePicker.vue";
+import InstanceLocation from "./components/InstanceLocation.vue";
 import InstanceProgress from "./components/InstanceProgress.vue";
+import type { FolderImportResult } from "./useFolderDrop";
 import type {
   Settings,
   Instance,
+  SuggestedInstance,
   Snapshot,
   VersionManifest,
   LauncherEvent,
@@ -90,6 +97,9 @@ import type {
   JavaInfo,
   MemoryMode,
   MemoryOptions,
+  VersionContent,
+  VersionContentCounts,
+  ContentKind,
 } from "./types";
 
 const desktop = isTauri();
@@ -413,6 +423,9 @@ function navigateSettingsTabs(event: KeyboardEvent, index: number) {
   document.getElementById(`settings-tab-${settingsTab.value}`)?.focus();
 }
 const manifest = ref<VersionManifest | null>(null);
+const versionsLoading = ref(false);
+const downloadSubmitting = ref(false);
+let downloadDraftInitialized = false;
 const selectedInstanceId = ref("");
 const busy = ref(false);
 const directoryPicking = ref(false);
@@ -430,6 +443,17 @@ const taskInstance = computed(() =>
   ),
 );
 const notice = ref("");
+const fabricNotice = ref("");
+let fabricNoticeTimer: ReturnType<typeof setTimeout> | undefined;
+function clearFabricNotice() {
+  clearTimeout(fabricNoticeTimer);
+  fabricNotice.value = "";
+}
+function notifyFabricUnavailable() {
+  clearFabricNotice();
+  fabricNotice.value = "此游戏版本暂无可用的 Fabric";
+  fabricNoticeTimer = setTimeout(clearFabricNotice, 2000);
+}
 const error = ref("");
 const visibleError = computed(
   () => error.value || settingsSaveError.value || proxyPasswordError.value,
@@ -453,18 +477,27 @@ function openLogs(scope = "all") {
   logSession.value++;
   showLogs.value = true;
 }
-const modal = ref<"create" | "import" | "edit" | "delete" | "version" | null>(
-  null,
-);
+const modal = ref<
+  "add" | "create" | "edit" | "delete" | "version" | "manage" | null
+>(null);
 watch(modal, () => modalSession++, { flush: "sync" });
 const modalTitles = {
+  add: "添加游戏目录",
   create: "新建实例",
-  import: "导入实例",
   edit: "实例设置",
   delete: "移除实例",
   version: "下载游戏版本",
+  manage: "管理版本",
 };
+const suggestedInstances = ref<SuggestedInstance[]>([]);
+const discoveringInstances = ref(false);
+const linkingDirectory = ref("");
+let instanceDiscoveryRequest = 0;
 const editing = ref<Instance | null>(null);
+const managing = ref(false);
+const managedInstance = computed(() =>
+  snapshot.value.database.instances.find((i) => i.id === editing.value?.id),
+);
 const instanceWrites = reactive(new Set<string>());
 const instanceSaving = computed(
   () => !!editing.value && instanceWrites.has(editing.value.id),
@@ -474,8 +507,9 @@ const editingDirectory = ref("");
 const directoryLoading = ref(false);
 const form = reactive({
   name: "",
+  location: "managed",
+  external_directory: "",
   version: "1.21.1",
-  source: "",
   memory_mb: 2048,
   memory_mode: "auto" as MemoryMode,
   java_path: "",
@@ -483,6 +517,13 @@ const form = reactive({
   loader: "vanilla",
   fabric_version: "",
 });
+const invalidCreationLocation = computed(
+  () =>
+    (modal.value === "create" ||
+      (modal.value === "version" && !editing.value)) &&
+    form.location === "external" &&
+    !form.external_directory.trim(),
+);
 const memoryOptions = ref<MemoryOptions | null>(null);
 const memoryChoices = computed(() => [
   {
@@ -531,10 +572,33 @@ const fabricUnavailable = computed(
     form.loader === "fabric" &&
     (fabricLoading.value || !form.fabric_version),
 );
+const downloadTargetRunning = computed(
+  () => !!editing.value && snapshot.value.running.includes(editing.value.id),
+);
+const canSubmitDownload = computed(
+  () =>
+    !busy.value &&
+    !downloadSubmitting.value &&
+    !directoryPicking.value &&
+    !versionsLoading.value &&
+    !fabricUnavailable.value &&
+    !downloadTargetRunning.value &&
+    !invalidCreationLocation.value &&
+    (!!editing.value || !!form.name.trim()) &&
+    !!manifest.value?.versions.some((version) => version.id === form.version),
+);
 let fabricRequest = 0;
 async function loadFabricVersions() {
+  if (
+    modal.value !== "version" ||
+    form.loader !== "fabric" ||
+    !form.version.trim()
+  )
+    return;
   const request = ++fabricRequest;
   const game = form.version.trim();
+  clearFabricNotice();
+  error.value = "";
   fabricVersions.value = [];
   form.fabric_version = "";
   fabricLoading.value = true;
@@ -550,6 +614,11 @@ async function loadFabricVersions() {
       form.version.trim() !== game
     )
       return;
+    if (!result.length) {
+      form.loader = "vanilla";
+      notifyFabricUnavailable();
+      return;
+    }
     fabricVersions.value = result;
     form.fabric_version =
       result.find((item) => item.stable)?.version || result[0]?.version || "";
@@ -562,6 +631,7 @@ async function loadFabricVersions() {
 watch(
   () => [modal.value, form.loader, form.version],
   (_, __, cleanup) => {
+    clearFabricNotice();
     ++fabricRequest;
     fabricVersions.value = [];
     form.fabric_version = "";
@@ -573,12 +643,16 @@ watch(
     )
       return;
     fabricLoading.value = true;
-    const timer = setTimeout(() => void loadFabricVersions(), 300);
+    const request = fabricRequest;
+    const timer = setTimeout(() => {
+      if (request === fabricRequest) void loadFabricVersions();
+    }, 300);
     cleanup(() => {
       clearTimeout(timer);
       ++fabricRequest;
     });
   },
+  { flush: "sync" },
 );
 const javaRuntimes = ref<JavaInfo[]>([]);
 const javaDiscovering = ref(false);
@@ -894,9 +968,16 @@ let unlistenDrop: UnlistenFn | undefined;
 let dropDisposed = false;
 async function listenForFolders() {
   try {
-    const stop = await getCurrentWindow().onDragDropEvent((e) =>
-      folderDrop.handle(e.payload),
-    );
+    const stop = await getCurrentWindow().onDragDropEvent((e) => {
+      if (
+        e.payload.type === "drop" &&
+        e.payload.paths.length &&
+        modal.value === "add" &&
+        !busy.value
+      )
+        modal.value = null;
+      folderDrop.handle(e.payload);
+    });
     if (dropDisposed) stop();
     else unlistenDrop = stop;
   } catch (e) {
@@ -1022,21 +1103,159 @@ async function action<T>(
   }
 }
 async function loadVersions() {
-  const result = await action<VersionManifest>(
-    "同步版本目录",
-    "versions",
-    {},
-    true,
-  );
-  if (result) manifest.value = result;
+  if (versionsLoading.value || busy.value) return;
+  versionsLoading.value = true;
+  try {
+    const result = await action<VersionManifest>(
+      "同步版本目录",
+      "versions",
+      {},
+      true,
+    );
+    if (result) {
+      manifest.value = result;
+      if (
+        modal.value === "version" &&
+        !result.versions.some((item) => item.id === form.version)
+      )
+        form.version = result.latest.release || result.versions[0]?.id || "";
+    }
+  } finally {
+    versionsLoading.value = false;
+  }
 }
-function newInstance(importing = false) {
+async function openInstancePicker() {
+  utility.value = null;
+  showLogs.value = false;
+  error.value = "";
+  suggestedInstances.value = [];
+  modal.value = "add";
+  const session = modalSession;
+  const request = ++instanceDiscoveryRequest;
+  discoveringInstances.value = desktop;
+  if (!desktop) return;
+  const isCurrent = () =>
+    modal.value === "add" &&
+    session === modalSession &&
+    request === instanceDiscoveryRequest;
+  try {
+    const found = await rpc<SuggestedInstance[]>("suggested_instances");
+    if (isCurrent()) suggestedInstances.value = found;
+  } catch (e) {
+    if (isCurrent()) error.value = message(e);
+  } finally {
+    if (isCurrent()) discoveringInstances.value = false;
+  }
+}
+async function linkInstanceDirectory(path: string) {
+  if (busy.value || linkingDirectory.value || modal.value !== "add") return;
+  const session = modalSession;
+  linkingDirectory.value = path;
+  try {
+    const result = await action<FolderImportResult>(
+      "关联实例",
+      "import_folders",
+      {
+        paths: [path],
+      },
+    );
+    if (!result) return;
+    const linked = result.added[0] || result.existing[0];
+    if (linked) {
+      selectInstance(linked.id);
+      folderDrop.showLinked([
+        { name: linked.name, path: linked.game_directory || path },
+      ]);
+      if (session === modalSession) modal.value = null;
+    } else if (result.failures[0]) {
+      error.value = result.failures[0].message;
+    }
+  } finally {
+    linkingDirectory.value = "";
+  }
+}
+async function chooseInstanceDirectory() {
+  if (directoryPicking.value || busy.value || modal.value !== "add") return;
+  const session = modalSession;
+  directoryPicking.value = true;
+  try {
+    const path = await rpc<string | null>("pick_import_directory");
+    if (path && modal.value === "add" && session === modalSession)
+      await linkInstanceDirectory(path);
+  } catch (e) {
+    if (session === modalSession) error.value = message(e);
+  } finally {
+    directoryPicking.value = false;
+  }
+}
+function resetInstanceDraft() {
+  const baseName = t("新实例");
+  const names = new Set(
+    instances.value.map((instance) => instance.name.trim()),
+  );
+  let name = baseName;
+  for (let suffix = 2; names.has(name); suffix++)
+    name = `${baseName} ${suffix}`;
+  form.name = name;
+  form.location = "managed";
+  form.external_directory = "";
+}
+function newInstance() {
   utility.value = null;
   error.value = "";
-  form.name = "";
+  resetInstanceDraft();
   form.version = manifest.value?.latest.release || "1.21.1";
-  form.source = "";
-  modal.value = importing ? "import" : "create";
+  modal.value = "create";
+}
+function switchDownloadTarget(id: string | null) {
+  if (
+    modal.value !== "version" ||
+    busy.value ||
+    downloadSubmitting.value ||
+    directoryPicking.value
+  )
+    return;
+  if (id === null) {
+    if (!downloadDraftInitialized) {
+      resetInstanceDraft();
+      downloadDraftInitialized = true;
+    }
+    editing.value = null;
+  } else {
+    const instance = instances.value.find((item) => item.id === id);
+    if (instance) editing.value = instance;
+  }
+}
+async function chooseCreationDirectory() {
+  if (
+    directoryPicking.value ||
+    busy.value ||
+    !(
+      modal.value === "create" ||
+      (modal.value === "version" && !editing.value)
+    ) ||
+    form.location !== "external"
+  )
+    return;
+  const session = modalSession;
+  directoryPicking.value = true;
+  try {
+    const path = await rpc<string | null>("pick_instance_location", {
+      path: form.external_directory,
+    });
+    if (
+      path &&
+      (modal.value === "create" ||
+        (modal.value === "version" && !editing.value)) &&
+      form.location === "external" &&
+      session === modalSession
+    )
+      form.external_directory = path;
+  } catch (e) {
+    if (session === modalSession) error.value = message(e);
+  } finally {
+    directoryPicking.value = false;
+  }
 }
 function hasInstanceTask(id: string) {
   return (
@@ -1084,20 +1303,6 @@ async function edit(i: Instance) {
       error.value = message(e);
   } finally {
     if (editing.value?.id === i.id) directoryLoading.value = false;
-  }
-}
-async function chooseDirectory() {
-  if (directoryPicking.value || busy.value) return;
-  directoryPicking.value = true;
-  try {
-    const path = await rpc<string | null>("pick_import_directory", {
-      path: form.source,
-    });
-    if (typeof path === "string") form.source = path;
-  } catch (e) {
-    error.value = message(e);
-  } finally {
-    directoryPicking.value = false;
   }
 }
 async function chooseJava() {
@@ -1180,62 +1385,111 @@ async function submit() {
     await saveEditedInstance();
     return;
   }
+  if (modal.value === "version") {
+    await submitDownload();
+    return;
+  }
   const session = modalSession;
   let result: Instance | boolean | undefined;
-  if (modal.value === "create")
+  if (modal.value === "create") {
+    if (invalidCreationLocation.value || directoryPicking.value) return;
     result = await action<Instance>("创建实例", "create", {
       name: form.name,
+      directory: form.location === "external" ? form.external_directory : null,
     });
-  else if (modal.value === "import") {
-    result = await action<Instance>(
-      "关联实例",
-      "import",
-      { source: form.source, name: form.name },
-      true,
-    );
-    if (result)
-      folderDrop.showLinked([
-        { name: result.name, path: result.game_directory || form.source },
-      ]);
-  } else if (modal.value === "version" && editing.value) {
-    if (fabricUnavailable.value) return;
-    const instance =
-      form.loader === "fabric"
-        ? await action<Instance>(
-            "添加 Fabric 版本",
-            "add_fabric_version",
-            {
-              id: editing.value.id,
-              game_version: form.version.trim(),
-              loader_version: form.fabric_version,
-            },
-            true,
-          )
-        : await action<Instance>("添加版本", "add_version", {
-            id: editing.value.id,
-            version: form.version.trim(),
-          });
-    if (instance) {
-      selectInstance(instance.id);
-      if (session === modalSession) modal.value = null;
-      await install(instance);
-    }
-    return;
   }
   if (result !== undefined) {
     if (typeof result === "object") selectInstance(result.id);
     if (session === modalSession) modal.value = null;
   }
 }
+async function submitDownload() {
+  if (modal.value !== "version" || !canSubmitDownload.value) return;
+  const session = modalSession;
+  const selection = {
+    game: form.version,
+    loader: form.loader,
+    fabric: form.fabric_version,
+  };
+  downloadSubmitting.value = true;
+  try {
+    let target = editing.value;
+    if (!target) {
+      const created = await action<Instance>("创建实例", "create", {
+        name: form.name.trim(),
+        directory:
+          form.location === "external" ? form.external_directory : null,
+      });
+      if (!created) return;
+      target = created;
+      // Keep the created directory selected if adding a loader fails. Retrying
+      // must not create another directory or discard the user's selection.
+      if (session === modalSession) editing.value = created;
+    }
+    const instance =
+      selection.loader === "fabric"
+        ? await action<Instance>(
+            "添加 Fabric 版本",
+            "add_fabric_version",
+            {
+              id: target.id,
+              game_version: selection.game,
+              loader_version: selection.fabric,
+            },
+            true,
+          )
+        : await action<Instance>("添加版本", "add_version", {
+            id: target.id,
+            version: selection.game,
+          });
+    if (instance) {
+      selectInstance(instance.id);
+      if (session === modalSession) modal.value = null;
+      await install(instance);
+    }
+  } finally {
+    downloadSubmitting.value = false;
+  }
+}
 function newVersion(instance: Instance) {
   error.value = "";
   utility.value = null;
   editing.value = instance;
-  form.version = manifest.value?.latest.release || "1.21.1";
+  downloadDraftInitialized = false;
+  form.version =
+    manifest.value?.latest.release || manifest.value?.versions[0]?.id || "";
   form.loader = "vanilla";
   form.fabric_version = "";
   modal.value = "version";
   if (!manifest.value && desktop) void loadVersions();
+}
+function manageVersions(instance: Instance) {
+  error.value = "";
+  utility.value = null;
+  editing.value = instance;
+  managing.value = false;
+  modal.value = "manage";
+}
+async function readVersionContentCounts(version: string) {
+  return rpc<VersionContentCounts>("version_content_counts", {
+    id: editing.value!.id,
+    version,
+  });
+}
+async function readVersionContent(version: string, kind: ContentKind) {
+  return rpc<VersionContent>("version_content", {
+    id: editing.value!.id,
+    version,
+    kind,
+  });
+}
+async function renameVersion(version: string, name: string) {
+  await rpc("rename_version", { id: editing.value!.id, version, name });
+  await sync();
+}
+async function deleteVersion(version: string) {
+  await rpc("delete_version", { id: editing.value!.id, version });
+  await sync();
 }
 async function selectVersion(instance: Instance, version: string) {
   if (instance.selected_version === version) return;
@@ -1524,10 +1778,12 @@ onMounted(async () => {
   }
 });
 onUnmounted(() => {
+  instanceDiscoveryRequest++;
   dropDisposed = true;
   unlistenDrop?.();
   folderDrop.dispose();
   clearTimeout(noticeTimer);
+  clearFabricNotice();
   skinGeneration++;
   logStore.dispose();
   unlisten?.();
@@ -1539,10 +1795,11 @@ onUnmounted(() => {
 <template>
   <div class="shell" :data-theme="theme">
     <ErrorNotice
-      :message="visibleError"
+      :message="visibleError || fabricNotice"
+      :informational="!visibleError && !!fabricNotice"
       :retry="!!settingsSaveError && visibleError === settingsSaveError"
       :retrying="settingsSaving"
-      @dismiss="dismissError"
+      @dismiss="visibleError ? dismissError() : clearFabricNotice()"
       @retry="persistSettings"
     />
     <FolderDrop :controller="folderDrop" />
@@ -1627,9 +1884,9 @@ onUnmounted(() => {
           <button
             class="icon-button add-instance"
             :disabled="busy"
-            :aria-label="t('新建实例')"
-            :title="t('新建实例')"
-            @click="newInstance()"
+            :aria-label="t('添加游戏目录')"
+            :title="t('添加游戏目录')"
+            @click="openInstancePicker"
           >
             <Plus :size="20" />
           </button>
@@ -1665,7 +1922,12 @@ onUnmounted(() => {
                           : '{name}，{version}，双击或按 F2 设置，拖动或按 Alt 加左右方向键排序',
                       {
                         name: instance.name,
-                        version: instance.selected_version || t('尚无版本'),
+                        version:
+                          versionName(
+                            instance.versions.find(
+                              (v) => v.id === instance.selected_version,
+                            ),
+                          ) || t('尚无版本'),
                       },
                     )
                   "
@@ -1721,9 +1983,11 @@ onUnmounted(() => {
                   : selectedRunning
                     ? t('停止游戏')
                     : selectedVersion.installed
-                      ? t('启动 {version}', { version: selectedVersion.id })
+                      ? t('启动 {version}', {
+                          version: versionName(selectedVersion),
+                        })
                       : t('下载并启动 {version}', {
-                          version: selectedVersion.id,
+                          version: versionName(selectedVersion),
                         })
             "
             @click="
@@ -1785,7 +2049,7 @@ onUnmounted(() => {
                       v-if="selectedVersion"
                       :key="selectedVersion.id"
                       class="launch-version"
-                      >{{ selectedVersion.id }}</small
+                      >{{ versionName(selectedVersion) }}</small
                     >
                   </Transition>
                 </span>
@@ -1797,18 +2061,13 @@ onUnmounted(() => {
               v-if="selectedVersion"
               :instance="selectedInstance"
               :tasks="tasks"
-              :locked="busy"
-              :disabled="
-                !selectedInstance ||
-                selectedRunning ||
-                !!modal ||
-                !!utility ||
-                showLogs
-              "
+              :locked="busy || selectedRunning"
+              :disabled="!selectedInstance || !!modal || !!utility || showLogs"
               @select="
                 selectedInstance && selectVersion(selectedInstance, $event)
               "
               @download="selectedInstance && newVersion(selectedInstance)"
+              @manage="selectedInstance && manageVersions(selectedInstance)"
             />
           </Transition>
         </div>
@@ -2107,6 +2366,14 @@ onUnmounted(() => {
                 :control-pending="downloadControlBusy"
                 :name="taskInstance?.name || t(displayedTask.title)"
                 :version="
+                  versionName(
+                    taskInstance?.versions.find(
+                      (v) =>
+                        v.id ===
+                        (displayedTask.version_id ||
+                          taskInstance?.selected_version),
+                    ),
+                  ) ||
                   displayedTask.version_id ||
                   taskInstance?.selected_version ||
                   undefined
@@ -2505,10 +2772,56 @@ onUnmounted(() => {
         :notice="translateMessage(notice)"
         v-if="modal"
         :label="modal === 'edit' ? form.name : t(modalTitles[modal])"
-        :locked="modal !== 'edit' && busy"
+        :locked="
+          modal === 'manage'
+            ? managing
+            : modal === 'version'
+              ? downloadSubmitting
+              : modal !== 'edit' && busy
+        "
         @close="modal = null"
       >
+        <VersionManager
+          v-if="modal === 'manage' && managedInstance"
+          :key="managedInstance.id"
+          :instance="managedInstance"
+          :locked="busy || snapshot.running.includes(managedInstance.id)"
+          :load-content="readVersionContent"
+          :load-counts="readVersionContentCounts"
+          :rename="renameVersion"
+          :remove="deleteVersion"
+          @error="error = message($event)"
+          @busy="managing = $event"
+          @close="modal = null"
+        />
+        <VersionDownload
+          v-else-if="modal === 'version'"
+          v-model:version="form.version"
+          v-model:loader="form.loader"
+          v-model:fabric-version="form.fabric_version"
+          v-model:name="form.name"
+          v-model:location="form.location"
+          :target="editing"
+          :instances="instances"
+          :manifest="manifest"
+          :fabric-options="fabricOptions"
+          :fabric-loading="fabricLoading"
+          :versions-loading="versionsLoading"
+          :disabled="busy || downloadSubmitting"
+          :submitting="downloadSubmitting"
+          :can-submit="canSubmitDownload"
+          :directory="form.external_directory"
+          :root="snapshot.root"
+          :picking="directoryPicking"
+          :running="downloadTargetRunning"
+          @target="switchDownloadTarget"
+          @refresh="loadVersions"
+          @browse="chooseCreationDirectory"
+          @submit="submitDownload"
+          @close="modal = null"
+        />
         <section
+          v-else
           class="modal glass-surface"
           :class="{ 'instance-settings': modal === 'edit' }"
         >
@@ -2535,7 +2848,18 @@ onUnmounted(() => {
               <X :size="16" />
             </button>
           </div>
-          <template v-if="modal === 'delete'"
+          <InstancePicker
+            v-if="modal === 'add'"
+            :candidates="suggestedInstances"
+            :loading="discoveringInstances"
+            :disabled="busy || directoryPicking"
+            :linking="linkingDirectory"
+            :picking="directoryPicking"
+            @select="linkInstanceDirectory"
+            @import="chooseInstanceDirectory"
+            @create="newInstance"
+          />
+          <template v-else-if="modal === 'delete'"
             ><p class="delete-message">
               {{
                 editing?.game_directory
@@ -2567,120 +2891,24 @@ onUnmounted(() => {
           >
           <form v-else @submit.prevent="submit">
             <div class="modal-fields">
-              <div v-if="modal === 'version'" class="download-destination">
-                <span>
-                  {{ t("安装到") }} <strong>{{ editing?.name }}</strong></span
-                >
-                <button
-                  type="button"
-                  class="icon-button"
-                  :disabled="busy"
-                  :aria-label="t('更新版本列表')"
-                  :title="t('更新版本列表')"
-                  @click="loadVersions"
-                >
-                  <RefreshCw :size="18" />
-                </button>
-              </div>
-              <label
-                v-if="modal === 'create' || modal === 'import'"
-                class="field"
-              >
+              <label v-if="modal === 'create'" class="field">
                 {{ t("实例名称") }}
                 <input
                   v-model="form.name"
-                  :placeholder="
-                    t(
-                      modal === 'import'
-                        ? '默认使用上层文件夹名称'
-                        : '例如：日常游戏',
-                    )
-                  "
-                  :required="modal === 'create'"
-                  maxlength="80" /></label
-              ><label v-if="modal === 'version'" class="field">
-                {{ t("Minecraft 版本") }}
-                <input
-                  v-model="form.version"
-                  list="versions"
-                  placeholder="1.21.1"
+                  :placeholder="t('例如：日常游戏')"
+                  :disabled="busy"
                   required
-                /><datalist id="versions">
-                  <option
-                    v-for="version in manifest?.versions"
-                    :key="version.id"
-                    :value="version.id"
-                  >
-                    {{ version.type }}
-                  </option>
-                </datalist></label
-              >
-              <template v-if="modal === 'version'">
-                <label class="field" for="version-loader-trigger">
-                  {{ t("模组加载器") }}
-                  <GlassSelect
-                    id="version-loader"
-                    v-model="form.loader"
-                    :disabled="busy"
-                    floating
-                    :options="[
-                      { value: 'vanilla', label: t('原版') },
-                      { value: 'fabric', label: 'Fabric' },
-                    ]"
-                  />
-                </label>
-                <label
-                  v-if="form.loader === 'fabric'"
-                  class="field"
-                  for="fabric-loader-trigger"
-                >
-                  <span class="fabric-version-heading">
-                    {{ t("Fabric 版本") }}
-                    <button
-                      type="button"
-                      class="icon-button"
-                      :aria-label="t('刷新版本列表')"
-                      :disabled="busy || fabricLoading"
-                      @click="loadFabricVersions"
-                    >
-                      <RefreshCw :size="14" :class="{ spin: fabricLoading }" />
-                    </button>
-                  </span>
-                  <GlassSelect
-                    id="fabric-loader"
-                    v-model="form.fabric_version"
-                    floating
-                    :disabled="busy || fabricLoading || !fabricVersions.length"
-                    :options="fabricOptions"
-                  />
-                  <small v-if="fabricLoading">{{
-                    t("正在获取 Fabric 版本…")
-                  }}</small>
-                  <small v-else-if="!fabricVersions.length">{{
-                    t("此游戏版本暂无可用的 Fabric")
-                  }}</small>
-                </label>
-              </template>
-              <label v-if="modal === 'import'" class="field">
-                {{ t("游戏目录") }}
-                <div class="input-action">
-                  <input
-                    v-model="form.source"
-                    required
-                    :placeholder="t('~/.minecraft 或游戏目录')"
-                  /><button
-                    type="button"
-                    class="button"
-                    :disabled="directoryPicking || busy"
-                    @click="chooseDirectory"
-                  >
-                    <FolderOpen :size="16" /> {{ t("浏览") }}
-                  </button>
-                </div>
-                <small>
-                  {{ t("直接使用原目录，不复制游戏文件。") }}
-                </small></label
-              >
+                  maxlength="80"
+              /></label>
+              <InstanceLocation
+                v-if="modal === 'create'"
+                v-model="form.location"
+                :directory="form.external_directory"
+                :root="snapshot.root"
+                :disabled="busy || directoryPicking"
+                :picking="directoryPicking"
+                @browse="chooseCreationDirectory"
+              />
               <template v-if="modal === 'edit'">
                 <div class="field instance-memory">
                   <label
@@ -2753,9 +2981,9 @@ onUnmounted(() => {
                 type="button"
                 class="text-button import-link"
                 :disabled="busy"
-                @click="newInstance(true)"
+                @click="openInstancePicker"
               >
-                {{ t("导入已有目录") }}
+                {{ t("返回") }}
               </button>
               <button
                 type="button"
@@ -2770,22 +2998,17 @@ onUnmounted(() => {
                 :disabled="
                   modal === 'edit'
                     ? instanceSaving || invalidCustomMemory
-                    : busy || fabricUnavailable
+                    : busy ||
+                      fabricUnavailable ||
+                      invalidCreationLocation ||
+                      (modal === 'create' && directoryPicking)
                 "
               >
                 <LoaderCircle
                   v-if="modal === 'edit' ? instanceSaving : busy"
                   class="spin"
                   :size="16"
-                />{{
-                  modal === "edit"
-                    ? t("保存")
-                    : modal === "import"
-                      ? t("导入")
-                      : modal === "version"
-                        ? t("下载并安装")
-                        : t("创建实例")
-                }}
+                />{{ modal === "edit" ? t("保存") : t("创建实例") }}
               </button>
             </div>
           </form>

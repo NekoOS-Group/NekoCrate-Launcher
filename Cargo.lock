@@ -2499,7 +2499,7 @@ dependencies = [
 
 [[package]]
 name = "nekocrate-cli"
-version = "0.5.0-dev.1"
+version = "0.6.0-dev.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2511,7 +2511,7 @@ dependencies = [
 
 [[package]]
 name = "nekocrate-core"
-version = "0.5.0-dev.1"
+version = "0.6.0-dev.1"
 dependencies = [
  "anyhow",
  "directories",
@@ -2542,7 +2542,7 @@ dependencies = [
 
 [[package]]
 name = "nekocrate-desktop"
-version = "0.5.0-dev.1"
+version = "0.6.0-dev.1"
 dependencies = [
  "anyhow",
  "nekocrate-core",
@@ -2564,7 +2564,7 @@ dependencies = [
 
 [[package]]
 name = "nekocrate-dev"
-version = "0.5.0-dev.1"
+version = "0.6.0-dev.1"
 
 [[package]]
 name = "new_debug_unreachable"

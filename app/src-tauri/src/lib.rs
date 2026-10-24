@@ -78,6 +78,8 @@ enum Request {
         name: String,
         #[serde(default)]
         version: String,
+        #[serde(default)]
+        directory: Option<String>,
     },
     Update {
         id: String,
@@ -115,7 +117,12 @@ enum Request {
     ImportFolders {
         paths: Vec<String>,
     },
+    SuggestedInstances,
     PickImportDirectory {
+        #[serde(default)]
+        path: String,
+    },
+    PickInstanceLocation {
         #[serde(default)]
         path: String,
     },
@@ -126,6 +133,24 @@ enum Request {
     SelectVersion {
         id: String,
         version: String,
+    },
+    RenameVersion {
+        id: String,
+        version: String,
+        name: String,
+    },
+    DeleteVersion {
+        id: String,
+        version: String,
+    },
+    VersionContentCounts {
+        id: String,
+        version: String,
+    },
+    VersionContent {
+        id: String,
+        version: String,
+        kind: nekocrate_core::version_management::ContentKind,
     },
     Install {
         id: String,
@@ -211,7 +236,12 @@ async fn command(
             },
             Request::ProxyPassword=>json!(launcher.proxy_password()?),
             Request::SaveSettings{settings}=>{launcher.save_settings(settings)?;json!(true)},
-            Request::Create{name,version}=>json!(launcher.create_instance(&name,&version)?),
+            Request::Create{name,version,directory}=>{
+                let launcher = launcher.clone();
+                json!(tauri::async_runtime::spawn_blocking(move || {
+                    launcher.create_instance_at(&name,&version,directory.as_deref().map(std::path::Path::new))
+                }).await??)
+            },
             Request::Update{id,name,memory_mb,memory_mode,java_path,icon}=>{launcher.update_instance_memory(&id,&name,nekocrate_core::memory::MemoryConfig{mode:memory_mode,custom_mb:memory_mb},java_path,icon)?;json!(true)},
             Request::Clone{id}=>{let (_cancel,_guard)=state.job().map_err(anyhow::Error::msg)?;json!(launcher.clone_instance(&id).await?)},
             Request::Delete{id}=>{launcher.delete_instance(&id)?;json!(true)},
@@ -229,9 +259,34 @@ async fn command(
                 let (_cancel,_guard)=state.job().map_err(anyhow::Error::msg)?;
                 json!(launcher.import_folders(paths.into_iter().map(PathBuf::from).collect()).await?)
             },
-            Request::PickImportDirectory{path}=>json!(import_picker::pick(&app,&path,launcher.ui_language() == "en-US").await?),
+            Request::SuggestedInstances=>{
+                let launcher = launcher.clone();
+                json!(tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<_> {
+                    // AppImage's running binary is inside a temporary mount.
+                    let executable = if cfg!(target_os = "linux") {
+                        std::env::var_os("APPIMAGE").map(PathBuf::from)
+                            .filter(|path| path.is_absolute() && path.is_file())
+                    } else { None }.map(Ok).unwrap_or_else(std::env::current_exe)?;
+                    Ok(launcher.suggested_instances(&executable))
+                }).await??)
+            },
+            Request::PickImportDirectory{path}=>json!(import_picker::pick(&app,&path,launcher.ui_language() == "en-US",false).await?),
+            Request::PickInstanceLocation{path}=>json!(import_picker::pick(&app,&path,launcher.ui_language() == "en-US",true).await?),
             Request::AddVersion{id,version}=>json!(launcher.add_version(&id,&version)?),
             Request::SelectVersion{id,version}=>{launcher.select_version(&id,&version)?;json!(true)},
+            Request::RenameVersion{id,version,name}=>{launcher.rename_version(&id,&version,&name)?;json!(true)},
+            Request::DeleteVersion{id,version}=>{
+                let launcher = launcher.clone();
+                json!(tauri::async_runtime::spawn_blocking(move || launcher.delete_version(&id,&version)).await??)
+            },
+            Request::VersionContentCounts{id,version}=>{
+                let launcher = launcher.clone();
+                json!(tauri::async_runtime::spawn_blocking(move || launcher.version_content_counts(&id,&version)).await??)
+            },
+            Request::VersionContent{id,version,kind}=>{
+                let launcher = launcher.clone();
+                json!(tauri::async_runtime::spawn_blocking(move || launcher.version_content(&id,&version,kind)).await??)
+            },
             Request::Install{id,repair}=>{
                 let (cancel,_guard)=state.job().map_err(anyhow::Error::msg)?;
                 let (pause,receiver)=tokio::sync::watch::channel(false);

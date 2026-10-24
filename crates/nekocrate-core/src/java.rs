@@ -8,6 +8,109 @@ use serde::Serialize;
 use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
+pub(crate) fn background_command(path: &Path) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(path);
+    command.stdin(std::process::Stdio::null());
+    #[cfg(windows)]
+    command.creation_flags(0x08000000); // CREATE_NO_WINDOW, including runtime probes
+    command
+}
+
+pub(crate) fn game_executable(path: &Path) -> PathBuf {
+    game_executable_for(path, cfg!(windows))
+}
+
+fn game_executable_for(path: &Path, windows: bool) -> PathBuf {
+    if windows
+        && path
+            .file_name()
+            .is_some_and(|name| name.eq_ignore_ascii_case("java.exe"))
+    {
+        let windowed = path.with_file_name("javaw.exe");
+        if windowed.is_file() {
+            return windowed;
+        }
+    }
+    path.to_owned()
+}
+
+/// Canonical Windows paths are useful for Rust filesystem operations, but Java
+/// NIO rejects the verbatim namespace prefix (notably Forge's module path).
+/// Convert only at the JVM argument boundary; keep the stored paths untouched.
+pub(crate) fn argument_path(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        windows_argument_path(&path)
+    }
+    #[cfg(not(windows))]
+    {
+        path.into_owned()
+    }
+}
+
+#[cfg(any(windows, test))]
+fn windows_argument_path(path: &str) -> String {
+    if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{unc}");
+    }
+    if let Some(drive) = path.strip_prefix(r"\\?\") {
+        let bytes = drive.as_bytes();
+        if bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && bytes[2] == b'\\'
+        {
+            return drive.to_owned();
+        }
+    }
+    path.to_owned()
+}
+
+/// Older Windows JVMs write redirected output in the system ANSI code page.
+/// Prefer valid UTF-8 (modern JVMs/mod loggers); decode legacy output before
+/// redaction and saving our own UTF-8 log. This never changes JVM input paths.
+pub(crate) fn decode_output(bytes: &[u8]) -> std::borrow::Cow<'_, str> {
+    #[cfg(windows)]
+    {
+        decode_windows_output(bytes, windows_sys::Win32::Globalization::CP_ACP)
+    }
+    #[cfg(not(windows))]
+    {
+        String::from_utf8_lossy(bytes)
+    }
+}
+
+#[cfg(windows)]
+fn decode_windows_output(bytes: &[u8], code_page: u32) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    use windows_sys::Win32::Globalization::{MB_ERR_INVALID_CHARS, MultiByteToWideChar};
+    if let Ok(text) = std::str::from_utf8(bytes) {
+        return Cow::Borrowed(text);
+    }
+    let Ok(len) = i32::try_from(bytes.len()) else {
+        return String::from_utf8_lossy(bytes);
+    };
+    // Each input byte produces at most one UTF-16 code unit in Windows' ANSI
+    // encodings. The source and initialized destination stay alive for the call.
+    let mut wide = vec![0u16; bytes.len()];
+    let written = unsafe {
+        MultiByteToWideChar(
+            code_page,
+            MB_ERR_INVALID_CHARS,
+            bytes.as_ptr(),
+            len,
+            wide.as_mut_ptr(),
+            len,
+        )
+    };
+    if written > 0 {
+        Cow::Owned(String::from_utf16_lossy(&wide[..written as usize]))
+    } else {
+        String::from_utf8_lossy(bytes)
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct JavaInfo {
     pub path: String,
@@ -101,7 +204,7 @@ impl JavaRequirement {
     }
 }
 pub async fn inspect(path: &Path) -> Result<JavaInfo> {
-    let mut command = tokio::process::Command::new(path);
+    let mut command = background_command(path);
     command
         .args(["-XshowSettings:properties", "-version"])
         .kill_on_drop(true);
@@ -112,8 +215,7 @@ pub async fn inspect(path: &Path) -> Result<JavaInfo> {
     if !output.status.success() {
         bail!("Java 无法运行：{}", path.display());
     }
-    let version = String::from_utf8_lossy(&output.stderr).to_string()
-        + &String::from_utf8_lossy(&output.stdout);
+    let version = decode_output(&output.stderr).into_owned() + &decode_output(&output.stdout);
     let re = regex::Regex::new(r#"version\s+"(\d+)(?:\.(\d+))?"#)?;
     let captures = re
         .captures(&version)
@@ -437,6 +539,98 @@ fn extract_runtime(archive: &Path, dest: &Path, cancel: &CancellationToken) -> R
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn windowed_java_is_selected_only_from_the_same_runtime_and_keeps_a_fallback() {
+        let temp = tempfile::tempdir().unwrap();
+        let java = temp.path().join("java.exe");
+        let javaw = temp.path().join("javaw.exe");
+        std::fs::write(&java, b"console runtime").unwrap();
+        assert_eq!(super::game_executable_for(&java, true), java);
+        std::fs::write(&javaw, b"windowed runtime").unwrap();
+        assert_eq!(super::game_executable_for(&java, true), javaw);
+        assert_eq!(super::game_executable_for(&java, false), java);
+        let custom = temp.path().join("custom-java.exe");
+        assert_eq!(super::game_executable_for(&custom, true), custom);
+        assert_eq!(super::game_executable_for(&javaw, true), javaw);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn windows_background_process_has_no_console_and_keeps_output() {
+        if std::env::var_os("NEKOCRATE_TEST_NO_CONSOLE").is_some() {
+            assert!(unsafe { windows_sys::Win32::System::Console::GetConsoleWindow() }.is_null());
+            println!("nekocrate-piped-output");
+            return;
+        }
+        let output = super::background_command(&std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "java::tests::windows_background_process_has_no_console_and_keeps_output",
+                "--nocapture",
+            ])
+            .env("NEKOCRATE_TEST_NO_CONSOLE", "1")
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert!(String::from_utf8_lossy(&output.stdout).contains("nekocrate-piped-output"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_jvm_logs_decode_legacy_chinese_without_damaging_utf8() {
+        let text = r"E:\游戏\逆转未来\.minecraft";
+        let gbk = b"E:\\\xd3\xce\xcf\xb7\\\xc4\xe6\xd7\xaa\xce\xb4\xc0\xb4\\.minecraft";
+        assert_eq!(super::decode_windows_output(gbk, 936), text);
+        assert_eq!(super::decode_windows_output(text.as_bytes(), 936), text);
+        assert_eq!(super::decode_windows_output(b"", 936), "");
+        assert_eq!(
+            super::decode_windows_output(b"INFO: ready", 936),
+            "INFO: ready"
+        );
+        assert_eq!(
+            super::decode_windows_output(b"broken \x81", 936),
+            "broken \u{fffd}"
+        );
+    }
+
+    #[test]
+    fn windows_java_paths_preserve_unicode_and_normalize_only_filesystem_prefixes() {
+        for (input, expected) in [
+            (
+                r"\\?\E:\Games\MC\2026.5-逆转未来\猫咪 盒子\.minecraft",
+                r"E:\Games\MC\2026.5-逆转未来\猫咪 盒子\.minecraft",
+            ),
+            (
+                r"\\?\E:\逆转未来\.minecraft\libraries/cpw/mods/bootstraplauncher/1.1.2/bootstraplauncher-1.1.2.jar",
+                r"E:\逆转未来\.minecraft\libraries/cpw/mods/bootstraplauncher/1.1.2/bootstraplauncher-1.1.2.jar",
+            ),
+            (
+                r"\\?\UNC\服务器\共享目录\MC\.minecraft",
+                r"\\服务器\共享目录\MC\.minecraft",
+            ),
+            (r"E:\Games\普通 路径", r"E:\Games\普通 路径"),
+            (r"\\server\share\MC", r"\\server\share\MC"),
+            (r"\\.\pipe\example", r"\\.\pipe\example"),
+            (r"\\?\Volume{example}\MC", r"\\?\Volume{example}\MC"),
+            (
+                "/home/player/\\\\?\\E:\\game",
+                "/home/player/\\\\?\\E:\\game",
+            ),
+        ] {
+            assert_eq!(super::windows_argument_path(input), expected);
+        }
+        #[cfg(not(windows))]
+        assert_eq!(
+            super::argument_path(std::path::Path::new(r"\\?\E:\literal-unix-name")),
+            r"\\?\E:\literal-unix-name"
+        );
+    }
+
     use super::*;
     #[test]
     fn modern_loader_auto_selection_requires_jdk_but_explicit_newer_java_is_allowed() {

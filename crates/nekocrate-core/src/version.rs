@@ -436,7 +436,7 @@ pub fn check_launch_files(root: &Path, game: &Path, resolved: &ResolvedVersion) 
         .iter()
         .filter(|l| minecraft::is_allowed_on(l, runtime_arch))
     {
-        if let Some(a) = &library.downloads.artifact {
+        if let Some(a) = minecraft::classpath_artifact(library) {
             files.push(local_library(root, game, a)?);
         }
         if let Some(a) = minecraft::native_artifact(library) {
@@ -455,6 +455,7 @@ pub fn describe(root: &Path, game: &Path, id: &str) -> InstanceVersion {
     match resolve(root, game, id) {
         Ok(resolved) => InstanceVersion {
             id: id.into(),
+            name: None,
             minecraft_version: Some(resolved.minecraft_version.clone()),
             loader: resolved.loader.clone(),
             installed: check_launch_files(root, game, &resolved).is_ok(),

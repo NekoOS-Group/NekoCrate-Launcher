@@ -1,5 +1,26 @@
 /** Launcher-owned messages only. Game output and user-supplied values are never translated. */
 export const backendEnglish: Readonly<Record<string, string>> = {
+  "子实例名称应为 1–80 个字符，且不能包含控制字符":
+    "Version names must contain 1–80 characters and no control characters",
+  "有任务正在运行，请稍后删除版本":
+    "A task is running. Try deleting the version after it finishes",
+  "无法检查版本依赖：{version}":
+    "Could not check version dependencies: {version}",
+  "版本 {version} 仍依赖此版本，请先删除依赖它的子实例":
+    "Version {version} still depends on this version. Remove the dependent version first",
+  "无法移除版本目录，请关闭占用这些文件的程序":
+    "Could not move the version directory. Close programs using its files",
+  "保存删除结果失败，版本文件保留在：{path}":
+    "Could not save the deletion. Version files remain at: {path}",
+  无法读取游戏内容目录: "Could not read the game content directory",
+  "无法读取 Mod 目录": "Could not read the mods directory",
+  请选择外部文件夹: "Choose an external folder",
+  "无法访问外部文件夹，请重新选择":
+    "Cannot access the external folder; choose it again",
+  "该位置已有 .minecraft，请导入已有目录或选择其他位置":
+    "This location already contains .minecraft; import the existing folder or choose another location",
+  "无法创建游戏目录，请检查文件夹权限":
+    "Cannot create the game folder; check folder permissions",
   请等待当前任务完成后关联:
     "Wait for the current task to finish before linking",
   "有任务正在运行，请稍后关联实例":
@@ -323,8 +344,8 @@ export const backendEnglish: Readonly<Record<string, string>> = {
   "导入来源必须是一个目录：{0}": "Import source must be a folder: {0}",
   "请选择含 saves、mods、versions 或 options.txt 的游戏目录":
     "Choose a game folder containing saves, mods, versions or options.txt",
-  "游戏目录不能与启动器数据目录重叠，请选择原有的独立游戏目录":
-    "The game folder must not overlap the launcher data folder. Choose a separate existing game folder",
+  "游戏目录不能与启动器数据目录重叠，请选择其他位置":
+    "The game folder must not overlap the launcher data folder. Choose another location",
   "此目录已由实例「{0}」使用，不能重复添加或嵌套关联":
     "This folder is already used by instance “{0}”. Duplicate or nested links are not allowed",
   "有任务正在运行，请稍后移除实例":
