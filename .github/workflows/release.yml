@@ -136,7 +136,7 @@ jobs:
             bundles: nsis
           - os: ubuntu-22.04
             platform: linux-amd64
-            image: ghcr.io/nekoos-group/nekocrate-linux-builder@sha256:dc91e5b86243c9114e7e70b10393b0a9c9ed94945b8194996591ae00a742ec7b
+            image: ghcr.io/nekoos-group/nekocrate-linux-builder@sha256:28ed1cb76480e7a82a7dbf0b534640ddacca72e2da47c85b41532b2aadec5ce4
             target: x86_64-unknown-linux-gnu
             bundles: deb,appimage
     runs-on: ${{ matrix.os }}
@@ -158,6 +158,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.prepare.outputs.commit }}
+      - name: Trust the mounted release checkout
+        if: runner.os == 'Linux'
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: dtolnay/rust-toolchain@1.93.1
         with:
           targets: ${{ matrix.target }}
@@ -189,12 +192,7 @@ jobs:
         run: python scripts/frontend_artifact.py verify app/dist
       - name: Ensure AppImage packaging tools
         if: runner.os == 'Linux'
-        run: |
-          # Older pinned builder images predate this packaging dependency.
-          if ! command -v file >/dev/null; then
-            bash scripts/install_linux_dependencies.sh file
-          fi
-          file --version
+        run: file --version
       - name: Build release installers
         run: node "$RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" build --verbose --config src-tauri/tauri.release.conf.json --target "${{ matrix.target }}" --bundles "${{ matrix.bundles }}" --ci -- --locked
         working-directory: app

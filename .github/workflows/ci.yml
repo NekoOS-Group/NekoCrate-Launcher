@@ -26,7 +26,7 @@ jobs:
       packages: read
     container:
       # Fork PR tokens may not read the repository's container package.
-      image: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'ghcr.io/nekoos-group/nekocrate-linux-builder@sha256:dc91e5b86243c9114e7e70b10393b0a9c9ed94945b8194996591ae00a742ec7b' || '' }}
+      image: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'ghcr.io/nekoos-group/nekocrate-linux-builder@sha256:28ed1cb76480e7a82a7dbf0b534640ddacca72e2da47c85b41532b2aadec5ce4' || '' }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ github.token }}
