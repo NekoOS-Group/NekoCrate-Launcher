@@ -1,0 +1,43 @@
+name: Maintain build caches
+
+on:
+  schedule:
+    - cron: "17 20 * * *"
+  workflow_run:
+    workflows: ["Check source", "Build and publish preview release", "Build Linux dependency image"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Only report candidates, without deleting
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: cache-maintenance
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      (github.event.workflow_run.head_repository.full_name == github.repository &&
+       github.event.workflow_run.head_branch == github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - name: Prune obsolete Rust and npm caches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: |
+          args=()
+          if [ "$DRY_RUN" != true ]; then args+=(--apply); fi
+          python3 scripts/cache_cleanup.py "${args[@]}"

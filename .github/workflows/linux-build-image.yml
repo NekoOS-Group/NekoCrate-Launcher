@@ -1,0 +1,144 @@
+name: Build Linux dependency image
+
+on:
+  push:
+    branches: [neko_dev]
+    paths:
+      - .github/linux-builder/**
+      - .github/workflows/linux-build-image.yml
+      - scripts/install_linux_dependencies.sh
+      - scripts/linux_build_packages.txt
+      - scripts/benchmark_linux_setup.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-dependency-image
+  cancel-in-progress: false
+
+jobs:
+  image:
+    name: Build Ubuntu 22.04 dependency image
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.build.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Authenticate to the repository container registry
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Build and publish a candidate by immutable digest
+        id: build
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          image="ghcr.io/${OWNER,,}/nekocrate-linux-builder:candidate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          docker build --pull --file .github/linux-builder/Dockerfile --label "org.opencontainers.image.revision=$GITHUB_SHA" --tag "$image" .
+          docker push "$image"
+          digest=$(docker image inspect --format '{{index .RepoDigests 0}}' "$image")
+          echo "image=$digest" >> "$GITHUB_OUTPUT"
+
+  benchmark:
+    name: Cold setup (${{ matrix.method }}, sample ${{ matrix.sample }})
+    needs: image
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        method: [apt, image]
+        sample: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Authenticate image pull
+        if: matrix.method == 'image'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+      - name: Measure environment setup on a fresh runner
+        env:
+          METHOD: ${{ matrix.method }}
+          SAMPLE: ${{ matrix.sample }}
+          IMAGE: ${{ needs.image.outputs.image }}
+        run: python3 scripts/benchmark_linux_setup.py --method "$METHOD" --sample "$SAMPLE" --image "$IMAGE"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-setup-${{ matrix.method }}-${{ matrix.sample }}
+          path: artifacts/linux-setup/*.json
+          retention-days: 14
+
+  validate:
+    name: Validate native tools and Actions inside the candidate
+    needs: image
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: read
+    container:
+      image: ${{ needs.image.outputs.image }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ github.token }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify runtimes and link the native WebKit library
+        run: |
+          rustc --version
+          node --version
+          python -c 'import ssl, sqlite3, lzma, bz2, ctypes, tomllib; print(ssl.OPENSSL_VERSION)'
+          printf '#include <webkit2/webkit2.h>\nint main(void) { return webkit_get_major_version() < 2; }\n' > /tmp/webkit-smoke.c
+          cc /tmp/webkit-smoke.c $(pkg-config --cflags --libs webkit2gtk-4.1) -o /tmp/webkit-smoke
+          /tmp/webkit-smoke
+          python -m unittest discover -s scripts/tests
+
+  compare:
+    name: Compare timings and promote only with a measured benefit
+    needs: [image, benchmark, validate]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: linux-setup-*
+          path: artifacts/linux-setup-samples
+          merge-multiple: true
+      - name: Compare three samples per method
+        id: compare
+        run: python3 scripts/benchmark_linux_setup.py --compare artifacts/linux-setup-samples
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-setup-comparison
+          path: artifacts/linux-setup/comparison.json
+          retention-days: 90
+      - name: Promote the faster candidate
+        if: steps.compare.outputs.promote == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ${{ needs.image.outputs.image }}
+        run: |
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          docker buildx imagetools create --tag "${IMAGE%@*}:jammy-v1" "$IMAGE"

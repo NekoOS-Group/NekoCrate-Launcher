@@ -1,0 +1,7 @@
+**
+!scripts/
+!scripts/install_linux_dependencies.sh
+!scripts/linux_build_packages.txt
+!.github/
+!.github/linux-builder/
+!.github/linux-builder/Dockerfile

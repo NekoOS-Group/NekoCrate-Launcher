@@ -1,0 +1,8 @@
+libwebkit2gtk-4.1-dev
+build-essential
+libssl-dev
+librsvg2-dev
+libayatana-appindicator3-dev
+libdbus-1-dev
+libfuse2
+patchelf
