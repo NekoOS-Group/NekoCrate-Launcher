@@ -310,6 +310,35 @@ impl Downloader {
         }
         bail!("无法获取元数据，请检查网络或切换下载源：{last}")
     }
+    /// Maven profiles can omit hashes; fetch the repository's small SHA-1 sidecar
+    /// through the same proxy/source policy before adding a file to the cache.
+    pub async fn maven_sha1(&self, url: &str, cancel: &CancellationToken) -> Result<String> {
+        let mut last = String::new();
+        for candidate in self.ordered_urls(&format!("{url}.sha1"), cancel).await? {
+            for _ in 0..=self.settings.retries {
+                let result: Result<String> = tokio::select! {
+                    _ = cancel.cancelled() => bail!("操作已取消"),
+                    r = async {
+                        let mut response = self.client.get(&candidate).timeout(Duration::from_secs(30)).send().await?.error_for_status()?;
+                        let mut bytes = Vec::new();
+                        while let Some(chunk) = response.chunk().await? {
+                            if bytes.len() + chunk.len() > 1024 { bail!("Maven 校验文件过大"); }
+                            bytes.extend_from_slice(&chunk);
+                        }
+                        let text = std::str::from_utf8(&bytes)?;
+                        let hash = text.split_whitespace().next().unwrap_or("");
+                        if hash.len() != 40 || !hash.bytes().all(|c| c.is_ascii_hexdigit()) { bail!("Maven 校验值无效"); }
+                        Ok(hash.to_ascii_lowercase())
+                    } => r,
+                };
+                match result {
+                    Ok(hash) => return Ok(hash),
+                    Err(error) => last = format!("{error:#}"),
+                }
+            }
+        }
+        bail!("无法获取依赖校验值：{last}")
+    }
     pub async fn verified(path: &Path, hash: &str, sha256: bool, size: u64) -> Result<bool> {
         crate::verification::verify_full(path, hash, sha256, size).await
     }

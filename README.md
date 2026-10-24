@@ -12,20 +12,24 @@
 | --- | --- |
 | 账户 | Microsoft 设备验证码授权 → Xbox Live → XSTS → Minecraft；权益与档案检查；刷新令牌；多账户切换/移除；未登录时以 Player 本地身份启动 |
 | 凭据 | 刷新令牌存入 macOS Keychain / Windows Credential Manager / Linux Secret Service；数据库与前端不接收令牌 |
-| 游戏 | 官方版本目录、版本元数据、客户端、库、资源索引、资源对象、原生库、日志配置；按规则构建 JVM 与游戏参数 |
-| Java | 检测 JAVA_HOME、PATH、托管运行时；按游戏要求选择 Java；通过 Adoptium 自动下载并验证 SHA-256；实例可指定路径 |
+| 游戏 | 原版与 Fabric 安装；已有 Fabric / Forge / NeoForge 版本启动；版本继承、现代/旧式启动参数、依赖与原生库解析 |
+| Java | 检测本机及托管运行时；综合已知加载器范围、ASM 与模组声明选择兼容 Java，优先复用本地版本；信息不足时保守匹配；现代加载器自动使用完整 JDK；下载 SHA-256 校验 |
+| 内存 | 自动（默认）、推荐、最小、自定义；按游戏版本、Mod 规模及支持的整合包声明估算；启动前重新读取可用内存 |
 | 下载 | 1–32 并发与自适应、暂停/继续、重试、取消、HTTP Range 续传、SHA-1/SHA-256 和长度校验、共享内容缓存；游戏源自动测速与回退、官方/BMCLAPI 手动选择；独立 Mod 源设置与系统/手动代理 |
 | 修复 | 校验游戏文件；损坏文件优先从已校验缓存恢复，再重新下载；安装中断后不标记为可启动 |
 | 实例 | 每个实例对应一个 `.minecraft`；已有目录直接关联原路径并在其中读写资源和依赖；同一实例添加、切换多个版本，共用存档/配置；Java/内存设置 |
-| 进程 | 直接启动 Java，不经过 shell；工作目录隔离；实时 stdout/stderr、脱敏日志、停止游戏、退出状态 |
-| 界面 | 简体中文 / English / 跟随系统；可同步 Minecraft 语言；实例拖拽排序；官方发布更新检查 |
+| 进程 | 直接启动 Java，不经过 shell；工作目录隔离；实时 stdout/stderr、脱敏日志；异常退出自动打开日志，正常退出与主动停止不弹出 |
+| 界面 | 简体中文 / English / 跟随系统；可同步 Minecraft 语言；实例拖拽排序；应用内下载更新、验签、安装与重启 |
 
 ## 支持边界
 
-- 原型支持官方原版 Java Edition 1.13 及更新版本的元数据协议。Apple Silicon 使用带原生 ARM 库的 1.19+。并未逐个版本验证。
-- Forge、Fabric、NeoForge、Quilt、外置认证、Bedrock 尚未实现。迁入的模组会保留，但原版不会加载这些模组。
+- 支持原版与 Fabric 的下载安装；Forge / NeoForge 本阶段支持启动已有安装，尚不执行其安装器的 processors 或自动修复生成的补丁文件。不是整合包下载器，也不自动安装 Fabric API / 其他模组。
+- 已有关联目录会在启动器启动时重新识别版本。支持 `inheritsFrom` 和 HMCL 合并配置；有隔离目录的整合包保留 `versions/<子实例>` 中的模组、配置和存档，普通版本继续共用 `.minecraft`。
+- 支持旧式 Forge 启动参数；Apple Silicon 上缺少 ARM 原生库的旧版本匹配 Intel Java，需要系统可运行 Intel 程序。没有逐个游戏、加载器及整合包版本做实机验证。
+- 外置认证、Bedrock、Quilt 安装尚未实现。
 - 下载恢复支持 HTTP Range 字节级续传；未变化的完整文件复用持久化校验记录，主动修复仍完整校验。服务器不支持续传时安全地重新下载对应文件。
 - 关联目录移除后仍保留原处，只取消关联；启动器内新建的托管实例移除后移至 `trash/`，不永久删除。
+- 将文件夹拖入桌面窗口，会在后台查找它及下层隐藏的 `.minecraft`。单个新目录直接关联，多个目录先预览勾选；默认名称取游戏目录的上层文件夹名。同目录不重复添加，游戏文件保持原位。扫描可取消，关联提示显示名称与路径并在 2 秒后消失。
 - 自动 Java 下载依赖 Adoptium/GitHub 网络。无法访问时，可在实例设置中指定对应主版本的本地 Java。
 - macOS 是本地验证平台；Windows/Linux 配置了 CI 构建检查，未经本机实测。
 
@@ -60,7 +64,11 @@ npm run tauri build
 
 普通 CI 在 Linux 上集中执行一次前端测试与构建、Rust 完整测试、格式检查和 Clippy；Windows/macOS 仅补充文件系统差异测试，不再各自重复整套检查或编译桌面测试程序。通过检查的前端产物保留 14 天。
 
-开发版本发布由 `.github/workflows/release.yml` 管理：先将提交推送到 `neko_dev` / `main`，再推送 `dev*` 标签；标签任务将构建调度到默认分支，复用跨版本的 Rust 发布缓存（手动发布也选择默认分支），实际源码仍固定为标签提交；发布等待相同提交的 CI 成功，直接复用其前端产物，不再安装前端依赖、重跑检查或重建前端。三个原生 runner 仅安装锁定版本的 Tauri CLI，在编译前检查前端入口与资源，编译后执行实际二进制的 `--verify-frontend`，不打开窗口或用户数据；分别编译并打包 macOS ARM64、Windows AMD64、Ubuntu 22.04 AMD64。全部成功后校验来源提交、架构与 SHA-256，上传 DMG / app ZIP、NSIS EXE、DEB / AppImage，再公开 GitHub 预发布版。若 CI 失败或产物已过期，需要先重跑对应提交的 CI，再重跑发布任务。构建使用 Rust 1.93.1、Node.js 22 和锁定依赖，`docs/releases/<标签>.md` 保存发布说明。`dev0.1` 对应应用版本 `0.1.0-dev.1`；`dev0.2` 对应 `0.2.0-dev.1`；`dev0.3` 对应 `0.3.0-dev.1`；`dev0.3.1` 对应 `0.3.1-dev.1`；`dev0.3.2` 对应 `0.3.2-dev.1`；`dev0.4` 对应 `0.4.0-dev.1`。
+开发版本发布由 `.github/workflows/release.yml` 管理：先将提交推送到 `neko_dev` / `main`，再推送 `dev*` 标签；标签任务将构建调度到默认分支，复用跨版本的 Rust 发布缓存（手动发布也选择默认分支），实际源码仍固定为标签提交；发布等待相同提交的 CI 成功，直接复用其前端产物，不再安装前端依赖、重跑检查或重建前端。三个原生 runner 仅安装锁定版本的 Tauri CLI，在编译前检查前端入口与资源，编译后执行实际二进制的 `--verify-frontend`，不打开窗口或用户数据；分别编译并打包 macOS ARM64、Windows AMD64、Ubuntu 22.04 AMD64。全部成功后校验来源提交、架构与 SHA-256，上传 DMG / app ZIP、NSIS EXE、DEB / AppImage，再公开 GitHub 预发布版。若 CI 失败或产物已过期，需要先重跑对应提交的 CI，再重跑发布任务。构建使用 Rust 1.93.1、Node.js 22 和锁定依赖，`docs/releases/<标签>.md` 保存发布说明。`dev0.1` 对应应用版本 `0.1.0-dev.1`；`dev0.2` 对应 `0.2.0-dev.1`；`dev0.3` 对应 `0.3.0-dev.1`；`dev0.3.1` 对应 `0.3.1-dev.1`；`dev0.3.2` 对应 `0.3.2-dev.1`；`dev0.4` 对应 `0.4.0-dev.1`；`dev0.5` 对应 `0.5.0-dev.1`。
+
+应用内更新使用 Tauri updater：macOS 安装后的 `.app`、Windows NSIS 安装版和 Linux AppImage 支持下载、签名验证、安装替换及重启；开发模式、未安装的 macOS 二进制和 Linux DEB 保留手动安装入口。下载可取消，游戏或下载任务运行时保留准备好的更新，任务结束后点击「安装并重启」。已发布的 dev0.4 及以前版本仍需手动安装一次带更新器的新版本。
+
+发布 workflow 需要仓库 Actions Secret `TAURI_SIGNING_PRIVATE_KEY`，加密私钥另设 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。公钥固定在 `tauri.conf.json`；私钥保存在仓库外并备份，不能提交。发布额外生成 macOS `.app.tar.gz`、各平台 `.sig` 和 `latest.json`，清单绑定当前发布标签、版本及平台。客户端同时验证 HTTPS、更新签名及签名中的版本；该签名独立于 Apple / Windows 代码签名。
 
 macOS 开发包采用 [Tauri ad-hoc 签名](https://v2.tauri.app/distribute/sign/macos/#ad-hoc-signing)，未做 Apple 公证；Windows 开发包没有发布者代码签名。Linux 使用英文包名满足包管理器命名要求，桌面入口及窗口仍显示「猫咪盒子启动器」。
 

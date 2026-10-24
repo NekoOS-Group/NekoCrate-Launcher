@@ -1,7 +1,7 @@
 use crate::{
     download::{Downloader, FileSpec, artifact_file, check_cancel},
     model::*,
-    storage,
+    storage, version,
 };
 use anyhow::{Context, Result, bail};
 use std::{
@@ -14,7 +14,8 @@ use tokio_util::sync::CancellationToken;
 
 pub const MANIFEST: &str = "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json";
 const MANIFEST_MISS_TTL: Duration = Duration::from_secs(15 * 60);
-const UNKNOWN_VERSION: &str = "未在官方版本目录中找到此版本；自定义加载器版本暂不支持";
+const UNKNOWN_VERSION: &str =
+    "未在官方版本目录中找到此版本，请检查游戏版本号或关联已安装的加载器目录";
 const CUSTOM_VERSION: &str = "该本地版本使用自定义加载器，启动器暂不支持安装或修复";
 const LEGACY_VERSION: &str =
     "当前原型支持 Minecraft 1.13 及更新的官方版本；旧版本启动协议将在后续加入。";
@@ -123,7 +124,10 @@ pub fn rules_allow(rules: &[Rule], os: &str, arch: &str, features: &HashMap<Stri
     let mut allowed = false;
     for rule in rules {
         if let Some(r) = &rule.os {
-            if r.name.as_deref().is_some_and(|n| n != os) {
+            if r.name
+                .as_deref()
+                .is_some_and(|n| n != os && n != "universal")
+            {
                 continue;
             }
             if r.arch
@@ -162,6 +166,9 @@ pub fn rules_allow(rules: &[Rule], os: &str, arch: &str, features: &HashMap<Stri
 pub fn is_allowed(library: &Library) -> bool {
     rules_allow(&library.rules, os_name(), arch_name(), &HashMap::new())
 }
+pub fn is_allowed_on(library: &Library, arch: &str) -> bool {
+    rules_allow(&library.rules, os_name(), arch, &HashMap::new())
+}
 pub async fn manifest(
     root: &Path,
     downloader: &Downloader,
@@ -199,19 +206,8 @@ pub async fn version(
     if v.id != id || v.inherits_from.is_some() {
         bail!("当前原型仅支持独立的官方 Java 版元数据");
     }
-    if v.arguments.is_none() {
-        bail!(LEGACY_VERSION);
-    }
-    if cfg!(all(target_os = "macos", target_arch = "aarch64"))
-        && v.libraries
-            .iter()
-            .any(|l| l.name.starts_with("org.lwjgl:lwjgl:"))
-        && !v
-            .libraries
-            .iter()
-            .any(|l| l.name.contains("natives-macos-arm64"))
-    {
-        bail!("此版本未提供 Apple Silicon 原生库；原型在 Apple Silicon 上请使用 1.19 或更新版本。");
+    if v.arguments.is_none() && v.minecraft_arguments.is_none() {
+        bail!("版本配置缺少启动参数");
     }
     Ok(v)
 }
@@ -247,14 +243,17 @@ fn asset_index_file(game: &Path, v: &Version) -> Result<FileSpec> {
 }
 
 fn installation_files(game: &Path, v: &Version, index: &AssetIndex) -> Result<Vec<FileSpec>> {
+    let runtime_arch = crate::java::JavaRequirement::for_version(v).arch;
     let mut files = vec![];
     files.push(artifact_file(
         v.downloads.get("client").context("元数据缺少客户端文件")?,
-        game.join("versions")
-            .join(&v.id)
-            .join(format!("{}.jar", v.id)),
+        version::client_path(game, v)?,
     ));
-    for library in v.libraries.iter().filter(|l| is_allowed(l)) {
+    for library in v
+        .libraries
+        .iter()
+        .filter(|l| is_allowed_on(l, runtime_arch))
+    {
         if let Some(a) = &library.downloads.artifact {
             files.push(artifact_file(a, library_path(game, a)?));
         }
@@ -299,20 +298,31 @@ pub async fn cached_installation_files(
     id: &str,
 ) -> Result<Vec<FileSpec>> {
     storage::safe_version(id)?;
-    let manifest: VersionManifest = storage::read_json(&root.join("metadata/manifest.json"))?;
-    let entry = manifest
-        .versions
-        .iter()
-        .find(|entry| entry.id == id)
-        .context(UNKNOWN_VERSION)?;
-    let path = root.join("metadata/versions").join(format!("{id}.json"));
-    if !Downloader::verified(&path, &entry.sha1, false, 0).await? {
-        bail!("版本元数据未缓存");
-    }
-    let v: Version = storage::read_json(&path)?;
-    if v.id != id || v.inherits_from.is_some() {
-        bail!(CUSTOM_VERSION);
-    }
+    let local = version::resolve(root, game, id).ok().filter(|resolved| {
+        resolved
+            .loader
+            .as_ref()
+            .is_some_and(|loader| loader.kind == "fabric")
+    });
+    let v = if let Some(resolved) = local {
+        resolved.version
+    } else {
+        let manifest: VersionManifest = storage::read_json(&root.join("metadata/manifest.json"))?;
+        let entry = manifest
+            .versions
+            .iter()
+            .find(|entry| entry.id == id)
+            .context(UNKNOWN_VERSION)?;
+        let path = root.join("metadata/versions").join(format!("{id}.json"));
+        if !Downloader::verified(&path, &entry.sha1, false, 0).await? {
+            bail!("版本元数据未缓存");
+        }
+        let v: Version = storage::read_json(&path)?;
+        if v.id != id || v.inherits_from.is_some() {
+            bail!(CUSTOM_VERSION);
+        }
+        v
+    };
     let index_file = asset_index_file(game, &v)?;
     let path = if Downloader::verified(&index_file.path, &index_file.hash, false, index_file.size)
         .await?
@@ -352,7 +362,12 @@ pub async fn install_files(
         std::fs::remove_dir_all(&natives)?;
     }
     std::fs::create_dir_all(&natives)?;
-    for library in v.libraries.iter().filter(|l| is_allowed(l)) {
+    let runtime_arch = crate::java::JavaRequirement::for_version(v).arch;
+    for library in v
+        .libraries
+        .iter()
+        .filter(|l| is_allowed_on(l, runtime_arch))
+    {
         if let Some(a) = native_artifact(library) {
             extract_natives(
                 &library_path(game, a)?,
@@ -459,7 +474,29 @@ pub fn arguments(
     instance: &Instance,
     account: &LaunchSession,
 ) -> Result<Vec<String>> {
+    let memory = crate::memory::options(root, instance).allocation(
+        crate::memory::MemoryConfig {
+            mode: instance.memory_mode,
+            custom_mb: instance.memory_mb,
+        },
+        crate::java::JavaRequirement::for_version(v).arch,
+    )?;
+    arguments_with_memory(v, root, instance, account, memory)
+}
+
+pub fn arguments_with_memory(
+    v: &Version,
+    root: &Path,
+    instance: &Instance,
+    account: &LaunchSession,
+    memory_mb: u32,
+) -> Result<Vec<String>> {
+    if !(512..=65536).contains(&memory_mb) {
+        bail!("内存应为 512–65536 MiB");
+    }
+    let runtime_arch = crate::java::JavaRequirement::for_version(v).arch;
     let game = instance.game_dir(root);
+    let working_directory = version::working_directory(&game, v)?;
     let native = game.join("versions").join(&v.id).join("natives");
     // New installations live entirely in their .minecraft directory. Keep a
     // read-only fallback for games installed by releases with shared storage.
@@ -477,7 +514,11 @@ pub fn arguments(
         root.join("libraries")
     };
     let mut classpath = vec![];
-    for l in v.libraries.iter().filter(|l| is_allowed(l)) {
+    for l in v
+        .libraries
+        .iter()
+        .filter(|l| is_allowed_on(l, runtime_arch))
+    {
         if let Some(a) = &l.downloads.artifact {
             let local = library_path(&game, a)?;
             let legacy = library_path(root, a)?;
@@ -490,11 +531,9 @@ pub fn arguments(
         }
     }
     classpath.push(
-        game.join("versions")
-            .join(&v.id)
-            .join(format!("{}.jar", v.id))
+        version::client_path(&game, v)?
             .to_string_lossy()
-            .into(),
+            .into_owned(),
     );
     let separator = if cfg!(windows) { ";" } else { ":" };
     let mut vars = HashMap::from([
@@ -506,7 +545,11 @@ pub fn arguments(
         ("user_properties", "{}".into()),
         ("version_name", v.id.clone()),
         ("version_type", v.kind.clone()),
-        ("game_directory", game.to_string_lossy().into()),
+        ("game_directory", working_directory.to_string_lossy().into()),
+        (
+            "primary_jar_name",
+            format!("{}.jar", v.jar.as_deref().unwrap_or(&v.id)),
+        ),
         ("assets_root", assets.to_string_lossy().into()),
         ("assets_index_name", v.asset_index.id.clone()),
         ("natives_directory", native.to_string_lossy().into()),
@@ -528,9 +571,26 @@ pub fn arguments(
             .to_string_lossy()
             .into(),
     );
-    let mut args = vec![format!("-Xmx{}M", instance.memory_mb), "-Xms256M".into()];
-    let config = v.arguments.as_ref().context("不支持旧版本启动参数")?;
-    args.extend(expand(&config.jvm, &vars)?);
+    let mut args = Vec::new();
+    if let Some(config) = &v.arguments {
+        if config.jvm.is_empty() {
+            args.extend(expand_for_arch(&legacy_jvm(), &vars, runtime_arch)?);
+        } else {
+            args.extend(expand_for_arch(&config.jvm, &vars, runtime_arch)?);
+        }
+    } else {
+        args.extend(expand_for_arch(&legacy_jvm(), &vars, runtime_arch)?);
+    }
+    // The chosen preset owns the heap flags. Imported profile options must not
+    // override it or leave an initial heap larger than the selected maximum.
+    args.retain(|arg| {
+        !arg.starts_with("-Xmx")
+            && !arg.starts_with("-Xms")
+            && !arg.starts_with("-XX:MaxHeapSize=")
+            && !arg.starts_with("-XX:InitialHeapSize=")
+    });
+    args.insert(0, "-Xms256M".into());
+    args.insert(0, format!("-Xmx{memory_mb}M"));
     if let Some(log) = v.logging.as_ref().and_then(|l| l.get("client"))
         && let (Some(argument), Some(id)) = (log["argument"].as_str(), log["file"]["id"].as_str())
     {
@@ -552,17 +612,121 @@ pub fn arguments(
         );
     }
     args.push(v.main_class.clone());
-    args.extend(expand(&config.game, &vars)?);
+    if let Some(legacy) = &v.minecraft_arguments {
+        let tokens = split_legacy_arguments(legacy)?
+            .into_iter()
+            .map(Argument::Plain)
+            .collect::<Vec<_>>();
+        args.extend(expand_for_arch(&tokens, &vars, runtime_arch)?);
+        if let Some(config) = &v.arguments {
+            args.extend(expand_for_arch(&config.game, &vars, runtime_arch)?);
+        }
+    } else if let Some(config) = &v.arguments {
+        args.extend(expand_for_arch(&config.game, &vars, runtime_arch)?);
+    } else {
+        bail!("版本配置缺少启动参数");
+    }
     Ok(args)
 }
+fn legacy_jvm() -> Vec<Argument> {
+    [
+        "-Djava.library.path=${natives_directory}",
+        "-Dminecraft.launcher.brand=${launcher_name}",
+        "-Dminecraft.launcher.version=${launcher_version}",
+        "-cp",
+        "${classpath}",
+    ]
+    .into_iter()
+    .map(|s| Argument::Plain(s.into()))
+    .collect()
+}
+
+/// Tokenize the old launcher format before substitution. Never invoke a shell;
+/// a substituted username/path (including spaces or shell syntax) stays one argument.
+fn split_legacy_arguments(input: &str) -> Result<Vec<String>> {
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut quote = None;
+    let mut started = false;
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' if chars
+                .peek()
+                .is_some_and(|next| Some(*next) == quote || *next == '\\') =>
+            {
+                token.push(chars.next().unwrap());
+                started = true;
+            }
+            '\'' | '"' if quote.is_none() => {
+                quote = Some(c);
+                started = true;
+            }
+            c if quote == Some(c) => quote = None,
+            c if c.is_whitespace() && quote.is_none() => {
+                if started {
+                    tokens.push(std::mem::take(&mut token));
+                    started = false;
+                }
+            }
+            c => {
+                token.push(c);
+                started = true;
+            }
+        }
+    }
+    if quote.is_some() {
+        bail!("旧版启动参数的引号未闭合");
+    }
+    if started {
+        tokens.push(token);
+    }
+    Ok(tokens)
+}
+
+pub fn prepare_local_natives(
+    root: &Path,
+    game: &Path,
+    v: &Version,
+    cancel: &CancellationToken,
+) -> Result<()> {
+    let dest = game.join("versions").join(&v.id).join("natives");
+    std::fs::create_dir_all(&dest)?;
+    let runtime_arch = crate::java::JavaRequirement::for_version(v).arch;
+    for library in v
+        .libraries
+        .iter()
+        .filter(|l| is_allowed_on(l, runtime_arch))
+    {
+        if let Some(artifact) = native_artifact(library) {
+            check_cancel(cancel)?;
+            extract_natives(
+                &version::local_library(root, game, artifact)?,
+                &dest,
+                library.extract.as_ref(),
+                cancel,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn expand(args: &[Argument], vars: &HashMap<&str, String>) -> Result<Vec<String>> {
+    expand_for_arch(args, vars, arch_name())
+}
+fn expand_for_arch(
+    args: &[Argument],
+    vars: &HashMap<&str, String>,
+    arch: &str,
+) -> Result<Vec<String>> {
     let mut out = vec![];
     let features = HashMap::from([("has_custom_resolution".into(), true)]);
     for arg in args {
         let values = match arg {
             Argument::Plain(v) => vec![v.clone()],
             Argument::Conditional { rules, value } => {
-                if !rules_allow(rules, os_name(), arch_name(), &features) {
+                if !rules_allow(rules, os_name(), arch, &features) {
                     continue;
                 }
                 match value {

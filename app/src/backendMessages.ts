@@ -1,10 +1,104 @@
 /** Launcher-owned messages only. Game output and user-supplied values are never translated. */
 export const backendEnglish: Readonly<Record<string, string>> = {
+  请等待当前任务完成后关联:
+    "Wait for the current task to finish before linking",
+  "有任务正在运行，请稍后关联实例":
+    "A task is running. Try linking instances when it finishes",
+  "正在关联实例，请稍候": "Linking instances; please wait",
+  请拖入文件夹: "Drop a folder",
+  已跳过启动器数据目录: "Skipped the launcher data directory",
+  "无法访问目录：{path}": "Cannot access directory: {path}",
+  关联实例任务失败: "Could not complete instance linking",
+  "所选 Java {major} 超出 {component} 的字节码支持范围（最高 Java {maximum}）。请切换为 Auto 或选择兼容的 Java。":
+    "Selected Java {major} exceeds {component}'s bytecode support (up to Java {maximum}). Select Auto or a compatible Java version.",
+  "应用 macOS JNA 兼容修复": "Applying the macOS JNA compatibility fix",
+  "应用 macOS OpenAL 兼容修复": "Applying the macOS OpenAL compatibility fix",
+  "Java 自动匹配范围：{runtime}": "Automatic Java compatibility: {runtime}",
+  "版本配置明确声明了 Java 兼容列表":
+    "The version profile explicitly declares compatible Java versions",
+  "缺少更新 Java 的兼容依据，保留游戏声明的版本":
+    "No evidence for newer Java compatibility; keeping the game's declared version",
+  "{kind} {version} 的已核实 Java 支持范围":
+    "Verified Java support for {kind} {version}",
+  "LaunchWrapper 使用旧类加载器，自动匹配限制为 Java 8":
+    "Legacy LaunchWrapper restricts automatic selection to Java 8",
+  "ASM {version} 最多识别 Java {major} 字节码":
+    "ASM {version} recognizes bytecode up to Java {major}",
+  "已应用 {count} 个模组的 Java 版本约束":
+    "Applied Java constraints from {count} mods",
+  "{count} 项模组兼容信息不完整，暂不自动跨 Java 主版本":
+    "{count} mod compatibility entries are incomplete; keeping the declared Java major",
+  "模组 Java 要求与已知兼容范围冲突：{path}":
+    "Mod Java requirements conflict with the known compatible range: {path}",
+  "没有同时满足游戏、加载器和模组约束的 Java：{reason}":
+    "No Java version satisfies the game, loader and mod constraints: {reason}",
+  "未找到兼容的 {runtime}，请指定 Java 路径或允许自动下载。":
+    "No compatible {runtime} found. Select a Java executable or allow automatic downloads.",
+  "无法检查模组的 Java 兼容性": "Could not check mod Java compatibility",
+  "解析 Fabric 版本": "Resolving Fabric version",
+  "Fabric 版本号无效": "Invalid Fabric version",
+  "Fabric 配置缺少依赖": "Fabric profile is missing libraries",
+  "Fabric 配置缺少基础版本": "Fabric profile is missing its base game version",
+  "Fabric 配置与所选游戏或加载器版本不一致":
+    "Fabric profile does not match the selected game or loader version",
+  "同名版本已经存在且配置不同，请保留原版本或使用其他加载器版本":
+    "A different profile already uses this name. Keep it or choose another loader version",
+  "未在官方版本目录中找到此版本，请检查游戏版本号或关联已安装的加载器目录":
+    "Version not found in the official catalogue. Check the game version or link an installed loader's directory",
+  "缺少或无法读取版本配置：{0}": "Missing or unreadable version profile: {0}",
+  "版本元数据与所选版本不一致：{0}":
+    "Version profile does not match the selected version: {0}",
+  "版本继承存在循环或层数过多：{0}":
+    "Version inheritance is circular or too deep: {0}",
+  "版本配置不完整，请检查基础游戏版本":
+    "Incomplete version profile. Check the base game version",
+  版本配置缺少启动参数: "Version profile is missing launch arguments",
+  "启动所需文件缺失：{0}": "Required game file is missing: {0}",
+  "整合包的游戏目录不存在：{0}":
+    "The modpack's game directory does not exist: {0}",
+  "无效 Maven 依赖：{0}": "Invalid Maven dependency: {0}",
+  "Maven 校验文件过大": "Maven checksum file is too large",
+  "Maven 校验值无效": "Invalid Maven checksum",
+  "无法获取依赖校验值：{error}": "Could not fetch library checksum: {error}",
+  旧版启动参数的引号未闭合: "Unclosed quote in legacy launch arguments",
+  "暂无适合此系统的 Java，请指定本地 Java 路径":
+    "No Java runtime is available for this system. Select a local Java executable",
+  "此游戏的原生库需要 {0} Java，所选 Java 是 {1}。请切换 Java 或使用自动匹配。":
+    "Game natives require {0} Java, but the selected Java is {1}. Select another Java or use automatic selection",
+  游戏已停止: "Game stopped",
+  "启动内存：{memory} MiB（自动）": "Game memory: {memory} MiB (Auto)",
+  "启动内存：{memory} MiB（推荐配置）":
+    "Game memory: {memory} MiB (Recommended)",
+  "启动内存：{memory} MiB（最小配置）": "Game memory: {memory} MiB (Minimum)",
+  "启动内存：{memory} MiB（自定义）": "Game memory: {memory} MiB (Custom)",
+  "内存应为 512–65536 MiB": "Memory must be between 512 and 65536 MiB",
+  "所选内存超过 32 位 Java 的可用范围，请选择 64 位 Java 或自动内存":
+    "Selected memory exceeds the 32-bit Java range. Choose 64-bit Java or automatic memory",
   当前启动器版本无效: "Invalid launcher version",
   "暂无可识别的公开版本，请稍后重试":
     "No supported public release found. Try again later",
   发布地址无效: "Invalid release URL",
   无法连接更新服务器: "Could not connect to the update server",
+  "当前运行方式不支持自动安装，请安装发布版或使用系统软件包管理器":
+    "Install a release build or update through your package manager",
+  启动器更新正在进行中: "A launcher update is already in progress",
+  "更新版本已变化，请重新检查更新":
+    "The available version changed; check for updates again",
+  该版本未提供应用内更新包:
+    "This release does not include an in-app update package",
+  更新代理配置无效: "Invalid update proxy configuration",
+  更新清单与发布版本不一致:
+    "The update manifest does not match the selected release",
+  "更新包下载或签名验证失败，请重试":
+    "Update download or signature verification failed; please retry",
+  请先下载启动器更新: "Download the launcher update first",
+  "更新安装失败，请检查安装目录权限后重试":
+    "Installation failed; check installation folder permissions and retry",
+  "更新安装失败，请重新下载更新":
+    "Installation failed; download the update again",
+  "正在安装启动器更新，请稍候": "Installing the launcher update; please wait",
+  "请先退出正在运行的游戏，再安装启动器更新":
+    "Close running games before installing the launcher update",
   "更新检查次数受限，请稍后重试":
     "Update checks are rate-limited. Try again later",
   更新服务器返回错误: "The update server returned an error",
@@ -42,7 +136,12 @@ export const backendEnglish: Readonly<Record<string, string>> = {
     "This game needs Java {major}; the selected path uses Java {0}. Change Java or clear the path to auto-detect.",
   "未找到 Java {major}，请指定 Java 路径或在设置中允许自动下载。":
     "Java {major} was not found. Specify a Java path or enable automatic downloads.",
-  "正在安装 Java {major}": "Installing Java {major}",
+  "使用本地 Java：{version} · {path}": "Using local Java: {version} · {path}",
+  "需要 {requirement}；未检测到可用的本地 Java":
+    "Requires {requirement}; no working local Java was detected",
+  "需要 {requirement}；本地 Java 均不匹配：{available}":
+    "Requires {requirement}; local Java installations do not match: {available}",
+  "正在安装 {runtime}": "Installing {runtime}",
   "此架构暂不支持自动安装 Java，请手动配置":
     "Automatic Java installation is unavailable for this architecture. Configure Java manually",
   "暂无适合此系统的 Java JRE，请指定本地 Java 路径":

@@ -2,12 +2,11 @@
 import { t, locale, setLanguage, translateMessage } from "./i18n";
 import {
   computed,
+  nextTick,
   onMounted,
   onUnmounted,
   reactive,
   ref,
-  shallowRef,
-  triggerRef,
   watch,
   watchEffect,
 } from "vue";
@@ -43,9 +42,14 @@ import { prepareDialogLeave, finishDialogLeave } from "./dialogMotion";
 import { version as launcherVersion } from "../package.json";
 import { prepareAndLaunch } from "./launch";
 import { signInWithMicrosoft } from "./login";
+import type { LogLine } from "./logPresentation";
+import { createLogStore } from "./logStore";
+import LogPanel from "./components/LogPanel.vue";
 import GlassDialog from "./components/GlassDialog.vue";
 import DownloadWorkflow from "./components/DownloadWorkflow.vue";
 import ErrorNotice from "./components/ErrorNotice.vue";
+import FolderDrop from "./components/FolderDrop.vue";
+import { useFolderDrop } from "./useFolderDrop";
 import {
   createWorkflow,
   applyWorkflowEvent,
@@ -82,7 +86,10 @@ import type {
   Task,
   Account,
   UpdateStatus,
+  LauncherUpdateProgress,
   JavaInfo,
+  MemoryMode,
+  MemoryOptions,
 } from "./types";
 
 const desktop = isTauri();
@@ -291,8 +298,97 @@ watch(
 const updateStatus = ref<UpdateStatus | null>(null);
 const updateChecking = ref(false);
 const updateError = ref("");
+const updateProgress = ref<LauncherUpdateProgress>({
+  stage: "idle",
+  downloaded: 0,
+  total: null,
+  version: null,
+  error: null,
+});
+const updateActive = computed(() =>
+  ["checking", "downloading", "verifying", "installing", "restarting"].includes(
+    updateProgress.value.stage,
+  ),
+);
+const updateProgressLabel = computed(() => {
+  const progress = updateProgress.value;
+  if (progress.stage === "downloading")
+    return progress.total
+      ? t("下载更新 {progress}%", {
+          progress: Math.min(
+            100,
+            Math.floor((progress.downloaded / progress.total) * 100),
+          ),
+        })
+      : t("正在下载更新");
+  if (progress.stage === "verifying") return t("正在验证更新");
+  if (progress.stage === "installing") return t("正在安装更新");
+  if (progress.stage === "restarting") return t("正在重启启动器");
+  return t("正在检查更新");
+});
+async function installLauncherUpdate() {
+  if (updateProgress.value.stage !== "ready" || updateActive.value) return;
+  try {
+    await rpc("install_launcher_update");
+  } catch (e) {
+    error.value = message(e);
+  }
+}
+async function downloadLauncherUpdate() {
+  if (!updateStatus.value?.available || updateActive.value) return;
+  updateProgress.value = {
+    stage: "checking",
+    downloaded: 0,
+    total: null,
+    version: updateStatus.value.latest_version,
+    error: null,
+  };
+  try {
+    updateProgress.value = await rpc<LauncherUpdateProgress>(
+      "download_launcher_update",
+      { version: updateStatus.value.latest_version },
+    );
+    if (
+      updateProgress.value.stage === "ready" &&
+      !busy.value &&
+      !snapshot.value.running.length
+    )
+      await installLauncherUpdate();
+  } catch (e) {
+    updateProgress.value = {
+      ...updateProgress.value,
+      stage: "error",
+      error: message(e),
+    };
+    error.value = message(e);
+  }
+}
+async function cancelLauncherUpdate() {
+  try {
+    await rpc("cancel_launcher_update");
+  } catch (e) {
+    error.value = message(e);
+  }
+}
+async function retryLauncherUpdate() {
+  updateProgress.value = {
+    stage: "idle",
+    downloaded: 0,
+    total: null,
+    version: null,
+    error: null,
+  };
+  await checkLauncherUpdate();
+  if (updateStatus.value?.updater_url && !updateStatus.value.install_support)
+    await downloadLauncherUpdate();
+}
 async function checkLauncherUpdate() {
-  if (updateChecking.value) return;
+  if (
+    updateChecking.value ||
+    updateActive.value ||
+    updateProgress.value.stage === "ready"
+  )
+    return;
   updateChecking.value = true;
   updateError.value = "";
   updateStatus.value = null;
@@ -343,15 +439,20 @@ function dismissError() {
   settingsSaveError.value = "";
   proxyPasswordError.value = "";
 }
-type LogLine = { time: string; kind: string; message: string };
-const logs = shallowRef<LogLine[]>([]);
-function appendLog(line: LogLine, bounded = false) {
-  logs.value.push(line);
-  if (bounded && logs.value.length > 800)
-    logs.value.splice(0, logs.value.length - 800);
-  triggerRef(logs);
+const logStore = createLogStore();
+function appendLog(line: LogLine) {
+  logStore.append(line);
 }
 const showLogs = ref(false);
+const logScope = ref("all");
+const logSession = ref(0);
+function openLogs(scope = "all") {
+  modal.value = null;
+  utility.value = null;
+  logScope.value = scope;
+  logSession.value++;
+  showLogs.value = true;
+}
 const modal = ref<"create" | "import" | "edit" | "delete" | "version" | null>(
   null,
 );
@@ -376,9 +477,109 @@ const form = reactive({
   version: "1.21.1",
   source: "",
   memory_mb: 2048,
+  memory_mode: "auto" as MemoryMode,
   java_path: "",
   icon: 0,
+  loader: "vanilla",
+  fabric_version: "",
 });
+const memoryOptions = ref<MemoryOptions | null>(null);
+const memoryChoices = computed(() => [
+  {
+    value: "minimum",
+    label: `${t("最小")} (${memoryOptions.value?.minimum_mb ?? "—"})`,
+  },
+  {
+    value: "recommended",
+    label: `${t("推荐")} (${memoryOptions.value?.recommended_mb ?? "—"})`,
+  },
+  { value: "auto", label: t("自动") },
+  { value: "custom", label: t("自定义") },
+]);
+const validMemory = (value: number) =>
+  Number.isInteger(value) && value >= 512 && value <= 65536;
+const invalidCustomMemory = computed(
+  () => form.memory_mode === "custom" && !validMemory(form.memory_mb),
+);
+async function loadMemoryOptions(id: string) {
+  const session = modalSession;
+  memoryOptions.value = null;
+  try {
+    const options = await rpc<MemoryOptions>("memory_options", { id });
+    if (
+      modal.value === "edit" &&
+      editing.value?.id === id &&
+      session === modalSession
+    )
+      memoryOptions.value = options;
+  } catch {
+    // A failed preview must not prevent saving; launch samples RAM independently.
+  }
+}
+const fabricVersions = ref<{ version: string; stable: boolean }[]>([]);
+const fabricLoading = ref(false);
+const fabricOptions = computed(() =>
+  fabricVersions.value.map((item) => ({
+    value: item.version,
+    label: item.version,
+    detail: item.stable ? t("稳定版") : t("测试版"),
+  })),
+);
+const fabricUnavailable = computed(
+  () =>
+    modal.value === "version" &&
+    form.loader === "fabric" &&
+    (fabricLoading.value || !form.fabric_version),
+);
+let fabricRequest = 0;
+async function loadFabricVersions() {
+  const request = ++fabricRequest;
+  const game = form.version.trim();
+  fabricVersions.value = [];
+  form.fabric_version = "";
+  fabricLoading.value = true;
+  try {
+    const result = await rpc<{ version: string; stable: boolean }[]>(
+      "fabric_versions",
+      { game_version: game },
+    );
+    if (
+      request !== fabricRequest ||
+      modal.value !== "version" ||
+      form.loader !== "fabric" ||
+      form.version.trim() !== game
+    )
+      return;
+    fabricVersions.value = result;
+    form.fabric_version =
+      result.find((item) => item.stable)?.version || result[0]?.version || "";
+  } catch (e) {
+    if (request === fabricRequest) error.value = message(e);
+  } finally {
+    if (request === fabricRequest) fabricLoading.value = false;
+  }
+}
+watch(
+  () => [modal.value, form.loader, form.version],
+  (_, __, cleanup) => {
+    ++fabricRequest;
+    fabricVersions.value = [];
+    form.fabric_version = "";
+    fabricLoading.value = false;
+    if (
+      modal.value !== "version" ||
+      form.loader !== "fabric" ||
+      !form.version.trim()
+    )
+      return;
+    fabricLoading.value = true;
+    const timer = setTimeout(() => void loadFabricVersions(), 300);
+    cleanup(() => {
+      clearTimeout(timer);
+      ++fabricRequest;
+    });
+  },
+);
 const javaRuntimes = ref<JavaInfo[]>([]);
 const javaDiscovering = ref(false);
 const javaPicking = ref(false);
@@ -471,11 +672,16 @@ const skinLoading = ref(false);
 const skinError = ref("");
 let skinGeneration = 0;
 let unlisten: UnlistenFn | undefined;
+let unlistenUpdate: UnlistenFn | undefined;
 const instances = computed(() => snapshot.value.database.instances);
 const instanceOrderSaving = ref(false);
 const {
   strip: instanceStrip,
   ghost: instanceGhost,
+  trash: instanceTrash,
+  trashVisible: instanceTrashVisible,
+  trashAllowed: instanceTrashAllowed,
+  trashHovered: instanceTrashHovered,
   draggedId: draggedInstanceId,
   draggedInstance,
   displayInstances: dockInstances,
@@ -495,6 +701,7 @@ const {
   () => {
     hoveredInstance.value = null;
   },
+  { allowed: canRemoveDraggedInstance, remove: removeDraggedInstance },
 );
 const selectedAccount = computed(() =>
   snapshot.value.database.accounts.find(
@@ -600,6 +807,40 @@ function selectInstance(id: string) {
     /* Storage may be unavailable in a restricted webview. */
   }
 }
+function canRemoveDraggedInstance(id: string) {
+  return (
+    !busy.value &&
+    !snapshot.value.running.includes(id) &&
+    !hasInstanceTask(id) &&
+    instances.value.some((instance) => instance.id === id)
+  );
+}
+async function removeDraggedInstance(id: string): Promise<boolean> {
+  if (!canRemoveDraggedInstance(id)) return false;
+  busy.value = true;
+  error.value = "";
+  let removed = false;
+  try {
+    await rpc("delete", { id });
+    removed = true;
+    const wasSelected = selectedInstance.value?.id === id;
+    const index = instances.value.findIndex((instance) => instance.id === id);
+    snapshot.value.database.instances = instances.value.filter(
+      (instance) => instance.id !== id,
+    );
+    if (wasSelected)
+      selectInstance(
+        instances.value[Math.min(index, instances.value.length - 1)]?.id || "",
+      );
+    await sync();
+  } catch (e) {
+    error.value = message(e);
+    appendLog({ time: stamp(), kind: "error", message: error.value });
+  } finally {
+    busy.value = false;
+  }
+  return removed;
+}
 async function reorderInstance(id: string, beforeId: string | null) {
   if (instanceOrderSaving.value) return;
   const previous = instances.value;
@@ -640,6 +881,28 @@ async function rpc<T = unknown>(
     throw new Error("当前为界面预览。请运行桌面版以管理实例和启动游戏。");
   return invoke<T>("command", { request: { op, ...data } });
 }
+const folderDrop = useFolderDrop({
+  rpc,
+  sync,
+  select: selectInstance,
+  busy: () => busy.value,
+  error: (text) => {
+    error.value = text;
+  },
+});
+let unlistenDrop: UnlistenFn | undefined;
+let dropDisposed = false;
+async function listenForFolders() {
+  try {
+    const stop = await getCurrentWindow().onDragDropEvent((e) =>
+      folderDrop.handle(e.payload),
+    );
+    if (dropDisposed) stop();
+    else unlistenDrop = stop;
+  } catch (e) {
+    if (!dropDisposed) error.value = message(e);
+  }
+}
 let snapshotRequest = 0;
 async function sync() {
   const request = ++snapshotRequest;
@@ -662,11 +925,13 @@ async function sync() {
 function message(e: unknown) {
   return e instanceof Error ? e.message : String(e);
 }
+let noticeTimer: ReturnType<typeof setTimeout> | undefined;
 function notify(text: string) {
+  clearTimeout(noticeTimer);
   notice.value = text;
-  setTimeout(() => {
+  noticeTimer = setTimeout(() => {
     if (notice.value === text) notice.value = "";
-  }, 4500);
+  }, 2000);
 }
 async function action<T>(
   title: string,
@@ -709,7 +974,12 @@ async function action<T>(
       instance_id: typeof data.id === "string" ? data.id : null,
       version_id: version?.id ?? null,
       download_progress: Math.min(99, savedProgress),
-      cancellable: ["versions", "install", "launch"].includes(op),
+      cancellable: [
+        "versions",
+        "add_fabric_version",
+        "install",
+        "launch",
+      ].includes(op),
       title,
       status: "running",
       message: "正在准备…",
@@ -775,6 +1045,10 @@ function hasInstanceTask(id: string) {
   );
 }
 async function openInstance(instance: Instance) {
+  if (snapshot.value.running.includes(instance.id)) {
+    openLogs(instance.id);
+    return;
+  }
   if (hasInstanceTask(instance.id)) {
     showLogs.value = false;
     modal.value = null;
@@ -793,12 +1067,14 @@ async function edit(i: Instance) {
     name: i.name,
     version: i.selected_version || "",
     memory_mb: i.memory_mb,
+    memory_mode: i.memory_mode || "auto",
     java_path: i.java_path || "",
     icon: instanceMaterial(i),
   });
   editingDirectory.value = "";
   directoryLoading.value = true;
   modal.value = "edit";
+  void loadMemoryOptions(i.id);
   void discoverJava();
   try {
     const directory = await rpc<string>("instance_directory", { id: i.id });
@@ -866,6 +1142,7 @@ async function chooseJava() {
 }
 async function saveEditedInstance() {
   if (modal.value !== "edit" || !editing.value || instanceSaving.value) return;
+  if (invalidCustomMemory.value) return;
   if (instanceHeader.value?.finishRename() === false) return;
   const id = editing.value.id;
   const session = modalSession;
@@ -879,7 +1156,12 @@ async function saveEditedInstance() {
     await rpc("update", {
       id,
       name: form.name,
-      memory_mb: form.memory_mb,
+      memory_mb: validMemory(form.memory_mb)
+        ? form.memory_mb
+        : validMemory(editing.value.memory_mb)
+          ? editing.value.memory_mb
+          : 2048,
+      memory_mode: form.memory_mode,
       java_path: form.java_path || null,
       icon: form.icon,
     });
@@ -904,18 +1186,35 @@ async function submit() {
     result = await action<Instance>("创建实例", "create", {
       name: form.name,
     });
-  else if (modal.value === "import")
+  else if (modal.value === "import") {
     result = await action<Instance>(
       "关联实例",
       "import",
       { source: form.source, name: form.name },
       true,
     );
-  else if (modal.value === "version" && editing.value) {
-    const instance = await action<Instance>("添加版本", "add_version", {
-      id: editing.value.id,
-      version: form.version.trim(),
-    });
+    if (result)
+      folderDrop.showLinked([
+        { name: result.name, path: result.game_directory || form.source },
+      ]);
+  } else if (modal.value === "version" && editing.value) {
+    if (fabricUnavailable.value) return;
+    const instance =
+      form.loader === "fabric"
+        ? await action<Instance>(
+            "添加 Fabric 版本",
+            "add_fabric_version",
+            {
+              id: editing.value.id,
+              game_version: form.version.trim(),
+              loader_version: form.fabric_version,
+            },
+            true,
+          )
+        : await action<Instance>("添加版本", "add_version", {
+            id: editing.value.id,
+            version: form.version.trim(),
+          });
     if (instance) {
       selectInstance(instance.id);
       if (session === modalSession) modal.value = null;
@@ -933,6 +1232,8 @@ function newVersion(instance: Instance) {
   utility.value = null;
   editing.value = instance;
   form.version = manifest.value?.latest.release || "1.21.1";
+  form.loader = "vanilla";
+  form.fabric_version = "";
   modal.value = "version";
   if (!manifest.value && desktop) void loadVersions();
 }
@@ -1182,9 +1483,15 @@ function onEvent(e: LauncherEvent) {
       current.value.message = e.message;
   }
   if (!["transfer", "progress", "file", "file_plan"].includes(e.kind)) {
-    appendLog({ time: stamp(), kind: e.kind, message: e.message }, true);
+    appendLog({
+      time: stamp(),
+      kind: e.kind,
+      message: e.message,
+      instanceId: e.instance_id,
+    });
   }
-  if (e.kind === "game_started" || e.kind === "game_exit") void sync();
+  if (e.kind === "game_crash") openLogs(e.instance_id || "all");
+  if (["game_started", "game_exit", "game_crash"].includes(e.kind)) void sync();
 }
 onMounted(async () => {
   document.addEventListener("visibilitychange", updateVisibility);
@@ -1197,9 +1504,19 @@ onMounted(async () => {
     /* Fall back to the first instance. */
   }
   if (!desktop) return;
+  void listenForFolders();
   try {
     unlisten = await listen<LauncherEvent>("launcher-event", (e) =>
       onEvent(e.payload),
+    );
+    unlistenUpdate = await listen<LauncherUpdateProgress>(
+      "launcher-update",
+      (e) => {
+        updateProgress.value = e.payload;
+      },
+    );
+    updateProgress.value = await rpc<LauncherUpdateProgress>(
+      "launcher_update_state",
     );
     await sync();
   } catch (e) {
@@ -1207,8 +1524,14 @@ onMounted(async () => {
   }
 });
 onUnmounted(() => {
+  dropDisposed = true;
+  unlistenDrop?.();
+  folderDrop.dispose();
+  clearTimeout(noticeTimer);
   skinGeneration++;
+  logStore.dispose();
   unlisten?.();
+  unlistenUpdate?.();
   document.removeEventListener("visibilitychange", updateVisibility);
 });
 </script>
@@ -1222,6 +1545,7 @@ onUnmounted(() => {
       @dismiss="dismissError"
       @retry="persistSettings"
     />
+    <FolderDrop :controller="folderDrop" />
     <WorldBackdrop :key="theme" :theme="theme" :paused="windowHidden" />
     <header class="topbar">
       <button
@@ -1263,7 +1587,7 @@ onUnmounted(() => {
           class="icon-button"
           :title="t('运行日志')"
           :aria-label="t('运行日志')"
-          @click="showLogs = true"
+          @click="openLogs()"
         >
           <Terminal :size="20" />
         </button>
@@ -1334,9 +1658,11 @@ onUnmounted(() => {
                   :class="{ selected: selectedInstance?.id === instance.id }"
                   :aria-label="
                     t(
-                      hasInstanceTask(instance.id)
-                        ? '{name}，{version}，双击查看下载进度，按 F2 设置，拖动或按 Alt 加左右方向键排序'
-                        : '{name}，{version}，双击或按 F2 设置，拖动或按 Alt 加左右方向键排序',
+                      snapshot.running.includes(instance.id)
+                        ? '{name}，{version}，双击查看运行日志，按 F2 设置，拖动或按 Alt 加左右方向键排序'
+                        : hasInstanceTask(instance.id)
+                          ? '{name}，{version}，双击查看下载进度，按 F2 设置，拖动或按 Alt 加左右方向键排序'
+                          : '{name}，{version}，双击或按 F2 设置，拖动或按 Alt 加左右方向键排序',
                       {
                         name: instance.name,
                         version: instance.selected_version || t('尚无版本'),
@@ -1488,6 +1814,27 @@ onUnmounted(() => {
         </div>
       </div>
     </footer>
+    <Transition name="instance-trash">
+      <div
+        v-if="instanceTrashVisible"
+        ref="instanceTrash"
+        class="instance-trash-target"
+        :class="{
+          active: instanceTrashHovered && instanceTrashAllowed,
+          unavailable: !instanceTrashAllowed,
+        }"
+        role="img"
+        :aria-label="
+          t(
+            instanceTrashAllowed
+              ? '拖到此处移除实例'
+              : '运行或任务处理中，暂不可移除实例',
+          )
+        "
+      >
+        <Trash2 :size="28" />
+      </div>
+    </Transition>
     <Transition name="instance-ghost">
       <div
         v-if="draggedInstance"
@@ -1805,6 +2152,7 @@ onUnmounted(() => {
                         }}</label>
                         <GlassSelect
                           id="language"
+                          compact
                           v-model="settings.language"
                           :options="languages"
                         />
@@ -1826,8 +2174,49 @@ onUnmounted(() => {
                         <span>{{ t("启动器版本") }}</span>
                         <strong>v{{ launcherVersion }}</strong>
                       </div>
+                      <div
+                        v-if="updateActive"
+                        class="settings-update-download"
+                        role="status"
+                        aria-live="polite"
+                      >
+                        <span class="settings-update-state"
+                          ><LoaderCircle :size="14" class="spin" />{{
+                            updateProgressLabel
+                          }}</span
+                        >
+                        <button
+                          v-if="
+                            ['checking', 'downloading', 'verifying'].includes(
+                              updateProgress.stage,
+                            )
+                          "
+                          type="button"
+                          class="text-button"
+                          @click="cancelLauncherUpdate"
+                        >
+                          {{ t("取消") }}
+                        </button>
+                      </div>
+                      <button
+                        v-else-if="updateProgress.stage === 'ready'"
+                        type="button"
+                        class="text-button"
+                        @click="installLauncherUpdate"
+                      >
+                        {{ t("安装并重启") }}
+                      </button>
+                      <button
+                        v-else-if="updateProgress.stage === 'error'"
+                        type="button"
+                        class="text-button"
+                        :title="translateMessage(updateProgress.error || '')"
+                        @click="retryLauncherUpdate"
+                      >
+                        {{ t("更新失败，点击重试") }}
+                      </button>
                       <span
-                        v-if="updateChecking"
+                        v-else-if="updateChecking"
                         class="settings-update-state"
                         role="status"
                         ><LoaderCircle :size="14" class="spin" />
@@ -1853,12 +2242,30 @@ onUnmounted(() => {
                         v-else-if="updateStatus?.available"
                         type="button"
                         class="text-button"
-                        @click="openLink(updateStatus.download_url)"
+                        @click="
+                          updateStatus.updater_url &&
+                          !updateStatus.install_support
+                            ? downloadLauncherUpdate()
+                            : openLink(updateStatus.download_url)
+                        "
+                        :title="
+                          updateStatus.install_support === 'package_manager'
+                            ? t('DEB 安装版请通过软件包管理器更新')
+                            : updateStatus.install_support
+                              ? t('开发模式或未安装的程序请先安装发布版')
+                              : ''
+                        "
                       >
                         {{
-                          t("最新版为 {version} · 点击更新", {
-                            version: updateStatus.latest_version,
-                          })
+                          t(
+                            updateStatus.updater_url &&
+                              !updateStatus.install_support
+                              ? "最新版为 {version} · 更新并重启"
+                              : "最新版为 {version} · 下载安装包",
+                            {
+                              version: updateStatus.latest_version,
+                            },
+                          )
                         }}
                       </button>
                     </div>
@@ -1990,6 +2397,7 @@ onUnmounted(() => {
                               <GlassSelect
                                 id="network-proxy"
                                 floating
+                                compact
                                 :model-value="proxyChoice"
                                 :options="proxyModes"
                                 @update:model-value="selectProxyKind"
@@ -2071,52 +2479,14 @@ onUnmounted(() => {
         :label="t('运行日志')"
         @close="showLogs = false"
       >
-        <section class="log-panel glass-surface" :aria-label="t('运行日志')">
-          <header>
-            <h2 class="dialog-heading" tabindex="-1" autofocus>
-              <Terminal :size="16" /> {{ t("运行日志") }}
-              <small>{{ t("{count} 条", { count: logs.length }) }} </small>
-            </h2>
-            <div class="inline-actions">
-              <button
-                class="icon-button"
-                :aria-label="t('复制日志')"
-                @click="
-                  copy(logs.map((l) => `[${l.time}] ${l.message}`).join('\n'))
-                "
-              >
-                <Copy :size="16" /></button
-              ><button
-                class="icon-button"
-                :aria-label="t('清空日志')"
-                @click="logs = []"
-              >
-                <Trash2 :size="16" /></button
-              ><button
-                class="icon-button"
-                :aria-label="t('关闭日志')"
-                @click="showLogs = false"
-              >
-                <X :size="16" />
-              </button>
-            </div>
-          </header>
-          <div class="log-content">
-            <p v-if="!logs.length" class="muted">{{ t("暂无运行日志。") }}</p>
-            <p
-              v-for="(line, index) in logs"
-              :key="index"
-              :class="{ error: line.kind === 'error' }"
-            >
-              <time>{{ line.time }}</time
-              ><span>{{
-                line.kind === "log"
-                  ? line.message
-                  : translateMessage(line.message)
-              }}</span>
-            </p>
-          </div>
-        </section>
+        <LogPanel
+          :store="logStore"
+          :instances="snapshot.database.instances"
+          :initial-scope="logScope"
+          :session="logSession"
+          @copy="copy"
+          @close="showLogs = false"
+        />
       </GlassDialog>
     </Transition>
 
@@ -2219,8 +2589,14 @@ onUnmounted(() => {
                 {{ t("实例名称") }}
                 <input
                   v-model="form.name"
-                  :placeholder="t('例如：日常游戏')"
-                  required
+                  :placeholder="
+                    t(
+                      modal === 'import'
+                        ? '默认使用上层文件夹名称'
+                        : '例如：日常游戏',
+                    )
+                  "
+                  :required="modal === 'create'"
                   maxlength="80" /></label
               ><label v-if="modal === 'version'" class="field">
                 {{ t("Minecraft 版本") }}
@@ -2236,11 +2612,55 @@ onUnmounted(() => {
                     :value="version.id"
                   >
                     {{ version.type }}
-                  </option></datalist
-                ><small v-if="modal === 'version'">
-                  {{ t("支持原版 Java 1.13+，Apple Silicon 使用 1.19+。") }}
-                </small></label
+                  </option>
+                </datalist></label
               >
+              <template v-if="modal === 'version'">
+                <label class="field" for="version-loader-trigger">
+                  {{ t("模组加载器") }}
+                  <GlassSelect
+                    id="version-loader"
+                    v-model="form.loader"
+                    :disabled="busy"
+                    floating
+                    :options="[
+                      { value: 'vanilla', label: t('原版') },
+                      { value: 'fabric', label: 'Fabric' },
+                    ]"
+                  />
+                </label>
+                <label
+                  v-if="form.loader === 'fabric'"
+                  class="field"
+                  for="fabric-loader-trigger"
+                >
+                  <span class="fabric-version-heading">
+                    {{ t("Fabric 版本") }}
+                    <button
+                      type="button"
+                      class="icon-button"
+                      :aria-label="t('刷新版本列表')"
+                      :disabled="busy || fabricLoading"
+                      @click="loadFabricVersions"
+                    >
+                      <RefreshCw :size="14" :class="{ spin: fabricLoading }" />
+                    </button>
+                  </span>
+                  <GlassSelect
+                    id="fabric-loader"
+                    v-model="form.fabric_version"
+                    floating
+                    :disabled="busy || fabricLoading || !fabricVersions.length"
+                    :options="fabricOptions"
+                  />
+                  <small v-if="fabricLoading">{{
+                    t("正在获取 Fabric 版本…")
+                  }}</small>
+                  <small v-else-if="!fabricVersions.length">{{
+                    t("此游戏版本暂无可用的 Fabric")
+                  }}</small>
+                </label>
+              </template>
               <label v-if="modal === 'import'" class="field">
                 {{ t("游戏目录") }}
                 <div class="input-action">
@@ -2261,21 +2681,31 @@ onUnmounted(() => {
                   {{ t("直接使用原目录，不复制游戏文件。") }}
                 </small></label
               >
-              <template v-if="modal === 'edit'"
-                ><label class="field">
-                  {{ t("最大内存") }}
+              <template v-if="modal === 'edit'">
+                <div class="field instance-memory">
+                  <label
+                    id="instance-memory-label"
+                    for="instance-memory-trigger"
+                    >{{ t("启动内存") }}</label
+                  >
                   <div class="memory-input">
-                    <input
-                      v-model.number="form.memory_mb"
+                    <GlassSelect
+                      id="instance-memory"
+                      v-model="form.memory_mode"
+                      v-model:editable-value="form.memory_mb"
+                      :editable="form.memory_mode === 'custom'"
+                      :input-label="t('自定义内存')"
+                      :input-min="512"
+                      :input-max="65536"
+                      :options="memoryChoices"
                       :disabled="instanceSaving"
-                      type="number"
-                      min="512"
-                      max="65536"
-                      step="256"
-                      required
-                    /><span>MiB</span>
-                  </div></label
-                >
+                      literal-labels
+                      floating
+                      compact
+                    />
+                    <span>MB</span>
+                  </div>
+                </div>
                 <div class="field instance-java">
                   <label id="instance-java-label" for="instance-java-trigger">{{
                     t("Java 可执行文件")
@@ -2337,7 +2767,11 @@ onUnmounted(() => {
               ><button
                 type="submit"
                 class="button primary"
-                :disabled="modal === 'edit' ? instanceSaving : busy"
+                :disabled="
+                  modal === 'edit'
+                    ? instanceSaving || invalidCustomMemory
+                    : busy || fabricUnavailable
+                "
               >
                 <LoaderCircle
                   v-if="modal === 'edit' ? instanceSaving : busy"

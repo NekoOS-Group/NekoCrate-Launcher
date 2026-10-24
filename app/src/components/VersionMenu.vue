@@ -12,6 +12,7 @@ import { ChevronUp, Plus } from "lucide-vue-next";
 import type { Instance, Task } from "../types";
 import VersionStatusIcon from "./VersionStatusIcon.vue";
 import { versionDownloadState } from "../versionProgress";
+import { versionDescription } from "../versionDescription";
 
 const props = defineProps<{
   instance?: Instance;
@@ -192,8 +193,15 @@ onBeforeUnmount(() =>
               :progress="version.download.progress"
               :indeterminate="version.download.indeterminate"
             />
-            <span class="version-menu-name">{{ version.id }}</span>
-            <small v-if="!version.installed">{{ t("待下载") }}</small>
+            <span class="version-menu-label">
+              <span class="version-menu-name">{{ version.id }}</span>
+              <small class="version-menu-detail">{{
+                versionDescription(version)
+              }}</small>
+            </span>
+            <small v-if="!version.installed" class="version-menu-state">{{
+              t("待下载")
+            }}</small>
           </button>
         </div>
         <div

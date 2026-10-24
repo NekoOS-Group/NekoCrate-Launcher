@@ -25,6 +25,7 @@ const sources = computed(() =>
 <template>
   <GlassSelect
     floating
+    compact
     :id="`${kind}-download-source`"
     :model-value="modelValue"
     :disabled="disabled"

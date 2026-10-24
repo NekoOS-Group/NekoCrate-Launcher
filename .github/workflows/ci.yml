@@ -72,4 +72,4 @@ jobs:
           cache-on-failure: true
           cache-workspace-crates: true
       - name: Check file replacement, verification receipts and linked directories
-        run: cargo test -p nekocrate-core --lib --locked -- verification::tests storage::tests tests::linked_directories tests::removing_linked_instance
+        run: cargo test -p nekocrate-core --lib --locked -- verification::tests storage::tests tests::linked_directories tests::removing_linked_instance folder_import::tests

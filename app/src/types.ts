@@ -21,11 +21,38 @@ export interface UpdateStatus {
   latest_version: string;
   available: boolean;
   download_url: string;
+  updater_url: string | null;
+  install_support: "development" | "package_manager" | "unbundled" | null;
+}
+export interface LauncherUpdateProgress {
+  stage:
+    | "idle"
+    | "checking"
+    | "downloading"
+    | "verifying"
+    | "ready"
+    | "installing"
+    | "restarting"
+    | "error";
+  downloaded: number;
+  total: number | null;
+  version: string | null;
+  error: string | null;
 }
 export interface JavaInfo {
   path: string;
   major: number;
   version: string;
+  arch?: string;
+}
+export type MemoryMode = "auto" | "recommended" | "minimum" | "custom";
+export interface MemoryOptions {
+  auto_mb: number;
+  recommended_mb: number;
+  minimum_mb: number;
+  declared_minimum_mb: number | null;
+  total_mb: number;
+  available_mb: number;
 }
 export interface Instance {
   id: string;
@@ -35,14 +62,21 @@ export interface Instance {
   versions: InstanceVersion[];
   selected_version: string | null;
   memory_mb: number;
+  memory_mode?: MemoryMode;
   java_path: string | null;
   created_at: number;
   last_played: number | null;
 }
 export interface InstanceVersion {
   id: string;
+  minecraft_version?: string;
+  loader?: { kind: string; version: string };
   installed: boolean;
   download_progress?: number;
+}
+export interface FabricLoaderVersion {
+  version: string;
+  stable: boolean;
 }
 export interface Account {
   id: string;

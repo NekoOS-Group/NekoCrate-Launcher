@@ -63,7 +63,7 @@ pub async fn serve_with_headers(
 pub fn version_fixture(id: &str) -> crate::model::Version {
     serde_json::from_value(serde_json::json!({
         "id": id, "type": "release", "mainClass": "net.minecraft.client.main.Main",
-        "downloads": {}, "libraries": [],
+        "downloads": {}, "libraries": [], "javaVersion": {"majorVersion": 8},
         "assetIndex": {"id": id, "url": "http://127.0.0.1/fixture", "sha1": "", "size": 0},
         "arguments": {"jvm": ["-Djava.library.path=${natives_directory}", "-cp", "${classpath}"],
             "game": ["--gameDir", "${game_directory}", "--version", "${version_name}",

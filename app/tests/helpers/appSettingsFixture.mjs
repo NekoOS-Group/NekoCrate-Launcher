@@ -11,8 +11,8 @@ const packageVersion = JSON.parse(
 ).version;
 const stubs = {
   "@tauri-apps/api/core": `export const isTauri = () => true; export const invoke = (...args) => globalThis.__settingsFixture.invoke(...args);`,
-  "@tauri-apps/api/window": `export const getCurrentWindow = () => ({ setTitle: async () => {} });`,
-  "@tauri-apps/api/event": `export const listen = async (_, callback) => { globalThis.__settingsFixture.event = callback; return () => {}; };`,
+  "@tauri-apps/api/window": `export const getCurrentWindow = () => ({ setTitle: async () => {}, onDragDropEvent: async callback => { const fixture = globalThis.__settingsFixture; fixture.fileDrop = callback; return () => { fixture.dropUnlistened = true; }; } });`,
+  "@tauri-apps/api/event": `export const listen = async (name, callback) => { if (name === 'launcher-event') globalThis.__settingsFixture.event = callback; else globalThis.__settingsFixture.updateEvent = callback; return () => {}; };`,
   "@tauri-apps/plugin-dialog": `export const open = async (...args) => globalThis.__settingsFixture.pickFile?.(...args) ?? null;`,
   "@tauri-apps/plugin-opener": `export const openUrl = async () => {};`,
   "./instanceIcons": `export const resolveInstanceIcon = () => 0;`,
@@ -124,6 +124,15 @@ export async function settingsFixture() {
       if (this.handlers[request.op]) return this.handlers[request.op](request);
       if (request.op === "snapshot") return this.snapshot();
       if (request.op === "proxy_password") return this.proxyPassword;
+      if (request.op === "memory_options")
+        return {
+          auto_mb: 6144,
+          minimum_mb: 2048,
+          recommended_mb: 4096,
+          declared_minimum_mb: null,
+          total_mb: 16384,
+          available_mb: 8192,
+        };
       if (request.op === "save_settings") {
         const settings = structuredClone(request.settings);
         settings.proxy_password_key =
@@ -140,6 +149,14 @@ export async function settingsFixture() {
       }
       if (request.op === "check_update")
         return { available: false, latest_version: "dev0.1", download_url: "" };
+      if (request.op === "launcher_update_state")
+        return {
+          stage: "idle",
+          downloaded: 0,
+          total: null,
+          version: null,
+          error: null,
+        };
       throw new Error(`Unexpected IPC: ${request.op}`);
     },
   };

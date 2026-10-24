@@ -9,8 +9,10 @@ use tauri::{Emitter, Manager, State};
 use tauri_plugin_opener::OpenerExt;
 use tokio_util::sync::CancellationToken;
 
+mod folder_scan;
 mod import_picker;
 mod pausable;
+mod updater;
 
 struct ActiveJob {
     cancel: CancellationToken,
@@ -21,6 +23,8 @@ struct AppState {
     launcher: Launcher,
     job: Arc<Mutex<Option<ActiveJob>>>,
     challenge: Mutex<Option<DeviceChallenge>>,
+    updater: updater::UpdateManager,
+    folder_scan: folder_scan::FolderScanManager,
 }
 struct JobGuard(Arc<Mutex<Option<ActiveJob>>>);
 impl Drop for JobGuard {
@@ -47,8 +51,25 @@ impl AppState {
 enum Request {
     Snapshot,
     Versions,
+    FabricVersions {
+        game_version: String,
+    },
+    AddFabricVersion {
+        id: String,
+        game_version: String,
+        loader_version: String,
+    },
     Java,
+    MemoryOptions {
+        id: String,
+    },
     CheckUpdate,
+    LauncherUpdateState,
+    DownloadLauncherUpdate {
+        version: String,
+    },
+    InstallLauncherUpdate,
+    CancelLauncherUpdate,
     ProxyPassword,
     SaveSettings {
         settings: Settings,
@@ -62,6 +83,8 @@ enum Request {
         id: String,
         name: String,
         memory_mb: u32,
+        #[serde(default)]
+        memory_mode: MemoryMode,
         java_path: Option<String>,
         #[serde(default)]
         icon: Option<u8>,
@@ -81,6 +104,16 @@ enum Request {
         name: String,
         #[serde(default)]
         version: String,
+    },
+    ScanFolders {
+        scan_id: String,
+        paths: Vec<String>,
+    },
+    CancelFolderScan {
+        scan_id: String,
+    },
+    ImportFolders {
+        paths: Vec<String>,
     },
     PickImportDirectory {
         #[serde(default)]
@@ -133,6 +166,11 @@ async fn command(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
+    if state.updater.installing()
+        && !matches!(request, Request::Snapshot | Request::LauncherUpdateState)
+    {
+        return Err("正在安装启动器更新，请稍候".into());
+    }
     let handle = app.clone();
     let sink: EventSink = Arc::new(move |event| {
         let _ = handle.emit("launcher-event", event);
@@ -151,16 +189,46 @@ async fn command(
                 json!({"state":launcher.snapshot(),"manifest":launcher.cached_versions(),"busy":state.job.lock().unwrap().is_some()})
             },
             Request::Versions=>{let (cancel,_guard)=state.job().map_err(anyhow::Error::msg)?;json!(launcher.versions(&cancel).await?)},
+            Request::FabricVersions{game_version}=>json!(launcher.fabric_versions(&game_version,&CancellationToken::new()).await?),
+            Request::AddFabricVersion{id,game_version,loader_version}=>{
+                let (cancel,_guard)=state.job().map_err(anyhow::Error::msg)?;
+                json!(launcher.add_fabric_version(&id,&game_version,&loader_version,&cancel,&sink).await?)
+            },
             Request::Java=>json!(nekocrate_core::java::discover(launcher.root()).await),
-            Request::CheckUpdate=>json!(nekocrate_core::updates::check(launcher.root(), &launcher.settings()).await?),
+            Request::MemoryOptions{id}=>{
+                let launcher = launcher.clone();
+                json!(tauri::async_runtime::spawn_blocking(move || launcher.memory_options(&id)).await??)
+            },
+            Request::CheckUpdate=>json!(updater::check(launcher).await?),
+            Request::LauncherUpdateState=>json!(state.updater.progress()),
+            Request::DownloadLauncherUpdate{version}=>{state.updater.download(&app,launcher,&version).await?;json!(state.updater.progress())},
+            Request::CancelLauncherUpdate=>{state.updater.cancel();json!(true)},
+            Request::InstallLauncherUpdate=>{
+                let (_cancel,_guard)=state.job().map_err(anyhow::Error::msg)?;
+                if !launcher.snapshot().running.is_empty() { anyhow::bail!("请先退出正在运行的游戏，再安装启动器更新"); }
+                state.updater.install(&app,launcher).await?;
+                json!(true)
+            },
             Request::ProxyPassword=>json!(launcher.proxy_password()?),
             Request::SaveSettings{settings}=>{launcher.save_settings(settings)?;json!(true)},
             Request::Create{name,version}=>json!(launcher.create_instance(&name,&version)?),
-            Request::Update{id,name,memory_mb,java_path,icon}=>{launcher.update_instance(&id,&name,memory_mb,java_path,icon)?;json!(true)},
+            Request::Update{id,name,memory_mb,memory_mode,java_path,icon}=>{launcher.update_instance_memory(&id,&name,nekocrate_core::memory::MemoryConfig{mode:memory_mode,custom_mb:memory_mb},java_path,icon)?;json!(true)},
             Request::Clone{id}=>{let (_cancel,_guard)=state.job().map_err(anyhow::Error::msg)?;json!(launcher.clone_instance(&id).await?)},
             Request::Delete{id}=>{launcher.delete_instance(&id)?;json!(true)},
             Request::MoveInstance{id,before_id}=>{launcher.move_instance(&id,before_id.as_deref())?;json!(true)},
             Request::Import{source,name,version}=>{let (_cancel,_guard)=state.job().map_err(anyhow::Error::msg)?;json!(launcher.import_instance(PathBuf::from(source),name,version).await?)},
+            Request::ScanFolders{scan_id,paths}=>{
+                let guard = state.folder_scan.start(scan_id);
+                let launcher = launcher.clone();
+                json!(tauri::async_runtime::spawn_blocking(move || {
+                    launcher.scan_folders(&paths.into_iter().map(PathBuf::from).collect::<Vec<_>>(), &guard.cancel)
+                }).await??)
+            },
+            Request::CancelFolderScan{scan_id}=>{state.folder_scan.cancel(Some(&scan_id));json!(true)},
+            Request::ImportFolders{paths}=>{
+                let (_cancel,_guard)=state.job().map_err(anyhow::Error::msg)?;
+                json!(launcher.import_folders(paths.into_iter().map(PathBuf::from).collect()).await?)
+            },
             Request::PickImportDirectory{path}=>json!(import_picker::pick(&app,&path,launcher.ui_language() == "en-US").await?),
             Request::AddVersion{id,version}=>json!(launcher.add_version(&id,&version)?),
             Request::SelectVersion{id,version}=>{launcher.select_version(&id,&version)?;json!(true)},
@@ -222,6 +290,7 @@ pub fn run() {
         return;
     }
     tauri::Builder::default()
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
@@ -230,6 +299,8 @@ pub fn run() {
                 launcher,
                 job: Arc::new(Mutex::new(None)),
                 challenge: Mutex::new(None),
+                updater: updater::UpdateManager::default(),
+                folder_scan: folder_scan::FolderScanManager::default(),
             });
             Ok(())
         })
@@ -240,6 +311,7 @@ pub fn run() {
             if let tauri::RunEvent::Exit = event {
                 let state = app.state::<AppState>();
                 state.launcher.stop_all();
+                state.folder_scan.cancel(None);
                 if let Some(job) = state.job.lock().unwrap().as_ref() {
                     job.cancel.cancel();
                 }

@@ -18,18 +18,28 @@ const props = defineProps<{
   options: readonly { value: string; label: string; detail?: string }[];
   actionLabel?: string;
   floating?: boolean;
+  compact?: boolean;
+  literalLabels?: boolean;
+  editable?: boolean;
+  editableValue?: number;
+  inputLabel?: string;
+  inputMin?: number;
+  inputMax?: number;
 }>();
 const emit = defineEmits<{
   "update:modelValue": [value: string];
   action: [];
+  "update:editableValue": [value: number];
 }>();
 const selected = computed(
   () =>
     props.options.find((source) => source.value === props.modelValue) ||
     props.options[0],
 );
+const label = (text: string) => (props.literalLabels ? text : t(text));
 const root = ref<HTMLElement>();
 const trigger = ref<HTMLButtonElement>();
+const input = ref<HTMLInputElement>();
 const list = ref<HTMLElement>();
 const expanded = ref(false);
 const availableHeight = ref<number>();
@@ -161,6 +171,15 @@ watch(
     if (disabled) close();
   },
 );
+watch(
+  () => props.editable,
+  async (editable) => {
+    if (editable) {
+      await nextTick();
+      input.value?.focus({ preventScroll: true });
+    }
+  },
+);
 onMounted(() => {
   document.addEventListener("pointerdown", outside, true);
   window.addEventListener("resize", fitMenu);
@@ -173,7 +192,35 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="root" class="source-select" @focusout="leave" @keydown="navigate">
+  <div
+    ref="root"
+    class="source-select"
+    :class="{ 'source-select-editable': editable }"
+    @focusout="leave"
+    @keydown="navigate"
+  >
+    <input
+      v-if="editable"
+      ref="input"
+      class="source-select-input"
+      type="number"
+      :value="Number.isFinite(editableValue) ? editableValue : ''"
+      :min="inputMin"
+      :max="inputMax"
+      step="1"
+      required
+      :disabled="disabled"
+      :aria-label="inputLabel"
+      @keydown.stop
+      @input="
+        emit(
+          'update:editableValue',
+          ($event.target as HTMLInputElement).value === ''
+            ? NaN
+            : Number(($event.target as HTMLInputElement).value),
+        )
+      "
+    />
     <button
       :id="`${id}-trigger`"
       ref="trigger"
@@ -184,10 +231,10 @@ onBeforeUnmount(() => {
       aria-haspopup="listbox"
       :aria-controls="`${id}-options`"
       :aria-expanded="expanded"
-      :title="selected.detail ? t(selected.detail) : t(selected.label)"
+      :title="selected.detail ? t(selected.detail) : label(selected.label)"
       @click="expanded ? close() : open()"
     >
-      <span :id="`${id}-value`">{{ t(selected.label) }}</span>
+      <span :id="`${id}-value`">{{ label(selected.label) }}</span>
       <ChevronDown :size="16" />
     </button>
     <Teleport
@@ -199,7 +246,10 @@ onBeforeUnmount(() => {
           v-if="expanded"
           ref="list"
           class="source-select-menu glass-surface"
-          :class="{ 'source-select-floating': floating }"
+          :class="{
+            'source-select-floating': floating,
+            'source-select-compact': compact,
+          }"
           @keydown.stop="navigate"
           @focusout.stop="leave"
           :style="
@@ -223,14 +273,14 @@ onBeforeUnmount(() => {
               class="source-select-option"
               role="option"
               :aria-selected="source.value === modelValue"
-              :title="source.detail ? t(source.detail) : t(source.label)"
+              :title="source.detail ? t(source.detail) : label(source.label)"
               tabindex="-1"
               :disabled="disabled"
               @pointerdown.prevent
               @click="choose(source.value)"
             >
               <span class="source-select-copy"
-                ><span>{{ t(source.label) }}</span
+                ><span>{{ label(source.label) }}</span
                 ><small v-if="source.detail">{{
                   t(source.detail)
                 }}</small></span

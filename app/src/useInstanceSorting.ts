@@ -4,29 +4,54 @@ import {
   onBeforeUnmount,
   onMounted,
   ref,
+  shallowRef,
   watch,
   type Ref,
 } from "vue";
 import type { Instance } from "./types";
-import { instanceDropTarget, moveInstanceBefore } from "./instanceOrder";
-import { createInstanceLanding, instanceTranslation } from "./instanceMotion";
+import { instanceDropTarget, moveInstanceBefore } from "./instanceOrder.ts";
+import {
+  createInstanceLanding,
+  instanceTranslation,
+} from "./instanceMotion.ts";
 
 export function useInstanceSorting(
   instances: Readonly<Ref<Instance[]>>,
   blocked: Readonly<Ref<boolean>>,
   move: (id: string, beforeId: string | null) => void,
   hideTooltip: () => void,
+  removal?: {
+    allowed: (id: string) => boolean;
+    remove: (id: string) => Promise<boolean>;
+  },
 ) {
   const strip = ref<HTMLElement>();
   const ghost = ref<HTMLElement>();
+  const trash = ref<HTMLElement>();
+  const trashHovered = ref(false);
+  const removing = ref(false);
   const settling = ref(false);
   const draggedId = ref<string | null>(null);
+  const draggedSource = shallowRef<Instance>();
+  const trashVisible = computed(
+    () => !!removal && !!draggedId.value && (!settling.value || removing.value),
+  );
+  const trashAllowed = computed(
+    () =>
+      removing.value ||
+      (!!draggedId.value && !!removal?.allowed(draggedId.value)),
+  );
   const beforeId = ref<string | null>(null);
   const dropAllowed = ref(false);
-  const ghostPosition = ref({ transform: instanceTranslation({ x: 0, y: 0 }) });
+  const ghostPosition = ref({
+    transform: instanceTranslation({ x: 0, y: 0 }),
+    opacity: "1",
+  });
   const ghostArtStyle = ref({ opacity: "1", filter: "none" });
-  const draggedInstance = computed(() =>
-    instances.value.find((item) => item.id === draggedId.value),
+  const draggedInstance = computed(
+    () =>
+      instances.value.find((item) => item.id === draggedId.value) ??
+      (removing.value ? draggedSource.value : undefined),
   );
   const displayInstances = computed(() =>
     draggedId.value && dropAllowed.value
@@ -45,6 +70,7 @@ export function useInstanceSorting(
   let frame = 0;
   let suppressClick = false;
   let landing: ReturnType<typeof createInstanceLanding> | undefined;
+  let removalAnimation: Animation | undefined;
   let settlement = 0;
   let disposed = false;
 
@@ -52,8 +78,13 @@ export function useInstanceSorting(
     settlement++;
     landing?.dispose();
     landing = undefined;
+    removalAnimation?.cancel();
+    removalAnimation = undefined;
+    removing.value = false;
+    trashHovered.value = false;
     settling.value = false;
     draggedId.value = null;
+    draggedSource.value = undefined;
     dropAllowed.value = false;
   }
   async function landPreview() {
@@ -84,16 +115,80 @@ export function useInstanceSorting(
     });
   }
 
+  async function removePreview(id: string) {
+    const ticket = ++settlement;
+    removing.value = true;
+    let removed = false;
+    try {
+      removed = await removal!.remove(id);
+    } catch {
+      // The caller reports the failure. Restore the drag preview in either case.
+    }
+    if (disposed || ticket !== settlement) return;
+    if (!removed) {
+      removing.value = false;
+      trashHovered.value = false;
+      void landPreview();
+      return;
+    }
+    if (
+      ghost.value &&
+      trash.value &&
+      !window.matchMedia("(prefers-reduced-motion: reduce)").matches
+    ) {
+      const from = ghost.value.getBoundingClientRect();
+      const to = trash.value.getBoundingClientRect();
+      removalAnimation = ghost.value.animate(
+        [
+          {
+            transform: instanceTranslation({
+              x: from.left + from.width / 2,
+              y: from.top + from.height / 2,
+            }),
+            opacity: 1,
+          },
+          {
+            transform: `${instanceTranslation({ x: to.left + to.width / 2, y: to.top + to.height / 2 })} scale(.2)`,
+            opacity: 0,
+          },
+        ],
+        {
+          duration: 220,
+          easing: "cubic-bezier(0.16, 1, 0.3, 1)",
+          fill: "forwards",
+        },
+      );
+      await removalAnimation.finished.catch(() => {});
+    }
+    if (!disposed && ticket === settlement) {
+      // Cancelling the finished Web Animation must not reveal the full-size
+      // ghost for Vue's leave transition after it has already shrunk away.
+      if (ghost.value) ghost.value.style.opacity = "0";
+      clearPreview();
+    }
+  }
+
   function updateTarget() {
     const list = strip.value;
     if (!pointer || !draggedId.value || !list) return;
     const box = list.getBoundingClientRect();
+    const bin = trash.value?.getBoundingClientRect();
+    trashHovered.value =
+      !!bin &&
+      pointer.x >= bin.left &&
+      pointer.x <= bin.right &&
+      pointer.y >= bin.top &&
+      pointer.y <= bin.bottom;
     dropAllowed.value =
+      !trashHovered.value &&
       pointer.x >= box.left - 16 &&
       pointer.x <= box.right + 16 &&
       pointer.y >= box.top - 24 &&
       pointer.y <= box.bottom + 24;
-    ghostPosition.value = { transform: instanceTranslation(pointer) };
+    ghostPosition.value = {
+      transform: instanceTranslation(pointer),
+      opacity: "1",
+    };
     if (!dropAllowed.value) return;
     const edge = Math.min(28, box.width / 4);
     const delta =
@@ -125,7 +220,8 @@ export function useInstanceSorting(
     if (
       blocked.value ||
       settling.value ||
-      instances.value.length < 2 ||
+      instances.value.length < (removal ? 1 : 2) ||
+      !instances.value.some((item) => item.id === id) ||
       event.button !== 0 ||
       !event.isPrimary ||
       pointer
@@ -152,6 +248,9 @@ export function useInstanceSorting(
       Math.hypot(pointer.x - pointer.startX, pointer.y - pointer.startY) >= 6
     ) {
       draggedId.value = pointer.instance;
+      draggedSource.value = instances.value.find(
+        (item) => item.id === pointer!.instance,
+      );
       const art = pointer.target.querySelector<HTMLElement>(".instance-art");
       if (art) {
         const style = getComputedStyle(art);
@@ -179,6 +278,8 @@ export function useInstanceSorting(
     const id = draggedId.value;
     const target = beforeId.value;
     const shouldMove = commit && id && dropAllowed.value;
+    const shouldRemove =
+      commit && id && trashHovered.value && trashAllowed.value;
     pointer = null;
     cancelAnimationFrame(frame);
     frame = 0;
@@ -186,6 +287,12 @@ export function useInstanceSorting(
       previous.target.releasePointerCapture(previous.id);
     if (!id) return;
     settling.value = true;
+    if (shouldRemove) {
+      dropAllowed.value = false;
+      void removePreview(id);
+      return;
+    }
+    trashHovered.value = false;
     if (shouldMove) {
       const next = moveInstanceBefore(instances.value, id, target);
       if (next.some((item, index) => item.id !== instances.value[index]?.id))
@@ -247,6 +354,8 @@ export function useInstanceSorting(
     if (value) cancel();
   });
   watch(instances, (items) => {
+    // A committed removal updates the list before the ghost finishes shrinking.
+    if (removing.value) return;
     if (draggedId.value && !items.some((item) => item.id === draggedId.value)) {
       cancel();
       clearPreview();
@@ -268,6 +377,11 @@ export function useInstanceSorting(
   return {
     strip,
     ghost,
+    trash,
+    trashHovered,
+    trashVisible,
+    trashAllowed,
+    removing,
     draggedId,
     draggedInstance,
     displayInstances,

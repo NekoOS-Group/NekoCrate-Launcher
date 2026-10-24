@@ -69,17 +69,47 @@ pub struct Instance {
     pub versions: Vec<InstanceVersion>,
     pub selected_version: Option<String>,
     pub memory_mb: u32,
+    #[serde(default)]
+    pub memory_mode: MemoryMode,
     pub java_path: Option<String>,
     pub created_at: u64,
     pub last_played: Option<u64>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryMode {
+    #[default]
+    Auto,
+    Recommended,
+    Minimum,
+    Custom,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct InstanceVersion {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub minecraft_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loader: Option<ModLoader>,
     pub installed: bool,
     #[serde(default)]
     pub download_progress: f64,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModLoader {
+    pub kind: String,
+    pub version: String,
+}
+impl InstanceVersion {
+    pub fn pending(id: &str) -> Self {
+        Self {
+            id: id.into(),
+            minecraft_version: Some(id.into()),
+            ..Self::default()
+        }
+    }
 }
 impl Instance {
     pub fn game_dir(&self, root: &Path) -> PathBuf {
@@ -148,7 +178,9 @@ pub struct VersionManifest {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Artifact {
+    #[serde(default)]
     pub url: String,
+    #[serde(default)]
     pub sha1: String,
     #[serde(default)]
     pub size: u64,
@@ -230,6 +262,13 @@ pub struct Version {
     pub asset_index: AssetIndexRef,
     #[serde(rename = "javaVersion")]
     pub java_version: Option<JavaVersion>,
+    /// Explicit compatibility declaration used by launcher/pack metadata.
+    #[serde(
+        default,
+        rename = "compatibleJavaMajors",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub compatible_java_majors: Vec<u32>,
     pub arguments: Option<Arguments>,
     #[serde(rename = "minecraftArguments")]
     pub minecraft_arguments: Option<String>,
@@ -237,6 +276,8 @@ pub struct Version {
     pub logging: Option<serde_json::Value>,
     #[serde(rename = "inheritsFrom")]
     pub inherits_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jar: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AssetObject {

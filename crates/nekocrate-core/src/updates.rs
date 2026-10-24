@@ -10,8 +10,10 @@ const RELEASES_URL: &str = "https://github.com/NekoOS-Group/NekoCrate-Launcher/r
 #[derive(Debug, Serialize)]
 pub struct UpdateStatus {
     pub latest_version: String,
+    pub version: String,
     pub available: bool,
     pub download_url: String,
+    pub updater_url: Option<String>,
 }
 #[derive(Deserialize)]
 struct Release {
@@ -80,8 +82,29 @@ fn select_release(
         .map_or(&release.html_url, |asset| &asset.browser_download_url);
     Ok(UpdateStatus {
         latest_version: release.tag_name.clone(),
+        version: version.to_string(),
         available: version.cmp_precedence(&current).is_gt(),
         download_url: url.clone(),
+        updater_url: release
+            .assets
+            .iter()
+            .find(|asset| {
+                asset.name == "latest.json"
+                    && asset.browser_download_url
+                        == format!("{RELEASES_URL}download/{}/latest.json", release.tag_name)
+            })
+            .map(|asset| asset.browser_download_url.clone()),
+    })
+}
+
+/// Update artifacts must belong to the selected release in our own repository.
+pub fn is_update_artifact(url: &str, tag: &str) -> bool {
+    let prefix = format!("{RELEASES_URL}download/{tag}/NekoCrate-Launcher-{tag}-");
+    url.strip_prefix(&prefix).is_some_and(|name| {
+        !name.is_empty()
+            && name
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b".-_".contains(&c))
     })
 }
 
@@ -122,6 +145,40 @@ pub async fn check(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn updater_manifest_is_bound_to_the_selected_release_and_repository() {
+        let mut releases = vec![release("dev0.5", true)];
+        releases[0].assets.push(Asset {
+            name: "latest.json".into(),
+            browser_download_url: format!("{RELEASES_URL}download/dev0.5/latest.json"),
+        });
+        let status = select_release(&releases, "0.4.0-dev.1", "macos", "aarch64").unwrap();
+        assert_eq!(status.version, "0.5.0-dev.1");
+        assert!(status.updater_url.is_some());
+        for url in [
+            "https://github.com/other/repo/releases/download/dev0.5/latest.json",
+            "https://github.com/NekoOS-Group/NekoCrate-Launcher/releases/download/dev0.4/latest.json",
+            "https://github.com/NekoOS-Group/NekoCrate-Launcher/releases/download/dev0.5/latest.json?redirect=other",
+        ] {
+            releases[0].assets.last_mut().unwrap().browser_download_url = url.into();
+            assert!(
+                select_release(&releases, "0.4.0-dev.1", "macos", "aarch64")
+                    .unwrap()
+                    .updater_url
+                    .is_none()
+            );
+        }
+        let artifact = format!(
+            "{RELEASES_URL}download/dev0.5/NekoCrate-Launcher-dev0.5-mac-appsilicon.app.tar.gz"
+        );
+        assert!(is_update_artifact(&artifact, "dev0.5"));
+        assert!(!is_update_artifact(&artifact, "dev0.4"));
+        assert!(!is_update_artifact(
+            &(artifact.clone() + "/../payload"),
+            "dev0.5"
+        ));
+        assert!(!is_update_artifact(&(artifact + "?token=other"), "dev0.5"));
+    }
     fn release(tag: &str, prerelease: bool) -> Release {
         Release {
             tag_name: tag.into(),

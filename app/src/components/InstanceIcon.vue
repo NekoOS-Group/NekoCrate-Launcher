@@ -17,11 +17,13 @@ const tintMatrix = computed(() => {
 const cubeFaces = computed(() => {
   const faces = material.value.faces;
   if (!faces) return [];
+  // Each projected cube edge is 30px: slanted (26, 15), vertical (0, 30).
+  // Keep the cube centered at (32, 32) within the existing 64px viewport.
   return [
     {
       id: "top",
       texture: faces.top,
-      transform: "matrix(1.625 .9375 -1.625 .9375 32 4)",
+      transform: "matrix(1.625 .9375 -1.625 .9375 32 2)",
       shade: 0,
       tint: !!faces.tint,
       overlay: undefined,
@@ -29,7 +31,7 @@ const cubeFaces = computed(() => {
     {
       id: "side",
       texture: faces.side,
-      transform: "matrix(1.625 .9375 0 1.625 6 19)",
+      transform: "matrix(1.625 .9375 0 1.875 6 17)",
       shade: 0.12,
       tint: false,
       overlay: faces.sideOverlay,
@@ -37,7 +39,7 @@ const cubeFaces = computed(() => {
     {
       id: "front",
       texture: faces.front || faces.side,
-      transform: "matrix(1.625 -.9375 0 1.625 32 34)",
+      transform: "matrix(1.625 -.9375 0 1.875 32 32)",
       shade: 0.28,
       tint: false,
       overlay: faces.sideOverlay,

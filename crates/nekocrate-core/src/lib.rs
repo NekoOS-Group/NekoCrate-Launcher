@@ -1,20 +1,28 @@
 pub mod auth;
 pub mod download;
 mod download_concurrency;
+pub mod fabric;
+pub mod folder_import;
 mod game_options;
 pub mod java;
+pub mod java_compatibility;
 mod language;
+pub mod memory;
 mod migration;
 pub mod minecraft;
 pub mod model;
+#[cfg(test)]
+mod modloader_tests;
 pub mod network;
 mod proxy_credentials;
+mod runtime_compatibility;
 pub mod skin;
 pub mod storage;
 #[cfg(test)]
 mod test_http;
 pub mod updates;
 mod verification;
+pub mod version;
 
 use anyhow::{Context, Result, bail};
 use fs2::FileExt;
@@ -54,6 +62,12 @@ pub struct Snapshot {
     pub running: Vec<String>,
 }
 impl Launcher {
+    /// Only call after the host has stopped accepting work and is about to exit.
+    /// Relaunch may spawn the replacement before this process has fully exited.
+    pub fn release_data_lock_for_restart(&self) -> Result<()> {
+        FileExt::unlock(&self.0._lock).context("无法释放启动器数据目录锁")
+    }
+
     pub fn open(root: Option<PathBuf>) -> Result<Self> {
         let root = root
             .or_else(|| std::env::var_os("NEKOCRATE_DATA_DIR").map(PathBuf::from))
@@ -86,14 +100,16 @@ impl Launcher {
         ] {
             fs::create_dir_all(root.join(dir))?;
         }
-        Ok(Self(Arc::new(Shared {
+        let launcher = Self(Arc::new(Shared {
             root,
             _lock: lock,
             db: Mutex::new(db),
             operation: tokio::sync::Mutex::new(()),
             progress_scanned: tokio::sync::Mutex::new(HashSet::new()),
             games: Mutex::new(HashMap::new()),
-        })))
+        }));
+        launcher.refresh_local_versions()?;
+        Ok(launcher)
     }
     pub fn root(&self) -> &Path {
         &self.0.root
@@ -108,6 +124,57 @@ impl Launcher {
     }
     pub fn settings(&self) -> Settings {
         self.0.db.lock().unwrap().settings.clone()
+    }
+    pub fn memory_options(&self, id: &str) -> Result<memory::MemoryOptions> {
+        Ok(memory::options(self.root(), &self.instance(id)?))
+    }
+    /// Reconcile linked/managed profiles once at startup, not on every UI snapshot.
+    /// Existing packs become launchable without installing them again.
+    fn refresh_local_versions(&self) -> Result<()> {
+        let mut updates = Vec::new();
+        for instance in self.snapshot().database.instances {
+            let game = instance.game_dir(self.root());
+            if !game.is_dir() {
+                continue;
+            }
+            let Ok(discovered) = self.discover_versions(&game, "") else {
+                continue;
+            };
+            let mut versions = instance.versions.clone();
+            for mut found in discovered {
+                if let Some(existing) = versions.iter_mut().find(|v| v.id == found.id) {
+                    // Readiness is only a cheap discovery hint; a prior completed
+                    // install is not downgraded by this scan. Launch validates it.
+                    found.installed |= existing.installed;
+                    found.download_progress = if found.installed {
+                        100.0
+                    } else {
+                        existing.download_progress
+                    };
+                    *existing = found;
+                } else {
+                    versions.push(found);
+                }
+            }
+            if serde_json::to_value(&versions)? != serde_json::to_value(&instance.versions)? {
+                updates.push((instance.id, versions));
+            }
+        }
+        if !updates.is_empty() {
+            self.mutate(|db| {
+                for (id, versions) in updates {
+                    if let Some(instance) = db.instances.iter_mut().find(|i| i.id == id) {
+                        instance.versions = versions;
+                        if instance.selected_version.is_none() {
+                            instance.selected_version =
+                                instance.versions.first().map(|v| v.id.clone());
+                        }
+                    }
+                }
+                Ok(())
+            })?;
+        }
+        Ok(())
     }
     /// Backfill old interrupted installs once per process without network work.
     pub async fn recover_download_progress(&self) -> Result<bool> {
@@ -249,11 +316,11 @@ impl Launcher {
                 .find(|i| i.id == id)
                 .context("实例不存在")?;
             if !instance.versions.iter().any(|v| v.id == version) {
-                instance.versions.push(InstanceVersion {
-                    id: version.into(),
-                    installed: false,
-                    download_progress: 0.0,
-                });
+                instance.versions.push(version::describe(
+                    self.root(),
+                    &instance.game_dir(self.root()),
+                    version,
+                ));
             }
             instance.selected_version = Some(version.into());
             Ok(instance.clone())
@@ -396,14 +463,11 @@ impl Launcher {
             versions: if version.is_empty() {
                 vec![]
             } else {
-                vec![InstanceVersion {
-                    id: version.into(),
-                    installed: false,
-                    download_progress: 0.0,
-                }]
+                vec![InstanceVersion::pending(version)]
             },
             selected_version: (!version.is_empty()).then(|| version.into()),
             memory_mb: 2048,
+            memory_mode: MemoryMode::Auto,
             java_path: None,
             created_at: storage::now(),
             last_played: None,
@@ -431,6 +495,26 @@ impl Launcher {
         java_path: Option<String>,
         icon: Option<u8>,
     ) -> Result<()> {
+        self.update_instance_memory(
+            id,
+            name,
+            memory::MemoryConfig {
+                mode: MemoryMode::Custom,
+                custom_mb: memory_mb,
+            },
+            java_path,
+            icon,
+        )
+    }
+    pub fn update_instance_memory(
+        &self,
+        id: &str,
+        name: &str,
+        memory: memory::MemoryConfig,
+        java_path: Option<String>,
+        icon: Option<u8>,
+    ) -> Result<()> {
+        let memory_mb = memory.custom_mb;
         // Metadata-only edits use the database lock. Install/launch already own
         // an Instance snapshot; saving preferences must not wait for downloads
         // or overwrite their version state, directory or installation plan.
@@ -452,6 +536,7 @@ impl Launcher {
                 .context("实例不存在")?;
             i.name = name.trim().into();
             i.memory_mb = memory_mb;
+            i.memory_mode = memory.mode;
             i.java_path = java_path.filter(|s| !s.trim().is_empty());
             if let Some(icon) = icon {
                 i.icon = Some(icon);
@@ -467,12 +552,7 @@ impl Launcher {
         if !source.is_dir() {
             bail!("导入来源必须是一个目录：{}", source.display());
         }
-        let is_game_directory = |path: &Path| {
-            ["saves", "mods", "versions", "options.txt"]
-                .iter()
-                .any(|entry| path.join(entry).exists())
-        };
-        let source = if is_game_directory(&source) {
+        let source = if folder_import::is_game_directory(&source) {
             source
         } else if source.join(".minecraft").is_dir() {
             source.join(".minecraft")
@@ -483,7 +563,7 @@ impl Launcher {
         } else {
             source
         };
-        if !is_game_directory(&source) {
+        if !folder_import::is_game_directory(&source) {
             bail!("请选择含 saves、mods、versions 或 options.txt 的游戏目录");
         }
         let source = source.canonicalize()?;
@@ -505,36 +585,38 @@ impl Launcher {
         }
         Ok(source)
     }
-    fn discover_versions(source: &Path, version: &str) -> Result<Vec<InstanceVersion>> {
+    fn discover_versions(&self, source: &Path, version: &str) -> Result<Vec<InstanceVersion>> {
+        self.discover_versions_cancellable(source, version, None)
+    }
+    fn discover_versions_cancellable(
+        &self,
+        source: &Path,
+        version: &str,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<Vec<InstanceVersion>> {
         let mut versions = vec![];
         if source.join("versions").is_dir() {
             for entry in fs::read_dir(source.join("versions"))? {
+                if let Some(cancel) = cancel {
+                    download::check_cancel(cancel)?;
+                }
                 let entry = entry?;
                 let id = entry.file_name().to_string_lossy().into_owned();
                 if !entry.file_type()?.is_dir() || storage::safe_version(&id).is_err() {
                     continue;
                 }
-                if let Ok(metadata) =
-                    storage::read_json::<Version>(&entry.path().join(format!("{id}.json")))
-                    && metadata.id == id
-                    && metadata.inherits_from.is_none()
+                if let Ok(metadata) = storage::read_json::<serde_json::Value>(
+                    &entry.path().join(format!("{id}.json")),
+                ) && metadata["id"].as_str() == Some(&id)
                 {
-                    versions.push(InstanceVersion {
-                        id,
-                        installed: false,
-                        download_progress: 0.0,
-                    });
+                    versions.push(version::describe(self.root(), source, &id));
                 }
             }
         }
         versions.sort_by(|a, b| a.id.cmp(&b.id));
         if !version.is_empty() && !versions.iter().any(|v| v.id == version) {
             storage::safe_version(version)?;
-            versions.push(InstanceVersion {
-                id: version.to_owned(),
-                installed: false,
-                download_progress: 0.0,
-            });
+            versions.push(version::describe(self.root(), source, version));
         }
         Ok(versions)
     }
@@ -546,17 +628,27 @@ impl Launcher {
         let previous = self.instance(id)?;
         let source = self.linkable_directory(&source, Some(id))?;
         let old_game = previous.game_dir(self.root());
-        let mut versions = Self::discover_versions(&source, "")?;
+        let mut versions = self.discover_versions(&source, "")?;
         for old in &previous.versions {
             if old.installed {
-                for extension in ["json", "jar"] {
-                    let relative = PathBuf::from("versions")
-                        .join(&old.id)
-                        .join(format!("{}.{extension}", old.id));
-                    if !storage::same_file_contents(
-                        &old_game.join(&relative),
-                        &source.join(&relative),
-                    )? {
+                let old_version = version::resolve(self.root(), &old_game, &old.id)?;
+                let new_version = version::resolve(self.root(), &source, &old.id)?;
+                if serde_json::to_value(&old_version.version)?
+                    != serde_json::to_value(&new_version.version)?
+                {
+                    bail!("目标目录的版本配置不同：{}，原关联未修改", old.id);
+                }
+                for (old_path, new_path) in [
+                    (
+                        version::metadata_path(&old_game, &old.id)?,
+                        version::metadata_path(&source, &old.id)?,
+                    ),
+                    (
+                        version::client_path(&old_game, &old_version.version)?,
+                        version::client_path(&source, &new_version.version)?,
+                    ),
+                ] {
+                    if !storage::same_file_contents(&old_path, &new_path)? {
                         bail!(
                             "目标目录缺少或包含不同的已安装版本 {}；请先核对文件，原关联未修改",
                             old.id
@@ -608,8 +700,16 @@ impl Launcher {
         version: String,
     ) -> Result<Instance> {
         let _guard = self.0.operation.lock().await;
+        self.import_unlocked(source, name, version)
+    }
+    fn import_unlocked(&self, source: PathBuf, name: String, version: String) -> Result<Instance> {
         let source = self.linkable_directory(&source, None)?;
-        let versions = Self::discover_versions(&source, &version)?;
+        let versions = self.discover_versions(&source, &version)?;
+        let name = if name.trim().is_empty() {
+            folder_import::default_name(&source)
+        } else {
+            name
+        };
         let i = self.create_unlocked(&name, "", Some(source))?;
         if let Err(e) = self.mutate(|db| {
             let target = db.instances.iter_mut().find(|x| x.id == i.id).unwrap();
@@ -652,6 +752,7 @@ impl Launcher {
             target.versions = original.versions.clone();
             target.selected_version = original.selected_version.clone();
             target.memory_mb = original.memory_mb;
+            target.memory_mode = original.memory_mode;
             target.java_path = original.java_path.clone();
             target.icon = original.icon;
             Ok(())
@@ -693,6 +794,84 @@ impl Launcher {
     pub fn cached_versions(&self) -> Option<VersionManifest> {
         storage::read_json(&self.root().join("metadata/manifest.json")).ok()
     }
+    pub async fn fabric_versions(
+        &self,
+        game_version: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<fabric::LoaderVersion>> {
+        fabric::versions(
+            self.root(),
+            game_version,
+            &download::Downloader::new(self.root(), self.settings())?,
+            cancel,
+        )
+        .await
+    }
+
+    pub async fn add_fabric_version(
+        &self,
+        id: &str,
+        game_version: &str,
+        loader_version: &str,
+        cancel: &CancellationToken,
+        sink: &EventSink,
+    ) -> Result<Instance> {
+        let _guard = self.0.operation.lock().await;
+        self.idle(id)?;
+        let game = self.available_game_dir(id)?;
+        let profile_id = fabric::version_id(game_version, loader_version)?;
+        let path = version::metadata_path(&game, &profile_id)?;
+        let downloader = download::Downloader::new(self.root(), self.settings())?;
+        sink(Event::workflow("metadata", "解析 Fabric 版本"));
+        let profile = fabric::profile(
+            self.root(),
+            game_version,
+            loader_version,
+            &downloader,
+            cancel,
+        )
+        .await?;
+        let parent =
+            minecraft::version(self.root(), game_version, &downloader, cancel, sink).await?;
+        // Resolve everything before touching an existing game tree.
+        version::resolve_chain(&[serde_json::to_value(&parent)?, profile.clone()])?;
+        download::check_cancel(cancel)?;
+        let parent_path = version::metadata_path(&game, game_version)?;
+        if !parent_path.exists() {
+            storage::write_json(&parent_path, &parent)?;
+        }
+        if path.exists() {
+            let existing: serde_json::Value = storage::read_json(&path)?;
+            if version::detect_loader(&existing) != version::detect_loader(&profile)
+                || existing["inheritsFrom"].as_str() != Some(game_version)
+            {
+                bail!("同名版本已经存在且配置不同，请保留原版本或使用其他加载器版本");
+            }
+        } else {
+            storage::write_json(&path, &profile)?;
+        }
+        let mut entry = version::describe(self.root(), &game, &profile_id);
+        entry.minecraft_version = Some(game_version.into());
+        entry.loader = Some(ModLoader {
+            kind: "fabric".into(),
+            version: loader_version.into(),
+        });
+        self.mutate(|db| {
+            let instance = db
+                .instances
+                .iter_mut()
+                .find(|i| i.id == id)
+                .context("实例不存在")?;
+            if let Some(existing) = instance.versions.iter_mut().find(|v| v.id == profile_id) {
+                entry.download_progress = existing.download_progress;
+                *existing = entry;
+            } else {
+                instance.versions.push(entry);
+            }
+            instance.selected_version = Some(profile_id);
+            Ok(instance.clone())
+        })
+    }
     pub async fn install(
         &self,
         id: &str,
@@ -727,7 +906,15 @@ impl Launcher {
             .context("请先为此实例添加并选择一个版本")?;
         let game = self.available_game_dir(id)?;
         download::check_cancel(cancel)?;
-        minecraft::check_local_install(&game, &selected.id)?;
+        let local: Option<serde_json::Value> =
+            storage::read_json(&version::metadata_path(&game, &selected.id)?).ok();
+        let is_fabric = local
+            .as_ref()
+            .and_then(version::detect_loader)
+            .is_some_and(|l| l.kind == "fabric");
+        if !is_fabric {
+            minecraft::check_local_install(&game, &selected.id)?;
+        }
         let settings = self.settings();
         let downloader = download::Downloader::new(self.root(), settings.clone())?;
         let downloader = if full_verification {
@@ -735,8 +922,25 @@ impl Launcher {
         } else {
             downloader
         };
-        sink(Event::new("stage", "获取官方版本元数据"));
-        let v = minecraft::version(self.root(), &selected.id, &downloader, cancel, &sink).await?;
+        let v = if is_fabric {
+            sink(Event::new("stage", "解析 Fabric 版本"));
+            let mut profile = local.unwrap();
+            fabric::prepare_libraries(&mut profile, &downloader, cancel).await?;
+            // Save hashes so pause/cancel/restart can reuse exactly the same plan.
+            storage::write_json(&version::metadata_path(&game, &selected.id)?, &profile)?;
+            let parent_id = profile["inheritsFrom"]
+                .as_str()
+                .context("Fabric 配置缺少基础版本")?;
+            if !version::metadata_path(&game, parent_id)?.is_file() {
+                let parent =
+                    minecraft::version(self.root(), parent_id, &downloader, cancel, &sink).await?;
+                storage::write_json(&version::metadata_path(&game, parent_id)?, &parent)?;
+            }
+            version::resolve(self.root(), &game, &selected.id)?.version
+        } else {
+            sink(Event::new("stage", "获取官方版本元数据"));
+            minecraft::version(self.root(), &selected.id, &downloader, cancel, &sink).await?
+        };
         // Resolving metadata does not change the game tree or its installed state.
         self.set_installed(id, &selected.id, false)?;
         sink(Event::workflow("files", "下载与校验游戏文件"));
@@ -783,7 +987,7 @@ impl Launcher {
         sink(Event::workflow("java", "准备 Java"));
         let java = java::ensure(
             self.root(),
-            v.java_version.as_ref().map_or(8, |j| j.major),
+            java::JavaRequirement::for_instance(&v, &game, instance.java_path.as_deref()).await?,
             instance.java_path.as_deref(),
             settings.auto_java,
             &downloader,
@@ -794,7 +998,9 @@ impl Launcher {
         download::check_cancel(cancel)?;
         sink(Event::workflow("finalize", "保存安装信息"));
         let version_dir = self.game_dir(id)?.join("versions").join(&selected.id);
-        storage::write_json(&version_dir.join(format!("{}.json", selected.id)), &v)?;
+        if !is_fabric {
+            storage::write_json(&version_dir.join(format!("{}.json", selected.id)), &v)?;
+        }
         storage::write_json(&version_dir.join("runtime.json"), &java)?;
         self.set_installed(id, &selected.id, true)?;
         sink(Event::new("complete", "游戏文件与 Java 已准备好"));
@@ -919,25 +1125,26 @@ impl Launcher {
         let instance = self.instance(id)?;
         let game = self.available_game_dir(id)?;
         let selected = instance.selected().context("请先选择游戏版本")?;
-        if !selected.installed {
-            bail!("请先安装或修复所选版本");
-        }
-        let v: Version = storage::read_json(
-            &self
-                .game_dir(id)?
-                .join("versions")
-                .join(&selected.id)
-                .join(format!("{}.json", selected.id)),
-        )?;
-        if v.id != selected.id {
-            bail!("版本元数据与所选版本不一致，请修复该版本");
-        }
+        let mut resolved = version::resolve(self.root(), &game, &selected.id)?;
         let settings = self.settings();
         let downloader = download::Downloader::new(self.root(), settings.clone())?;
+        runtime_compatibility::prepare(&game, &mut resolved.version, &downloader, cancel, &sink)
+            .await?;
+        version::check_launch_files(self.root(), &game, &resolved)?;
+        let v = resolved.version;
+        let root = self.root().to_owned();
+        let native_game = game.clone();
+        let native_version = v.clone();
+        let native_cancel = cancel.clone();
+        tokio::task::spawn_blocking(move || {
+            minecraft::prepare_local_natives(&root, &native_game, &native_version, &native_cancel)
+        })
+        .await??;
+        runtime_compatibility::prepare_openal(&game, &v, &downloader, cancel, &sink).await?;
         sink(Event::workflow("java", "准备 Java"));
         let java = java::ensure(
             self.root(),
-            v.java_version.as_ref().map_or(8, |j| j.major),
+            java::JavaRequirement::for_instance(&v, &game, instance.java_path.as_deref()).await?,
             instance.java_path.as_deref(),
             settings.auto_java,
             &downloader,
@@ -948,7 +1155,33 @@ impl Launcher {
         sink(Event::workflow("account", "准备游戏身份"));
         let session = tokio::select! {_=cancel.cancelled()=>bail!("启动已取消"),r=self.launch_session(&sink)=>r?};
         sink(Event::workflow("start", "启动游戏"));
-        let args = minecraft::arguments(&v, self.root(), &instance, &session)?;
+        let memory_instance = instance.clone();
+        let memory_root = self.root().to_owned();
+        let memory =
+            tokio::task::spawn_blocking(move || memory::options(&memory_root, &memory_instance))
+                .await?;
+        let memory_mb = memory.allocation(
+            memory::MemoryConfig {
+                mode: instance.memory_mode,
+                custom_mb: instance.memory_mb,
+            },
+            &java.arch,
+        )?;
+        sink(Event::new(
+            "info",
+            format!(
+                "启动内存：{memory_mb} MiB（{}）",
+                match instance.memory_mode {
+                    MemoryMode::Auto => "自动",
+                    MemoryMode::Recommended => "推荐配置",
+                    MemoryMode::Minimum => "最小配置",
+                    MemoryMode::Custom => "自定义",
+                }
+            ),
+        ));
+        let args =
+            minecraft::arguments_with_memory(&v, self.root(), &instance, &session, memory_mb)?;
+        let working_directory = version::working_directory(&game, &v)?;
         let log_dir = self.instance_dir(id)?.join("launcher-logs");
         fs::create_dir_all(&log_dir)?;
         let log = Arc::new(tokio::sync::Mutex::new(
@@ -957,14 +1190,14 @@ impl Launcher {
         let mut command = tokio::process::Command::new(&java.path);
         command
             .args(args)
-            .current_dir(&game)
+            .current_dir(&working_directory)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
         #[cfg(windows)]
         command.creation_flags(0x08000000);
         download::check_cancel(cancel)?;
-        game_options::apply_language(&game, &settings)?;
+        game_options::apply_language(&working_directory, &settings)?;
         let mut child = command
             .spawn()
             .context("无法启动 Java 进程，请检查 Java 路径和系统权限")?;
@@ -1001,11 +1234,18 @@ impl Launcher {
             ..Event::new("game_started", format!("游戏已启动 · PID {pid}"))
         });
         tokio::spawn(async move {
-            let status = tokio::select! {r=child.wait()=>r,_=cancel.cancelled()=>{let _=child.kill().await;child.wait().await}};
+            let (status, stopped) = tokio::select! {
+                r=child.wait()=>(r, false),
+                _=cancel.cancelled()=>{let _=child.kill().await;(child.wait().await, true)}
+            };
             let _ = out.await;
             let _ = err.await;
             launcher.0.games.lock().unwrap().remove(&id);
+            let unexpected = !stopped
+                && !cancel.is_cancelled()
+                && !status.as_ref().is_ok_and(|status| status.success());
             let message = match status {
+                _ if stopped => "游戏已停止".into(),
                 Ok(s) if s.success() => "游戏已正常退出".into(),
                 Ok(s) => format!(
                     "游戏已退出（状态 {s}）。如非主动停止，请查看日志，检查 Java、内存和游戏配置。"
@@ -1014,7 +1254,14 @@ impl Launcher {
             };
             sink(Event {
                 instance_id: Some(id),
-                ..Event::new("game_exit", message)
+                ..Event::new(
+                    if unexpected {
+                        "game_crash"
+                    } else {
+                        "game_exit"
+                    },
+                    message,
+                )
             });
         });
         Ok(pid)
@@ -1606,7 +1853,7 @@ mod tests {
         fs::write(
             &java,
             r#"#!/bin/sh
-if [ "$1" = "-version" ]; then
+if [ "$2" = "-version" ]; then
   printf '%s\n' 'java version "1.8.0_fixture"' >&2
   exit 0
 fi
@@ -1643,6 +1890,7 @@ printf '%s\n' 'offline session 0 started'
         let version_dir = game.join("versions/1.21.1");
         fs::create_dir_all(&version_dir).unwrap();
         storage::write_json(&version_dir.join("1.21.1.json"), &version).unwrap();
+        fs::write(version_dir.join("1.21.1.jar"), b"fixture client").unwrap();
         launcher
             .mutate(|db| {
                 db.instances[0].versions[0].installed = true;
@@ -1795,6 +2043,20 @@ printf '%s\n' 'offline session 0 started'
             reopened.instance(&instance.id).unwrap().game_directory,
             Some(game)
         );
+    }
+
+    #[test]
+    fn update_restart_hands_off_the_data_lock_before_old_process_exits() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = Launcher::open(Some(dir.path().into())).unwrap();
+        assert!(Launcher::open(Some(dir.path().into())).is_err());
+        old.release_data_lock_for_restart().unwrap();
+        let replacement = Launcher::open(Some(dir.path().into())).unwrap();
+        drop(old);
+        // Dropping the old launcher must not unlock the replacement's descriptor.
+        assert!(Launcher::open(Some(dir.path().into())).is_err());
+        drop(replacement);
+        assert!(Launcher::open(Some(dir.path().into())).is_ok());
     }
 
     #[tokio::test]

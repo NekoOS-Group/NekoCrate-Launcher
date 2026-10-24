@@ -25,7 +25,9 @@ walkdir = "2"
 regex = "1"
 fs2 = "0.4"
 semver = "1"
+toml = "0.8"
 sys-locale = "0.3"
+sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }

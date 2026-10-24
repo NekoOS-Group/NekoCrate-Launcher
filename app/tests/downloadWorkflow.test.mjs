@@ -292,7 +292,7 @@ test("IPC 文件事件只更新所属任务，失败统一提供给角落通知�
     assert.equal(ui.displayedTask.value.workflow.files.size, 1);
     assert.equal(ui.displayedTask.value.workflow.files.get("a").downloaded, 55);
     assert.equal(
-      ui.logs.value.filter((l) => l.message === "").length,
+      ui.logStore.snapshot().filter((l) => l.message === "").length,
       1,
       "仅流程测试事件可写日志，文件事件不写日志",
     );
