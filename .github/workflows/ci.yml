@@ -20,7 +20,19 @@ concurrency:
 jobs:
   checks:
     name: Tests, lint and frontend
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      packages: read
+    container:
+      # Fork PR tokens may not read the repository's container package.
+      image: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'ghcr.io/nekoos-group/nekocrate-linux-builder@sha256:dc91e5b86243c9114e7e70b10393b0a9c9ed94945b8194996591ae00a742ec7b' || '' }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ github.token }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.93.1
@@ -31,11 +43,15 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: app/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
           cache-workspace-crates: true
       - name: Install Linux build dependencies
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
         run: sudo bash scripts/install_linux_dependencies.sh libwebkit2gtk-4.1-dev build-essential libssl-dev librsvg2-dev libayatana-appindicator3-dev libdbus-1-dev
       - run: cargo fmt --all -- --check
       - run: npm ci

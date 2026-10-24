@@ -44,6 +44,22 @@ runner 分别执行三次 apt 安装和三次镜像冷拉取、启动、依赖�
 和 `linux-setup-comparison` artifact。镜像构建与推送的一次性成本不算入每次拉取
 耗时；镜像失败或没有收益时保留原有标签。
 
+CI 与发布工作流使用已经验证的 **digest**，不会因为 `jammy-v1` 标签更新就静默更换
+构建环境。重建后应先查看验证与对比结果，再同步更新两个 workflow 中的 digest。
+Fork PR 在普通 Ubuntu runner 上安装依赖，避免依赖外部贡献者没有权限读取的镜像。
+
+2026-10-24 的实测（workflow run `40081170653`）：
+
+| 方法 | 三次耗时（秒） | 中位数（秒） |
+| --- | --- | --- |
+| apt 安装并检查依赖 | 40.426 / 35.896 / 36.148 | 36.148 |
+| 镜像冷拉取、启动并检查依赖 | 21.022 / 21.429 / 21.195 | 21.195 |
+
+依赖准备阶段每次节省 14.953 秒，约 41.4%。这不是整条发布流水线的加速比例，
+也不包含首次镜像构建、工具链准备、Rust 编译或安装包压缩。
+
+首次清理移除了 24 个缓存，释放 5.211 GiB，仓库缓存由 10.631 GiB 降至 5.421 GiB。
+
 ## 发布文件的职责
 
 | 文件 | 用途 | 是否为客户端更新所需 |
@@ -80,6 +96,10 @@ cargo install --git https://github.com/NekoOS-Group/NekoCrate-Launcher.git \
 不是下载 GitHub Release 的安装包。发布到 crates.io 则需先为 core/CLI 补全发布
 元数据、给 path 依赖补充版本、发布 core 后再发布 CLI；单纯上传 `.crate` 到 Release
 不会启用 `cargo install nekocrate-cli`。
+
+已在 macOS ARM64 用上述 Git 命令安装到独立临时目录，并验证 `--version` 和
+`--help`。直接执行 `cargo package -p nekocrate-cli --no-verify --locked --offline`
+会明确报告 core path 依赖缺少版本要求，当前尚不是可直接上传 crates.io 的包。
 
 桌面 UI 还需处理前端产物打包：当前 `frontendDist` 指向 crate 外的 `app/dist`，且
 Cargo 不会执行 Tauri CLI 的 `beforeBuildCommand`。需要将预构建前端包含进 desktop

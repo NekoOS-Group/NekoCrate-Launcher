@@ -126,17 +126,30 @@ jobs:
         include:
           - os: macos-14
             platform: mac-appsilicon
+            image: ""
             target: aarch64-apple-darwin
             bundles: app,dmg
           - os: windows-2022
             platform: win-amd64
+            image: ""
             target: x86_64-pc-windows-msvc
             bundles: nsis
           - os: ubuntu-22.04
             platform: linux-amd64
+            image: ghcr.io/nekoos-group/nekocrate-linux-builder@sha256:dc91e5b86243c9114e7e70b10393b0a9c9ed94945b8194996591ae00a742ec7b
             target: x86_64-unknown-linux-gnu
             bundles: deb,appimage
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      actions: read
+      packages: read
+    container:
+      # An empty image leaves the macOS/Windows jobs on their native runners.
+      image: ${{ matrix.image }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ github.token }}
     timeout-minutes: 60
     defaults:
       run:
@@ -161,9 +174,6 @@ jobs:
           key: release-${{ matrix.target }}
           cache-on-failure: true
           cache-workspace-crates: true
-      - name: Install Linux build dependencies
-        if: runner.os == 'Linux'
-        run: sudo bash scripts/install_linux_dependencies.sh libwebkit2gtk-4.1-dev build-essential libssl-dev librsvg2-dev libayatana-appindicator3-dev libdbus-1-dev libfuse2 patchelf
       - name: Install only the locked Tauri CLI
         run: |
           TAURI_CLI_VERSION=$(node -p 'require("./app/package-lock.json").packages["node_modules/@tauri-apps/cli"].version')
