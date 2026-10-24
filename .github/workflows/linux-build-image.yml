@@ -110,6 +110,9 @@ jobs:
           printf '#include <webkit2/webkit2.h>\nint main(void) { return webkit_get_major_version() < 2; }\n' > /tmp/webkit-smoke.c
           cc /tmp/webkit-smoke.c $(pkg-config --cflags --libs webkit2gtk-4.1) -o /tmp/webkit-smoke
           /tmp/webkit-smoke
+          # AppImage's output plugin invokes file even after Rust links successfully.
+          file --version
+          file /tmp/webkit-smoke
           python -m unittest discover -s scripts/tests
 
   compare:

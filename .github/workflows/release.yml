@@ -187,6 +187,14 @@ jobs:
           merge-multiple: true
       - name: Verify frontend before compiling Rust
         run: python scripts/frontend_artifact.py verify app/dist
+      - name: Ensure AppImage packaging tools
+        if: runner.os == 'Linux'
+        run: |
+          # Older pinned builder images predate this packaging dependency.
+          if ! command -v file >/dev/null; then
+            bash scripts/install_linux_dependencies.sh file
+          fi
+          file --version
       - name: Build release installers
         run: node "$RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" build --verbose --config src-tauri/tauri.release.conf.json --target "${{ matrix.target }}" --bundles "${{ matrix.bundles }}" --ci -- --locked
         working-directory: app
