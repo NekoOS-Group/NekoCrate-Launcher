@@ -188,7 +188,7 @@ jobs:
       - name: Verify frontend before compiling Rust
         run: python scripts/frontend_artifact.py verify app/dist
       - name: Build release installers
-        run: node "$RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" build --config src-tauri/tauri.release.conf.json --target "${{ matrix.target }}" --bundles "${{ matrix.bundles }}" --ci -- --locked
+        run: node "$RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" build --verbose --config src-tauri/tauri.release.conf.json --target "${{ matrix.target }}" --bundles "${{ matrix.bundles }}" --ci -- --locked
         working-directory: app
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
