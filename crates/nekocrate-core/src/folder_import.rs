@@ -263,6 +263,10 @@ mod tests {
             .into_iter()
             .map(Result::unwrap)
             .filter(|entry| entry.file_type().is_file())
+            // Windows enforces the launcher's exclusive byte-range lock even
+            // against another file handle in this same process. Snapshot game
+            // and persisted metadata files, not the live synchronization file.
+            .filter(|entry| entry.file_name() != "launcher.lock")
             .map(|entry| {
                 (
                     entry.path().strip_prefix(path).unwrap().to_owned(),

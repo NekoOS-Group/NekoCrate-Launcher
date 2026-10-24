@@ -11,6 +11,7 @@ fn save(game: &Path, value: &Value) {
     )
     .unwrap();
 }
+#[cfg(unix)]
 fn write(path: &Path, bytes: &[u8]) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, bytes).unwrap();
