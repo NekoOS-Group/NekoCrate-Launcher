@@ -66,11 +66,11 @@ npm run tauri build
 
 Linux CI 和发布构建使用固定 digest 的 Ubuntu 22.04 预装依赖镜像。镜像升级前在全新的 runner 上比较三次 apt 安装与三次冷拉取；构建缓存自动保留各平台最新代次，定期清理旧标签范围与重复代次。规则、实测数据、手动操作和发布文件说明见 [构建基础设施](docs/build-infrastructure.md)。
 
-开发版本发布由 `.github/workflows/release.yml` 管理：先将提交推送到 `neko_dev` / `main`，再推送 `dev*` 标签；标签任务将构建调度到默认分支，复用跨版本的 Rust 发布缓存（手动发布也选择默认分支），实际源码仍固定为标签提交；发布等待相同提交的 CI 成功，直接复用其前端产物，不再安装前端依赖、重跑检查或重建前端。三个原生 runner 仅安装锁定版本的 Tauri CLI，在编译前检查前端入口与资源，编译后执行实际二进制的 `--verify-frontend`，不打开窗口或用户数据；分别编译并打包 macOS ARM64、Windows AMD64、Ubuntu 22.04 AMD64。全部成功后校验来源提交、架构与 SHA-256，上传 DMG / app ZIP、NSIS EXE、DEB / AppImage，再公开 GitHub 预发布版。若 CI 失败或产物已过期，需要先重跑对应提交的 CI，再重跑发布任务。构建使用 Rust 1.93.1、Node.js 22 和锁定依赖，`docs/releases/<标签>.md` 保存发布说明。`dev0.1` 对应应用版本 `0.1.0-dev.1`；`dev0.2` 对应 `0.2.0-dev.1`；`dev0.3` 对应 `0.3.0-dev.1`；`dev0.3.1` 对应 `0.3.1-dev.1`；`dev0.3.2` 对应 `0.3.2-dev.1`；`dev0.4` 对应 `0.4.0-dev.1`；`dev0.5` 对应 `0.5.0-dev.1`。
+开发版本发布由 `.github/workflows/release.yml` 管理：先将提交推送到 `neko_dev` / `main`，再推送 `dev*` 标签；标签任务将构建调度到默认分支，复用跨版本的 Rust 发布缓存（手动发布也选择默认分支），实际源码仍固定为标签提交；发布等待相同提交的 CI 成功，直接复用其前端产物，不再安装前端依赖、重跑检查或重建前端。三个原生 runner 仅安装锁定版本的 Tauri CLI，在编译前检查前端入口与资源，编译后执行实际二进制的 `--verify-frontend`，不打开窗口或用户数据；分别编译并打包 macOS ARM64、Windows AMD64、Ubuntu 22.04 AMD64。全部成功后校验来源提交、架构与 SHA-256，上传 DMG、NSIS EXE、DEB / AppImage，再公开 GitHub 预发布版。若 CI 失败或产物已过期，需要先重跑对应提交的 CI，再重跑发布任务。构建使用 Rust 1.93.1、Node.js 22 和锁定依赖，`docs/releases/<标签>.md` 保存发布说明。`dev0.1` 对应应用版本 `0.1.0-dev.1`；`dev0.2` 对应 `0.2.0-dev.1`；`dev0.3` 对应 `0.3.0-dev.1`；`dev0.3.1` 对应 `0.3.1-dev.1`；`dev0.3.2` 对应 `0.3.2-dev.1`；`dev0.4` 对应 `0.4.0-dev.1`；`dev0.5` 对应 `0.5.0-dev.1`。
 
 应用内更新使用 Tauri updater：macOS 安装后的 `.app`、Windows NSIS 安装版和 Linux AppImage 支持下载、签名验证、安装替换及重启；开发模式、未安装的 macOS 二进制和 Linux DEB 保留手动安装入口。下载可取消，游戏或下载任务运行时保留准备好的更新，任务结束后点击「安装并重启」。已发布的 dev0.4 及以前版本仍需手动安装一次带更新器的新版本。
 
-发布 workflow 需要仓库 Actions Secret `TAURI_SIGNING_PRIVATE_KEY`，加密私钥另设 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。公钥固定在 `tauri.conf.json`；私钥保存在仓库外并备份，不能提交。发布额外生成 macOS `.app.tar.gz`、各平台 `.sig` 和 `latest.json`，清单绑定当前发布标签、版本及平台。客户端同时验证 HTTPS、更新签名及签名中的版本；该签名独立于 Apple / Windows 代码签名。
+发布 workflow 需要仓库 Actions Secret `TAURI_SIGNING_PRIVATE_KEY`，加密私钥另设 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。公钥固定在 `tauri.conf.json`；私钥保存在仓库外并备份，不能提交。发布额外提供 macOS `.app.tar.gz`、`latest.json` 和 `BUILDINFO.json`。构建时生成的签名内嵌到 `latest.json`，不再单独上传 `.sig`；`BUILDINFO.json` 的 `files` 统一记录各安装包和更新清单的大小与 SHA-256，不再提供 `SHA256SUMS` 或 `.app.zip`。更新清单绑定当前发布标签、版本及平台。客户端同时验证 HTTPS、更新签名及签名中的版本；该签名独立于 Apple / Windows 代码签名。
 
 macOS 开发包采用 [Tauri ad-hoc 签名](https://v2.tauri.app/distribute/sign/macos/#ad-hoc-signing)，未做 Apple 公证；Windows 开发包没有发布者代码签名。Linux 使用英文包名满足包管理器命名要求，桌面入口及窗口仍显示「猫咪盒子启动器」。
 

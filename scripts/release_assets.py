@@ -15,7 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "artifacts" / "release"
 TARGETS = {
-    "aarch64-apple-darwin": ("mac-appsilicon", [".dmg", ".app.zip"]),
+    "aarch64-apple-darwin": ("mac-appsilicon", [".dmg"]),
     "x86_64-pc-windows-msvc": ("win-amd64", ["-setup.exe"]),
     "x86_64-unknown-linux-gnu": ("linux-amd64", [".deb", ".AppImage"]),
 }
@@ -27,13 +27,15 @@ UPDATERS = {
 RELEASES_URL = "https://github.com/NekoOS-Group/NekoCrate-Launcher/releases/download"
 
 
-def updater_signature(path, app_version):
+def updater_signature(signature, app_version):
     """Reject missing/wrong-key/version signatures before publishing.
 
     Cryptographic verification is performed by the native updater before install.
     These structural checks also catch signing configuration mistakes in CI.
     """
-    signature = path.read_text(encoding="utf-8").strip()
+    if not isinstance(signature, str) or not signature.strip():
+        raise ValueError("Missing updater signature")
+    signature = signature.strip()
     lines = base64.b64decode(signature, validate=True).decode().splitlines()
     public = read_json(ROOT / "app/src-tauri/tauri.conf.json")["plugins"]["updater"]["pubkey"]
     key_lines = base64.b64decode(public, validate=True).decode().splitlines()
@@ -89,6 +91,27 @@ def sha256(path):
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
+def file_info(path):
+    return {"name": path.name, "size": path.stat().st_size, "sha256": sha256(path)}
+
+
+def build_info(tag, app_version, revision, builds, metadata_files):
+    """One checksum entry per public file; BUILDINFO cannot hash itself."""
+    files = [item for build in builds for item in build["files"]] + metadata_files
+    if len({item["name"] for item in files}) != len(files):
+        raise ValueError("Duplicate files in build information")
+    return {
+        "schema_version": 2,
+        "tag": tag, "version": app_version, "commit": revision,
+        "files": sorted(files, key=lambda item: item["name"]),
+        "builds": [{
+            "platform": build["platform"], "target": build["target"],
+            "files": sorted(item["name"] for item in build["files"]),
+            "updater": {key: build["updater"][key] for key in ("target", "file")},
+        } for build in builds],
+    }
+
+
 def only(directory, pattern):
     matches = list(directory.glob(pattern))
     if len(matches) != 1:
@@ -131,11 +154,6 @@ def collect(tag, target):
         verify_architecture(app / "Contents/MacOS/nekocrate-launcher", target)
         subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], check=True)
         copy(only(bundles / "dmg", "*.dmg"), ".dmg")
-        archive = OUTPUT / f"{prefix}.app.zip"
-        if archive.exists():
-            archive.unlink()
-        subprocess.run(["ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(app), str(archive)], check=True)
-        assets.append(archive)
     elif platform == "win-amd64":
         verify_architecture(release / "nekocrate-launcher.exe", target)
         copy(only(bundles / "nsis", "*.exe"), "-setup.exe")
@@ -147,13 +165,14 @@ def collect(tag, target):
     updater_source = only(bundles / updater_directory, "*" + updater_suffix.removeprefix("-setup"))
     if updater_suffix not in TARGETS[target][1]:
         copy(updater_source, updater_suffix)
-    copy(Path(str(updater_source) + ".sig"), updater_suffix + ".sig")
-    signature = updater_signature(OUTPUT / f"{prefix}{updater_suffix}.sig", app_version)
+    # Tauri still generates a signature beside its bundle. Transport its content
+    # in the internal platform manifest, then embed it in latest.json.
+    signature = updater_signature(Path(str(updater_source) + ".sig").read_text(encoding="utf-8"), app_version)
     manifest = {
         "tag": tag, "version": app_version, "commit": commit(),
         "platform": platform, "target": target,
         "updater": {"target": updater_target, "file": f"{prefix}{updater_suffix}", "signature": signature},
-        "files": [{"name": path.name, "size": path.stat().st_size, "sha256": sha256(path)} for path in assets],
+        "files": [file_info(path) for path in assets],
     }
     write_json(OUTPUT / f"build-{platform}.json", manifest)
     print(json.dumps(manifest, ensure_ascii=False))
@@ -161,7 +180,7 @@ def collect(tag, target):
 
 def verify(tag):
     app_version, revision = version(tag), commit()
-    builds, checksums, expected_assets = [], [], set()
+    builds, expected_assets = [], set()
     platforms = {}
     for target, (platform, suffixes) in TARGETS.items():
         manifest = read_json(OUTPUT / f"build-{platform}.json")
@@ -171,21 +190,23 @@ def verify(tag):
         expected_names = {f"NekoCrate-Launcher-{tag}-{platform}{suffix}" for suffix in suffixes}
         updater_target, updater_suffix, _ = UPDATERS[target]
         updater_file = f"NekoCrate-Launcher-{tag}-{platform}{updater_suffix}"
-        expected_names.update({updater_file, updater_file + ".sig"})
+        expected_names.add(updater_file)
         if len(manifest["files"]) != len(expected_names) or {item["name"] for item in manifest["files"]} != expected_names:
             raise ValueError(f"Incomplete or unexpected assets: {platform}")
         for item in manifest["files"]:
             path = OUTPUT / item["name"]
             if item["size"] <= 0 or path.stat().st_size != item["size"] or sha256(path) != item["sha256"]:
                 raise ValueError(f"Asset checksum mismatch: {path.name}")
-            checksums.append(f"{item['sha256']}  {path.name}\n")
-        signature = updater_signature(OUTPUT / (updater_file + ".sig"), app_version)
+        signature = updater_signature(manifest.get("updater", {}).get("signature"), app_version)
         if manifest.get("updater") != {"target": updater_target, "file": updater_file, "signature": signature}:
             raise ValueError(f"Updater metadata does not match release: {platform}")
         platforms[updater_target] = {"signature": signature, "url": f"{RELEASES_URL}/{tag}/{updater_file}"}
         expected_assets.update(expected_names)
         builds.append(manifest)
-    if {path.name for path in OUTPUT.glob("NekoCrate-Launcher-*")} != expected_assets:
+    allowed_files = expected_assets | {"BUILDINFO.json", "latest.json"} | {
+        f"build-{platform}.json" for platform, _ in TARGETS.values()
+    }
+    if any(path.name not in allowed_files or not path.is_file() for path in OUTPUT.iterdir()):
         raise ValueError("Unexpected assets in release directory")
     write_json(OUTPUT / "latest.json", {
         "version": app_version,
@@ -193,9 +214,9 @@ def verify(tag):
         "pub_date": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "platforms": platforms,
     })
-    checksums.append(f"{sha256(OUTPUT / 'latest.json')}  latest.json\n")
-    (OUTPUT / "SHA256SUMS").write_text("".join(sorted(checksums)), encoding="utf-8")
-    write_json(OUTPUT / "BUILDINFO.json", {"tag": tag, "version": app_version, "commit": revision, "builds": builds})
+    write_json(OUTPUT / "BUILDINFO.json", build_info(
+        tag, app_version, revision, builds, [file_info(OUTPUT / "latest.json")],
+    ))
     print(f"Verified {len(expected_assets)} assets from all three platforms at {revision}")
 
 

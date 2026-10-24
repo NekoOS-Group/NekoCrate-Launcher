@@ -25,7 +25,7 @@
 
 - 安装 dev0.5 后，支持应用内下载更新、验证签名、安装替换并重启。游戏运行或其他任务进行时暂不安装更新。
 - **dev0.4 及更早版本需手动安装一次 dev0.5**，之后才具备应用内安装更新能力。开发模式和 Linux DEB 仍使用手动安装入口。
-- 提供 macOS Apple Silicon 的 DMG / app ZIP、Windows AMD64 的 EXE，以及 Linux AMD64 的 AppImage / DEB；另附更新包、签名、`latest.json`、`SHA256SUMS` 和 `BUILDINFO.json`。
+- 提供 macOS Apple Silicon 的 DMG、Windows AMD64 的 EXE，以及 Linux AMD64 的 AppImage / DEB；另附 macOS 自动更新包 `.app.tar.gz`、`latest.json` 和 `BUILDINFO.json`。更新签名内嵌于 `latest.json`，文件大小及 SHA-256 统一记录在 `BUILDINFO.json`。
 - 发布继续复用同一提交通过 CI 的前端产物与跨版本 Rust 缓存，并检查各平台安装包、架构和更新签名信息。
 
 保留现有账户、实例与设置，不搬移已关联的游戏目录。macOS 包采用临时签名，未公证；Windows 包未做发布者签名。

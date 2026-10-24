@@ -65,23 +65,29 @@ Fork PR 在普通 Ubuntu runner 上安装依赖，避免依赖外部贡献者没
 | 文件 | 用途 | 是否为客户端更新所需 |
 | --- | --- | --- |
 | macOS `.dmg` | 面向用户的拖拽安装介质 | 手动安装入口 |
-| macOS `.app.zip` | 同一 `.app` 的 ZIP 分发形式，与 DMG 内容重叠 | 否，可精简 |
 | macOS `.app.tar.gz` | Tauri updater 使用的应用归档 | 是 |
 | Windows `.exe` / Linux `.AppImage` | 手动安装与自动更新共用 | 是 |
 | Linux `.deb` | 发行版包管理器安装 | 当前自动更新不使用 |
-| `.sig` | 更新包的数字签名 | 签名内容必须保留；独立附件可选 |
 | `latest.json` | 版本、各平台包地址及内嵌签名 | 是 |
-| `BUILDINFO.json` | 提交、平台、文件大小、哈希与构建追溯信息 | 否 |
-| `SHA256SUMS` | 方便用户用标准工具检查下载文件完整性 | 否 |
+| `BUILDINFO.json` | 提交、平台，以及统一的文件大小与 SHA-256 校验清单 | 否，供校验与追溯 |
 
-独立 `.sig` 的内容也写入 `latest.json`，客户端读取内嵌签名。当前发布脚本仍要求
-上传独立签名文件；若要精简附件，需要同时调整产物校验与上传规则。
+从 dev0.5 的附件精简开始，共公开五个安装/更新包和两个 JSON 文件，不再提供
+`.app.zip`、独立 `.sig` 或 `SHA256SUMS`。Tauri 仍在原生 bundle 目录生成 `.sig`，
+收集时检查签名对应的公钥及版本，将内容写入内部平台清单；发布时再次检查并
+内嵌到 `latest.json`。客户端读取内嵌签名，安装前的数字签名验证不变。
 数字签名证明更新包由持有私钥的一方签发；普通 SHA-256 校验和本身不提供发布者
 身份保证。Tauri 更新签名也不同于 Apple 公证或 Windows 发布者代码签名。
 
-`BUILDINFO.json` 与 `SHA256SUMS` 的哈希信息有重叠，但一个面向机器追溯，一个方便
-命令行校验。可以将 BUILDINFO 转为仅保留在 CI artifact，保留公开的校验和文件。
+`BUILDINFO.json` 使用 `schema_version: 2`：顶层 `files` 是唯一的校验清单，记录所有
+安装/更新包和 `latest.json` 的 `name`、`size`、`sha256`；`builds` 仅引用文件名并
+记录平台与目标架构，避免重复存储哈希。BUILDINFO 不对自身求哈希，避免循环依赖。
 `build-<platform>.json` 是流水线内部用于汇总的清单，不是额外公开的 Release 附件。
+
+下载同一版本的全部附件后，在该目录校验：
+
+```sh
+jq -r '.files[] | "\(.sha256)  \(.name)"' BUILDINFO.json | shasum -a 256 --check
+```
 
 ## Cargo 安装
 
