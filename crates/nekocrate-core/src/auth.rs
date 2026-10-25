@@ -297,7 +297,7 @@ mod tests {
                 .to_string(),
             )])
             .await;
-            let challenge = begin_at(&reqwest::Client::new(), configured, &url)
+            let challenge = begin_at(&crate::test_http::client(), configured, &url)
                 .await
                 .unwrap();
             let requests = server.await.unwrap();
@@ -325,7 +325,7 @@ mod tests {
             }
             let (url, server) = crate::test_http::serve(replies).await;
             let result = exchange_at(
-                &reqwest::Client::new(),
+                &crate::test_http::client(),
                 OAuthToken {
                     access_token: "ms-fixture".into(),
                     refresh_token: Some("refresh-fixture".into()),

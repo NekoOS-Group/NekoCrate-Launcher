@@ -11,6 +11,7 @@ mod folder_scan;
 mod import_picker;
 mod jobs;
 mod pausable;
+mod startup;
 mod updater;
 
 struct AppState {
@@ -253,34 +254,50 @@ async fn command(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Value, String> {
-    if state.updater.installing()
-        && !matches!(request, Request::Snapshot | Request::LauncherUpdateState)
-    {
-        return Err("正在安装启动器更新，请稍候".into());
-    }
-    let handle = app.clone();
-    let sink: EventSink = Arc::new(move |event| {
-        let _ = handle.emit("launcher-event", event);
-    });
-    let launcher = &state.launcher;
-    // Log operation names, never account/proxy/API-key request payloads.
-    let diagnostic_operation = match &request {
-        Request::Versions => Some("versions"),
-        Request::LoaderVersions { .. } | Request::FabricVersions { .. } => Some("loader_versions"),
-        Request::AddLoaderVersion { .. } | Request::AddFabricVersion { .. } => {
-            Some("add_loader_version")
+    dispatch(request, app, state).await
+}
+
+// Keep the large operation state machine out of Tauri's by-value IPC/spawn
+// wrappers. On Windows dev0.7 those wrappers used 355K + 474K + 237K of the
+// main thread's 1 MiB stack before even polling the first snapshot request.
+// The non-inlined allocation boundary also bounds temporary stack copies.
+#[inline(never)]
+fn dispatch<'a>(
+    request: Request,
+    app: tauri::AppHandle,
+    state: State<'a, AppState>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Value, String>> + Send + 'a>> {
+    Box::pin(async move {
+        if state.updater.installing()
+            && !matches!(request, Request::Snapshot | Request::LauncherUpdateState)
+        {
+            return Err("正在安装启动器更新，请稍候".into());
         }
-        Request::Install { .. } => Some("install"),
-        Request::Launch { .. } => Some("launch"),
-        Request::CheckUpdate => Some("check_update"),
-        Request::DownloadLauncherUpdate { .. } => Some("download_launcher_update"),
-        Request::InstallLauncherUpdate => Some("install_launcher_update"),
-        Request::BeginLogin { .. } | Request::WaitLogin { .. } | Request::RefreshAccount => {
-            Some("login")
-        }
-        _ => None,
-    };
-    let result: Result<Value, anyhow::Error> = async {
+        let handle = app.clone();
+        let sink: EventSink = Arc::new(move |event| {
+            let _ = handle.emit("launcher-event", event);
+        });
+        let launcher = &state.launcher;
+        // Log operation names, never account/proxy/API-key request payloads.
+        let diagnostic_operation = match &request {
+            Request::Versions => Some("versions"),
+            Request::LoaderVersions { .. } | Request::FabricVersions { .. } => {
+                Some("loader_versions")
+            }
+            Request::AddLoaderVersion { .. } | Request::AddFabricVersion { .. } => {
+                Some("add_loader_version")
+            }
+            Request::Install { .. } => Some("install"),
+            Request::Launch { .. } => Some("launch"),
+            Request::CheckUpdate => Some("check_update"),
+            Request::DownloadLauncherUpdate { .. } => Some("download_launcher_update"),
+            Request::InstallLauncherUpdate => Some("install_launcher_update"),
+            Request::BeginLogin { .. } | Request::WaitLogin { .. } | Request::RefreshAccount => {
+                Some("login")
+            }
+            _ => None,
+        };
+        let result: Result<Value, anyhow::Error> = async {
         Ok(match request{
             Request::CopyText{text}=>{app.clipboard().write_text(text)?;json!(true)},
             Request::Snapshot=>{
@@ -457,24 +474,38 @@ async fn command(
             Request::InstanceDirectory{id}=>json!(launcher.game_dir(&id)?),
         })
     }.await;
-    result.map_err(|error| {
-        let error = nekocrate_core::network::explain_error(error);
-        if let Some(operation) = diagnostic_operation
-            && !error.to_string().contains("取消")
-            && let Err(log_error) =
-                nekocrate_core::diagnostics::record_error(launcher.root(), operation, &error)
-        {
-            eprintln!("Could not write launcher diagnostics: {log_error}");
-        }
-        nekocrate_core::diagnostics::redact(&format!("{error:#}"))
+        result.map_err(|error| {
+            let error = nekocrate_core::network::explain_error(error);
+            if let Some(operation) = diagnostic_operation
+                && !error.to_string().contains("取消")
+                && let Err(log_error) =
+                    nekocrate_core::diagnostics::record_error(launcher.root(), operation, &error)
+            {
+                eprintln!("Could not write launcher diagnostics: {log_error}");
+            }
+            nekocrate_core::diagnostics::redact(&format!("{error:#}"))
+        })
     })
 }
 
+fn command_future_size() -> usize {
+    fn size<'a, F>(
+        _command: impl FnOnce(Request, tauri::AppHandle, State<'a, AppState>) -> F,
+    ) -> usize {
+        std::mem::size_of::<F>()
+    }
+    size(command)
+}
+
 pub fn run() {
+    let verifying = std::env::args_os().any(|arg| arg == "--verify-frontend");
+    if !verifying {
+        startup::install();
+    }
     let context = tauri::generate_context!();
     // Exercise the actual embedded asset map without opening a window or user data.
     // This runs on each release runner using the already-built executable.
-    if std::env::args_os().any(|arg| arg == "--verify-frontend") {
+    if verifying {
         let assets = context.assets();
         let valid_entry = assets
             .get(&"index.html".into())
@@ -491,32 +522,70 @@ pub fn run() {
             );
             std::process::exit(1);
         }
+        // Use the same already-built release executable on each native runner.
+        // Asset checks alone do not exercise Tauri's first IPC dispatch.
+        if command_future_size() > 4096 {
+            eprintln!(
+                "IPC command future is too large for Windows stack safety: {} bytes",
+                command_future_size()
+            );
+            std::process::exit(1);
+        }
+        println!(
+            "Embedded frontend and IPC future size verified ({} bytes)",
+            command_future_size()
+        );
         return;
     }
-    tauri::Builder::default()
+    startup::phase("initializing_tauri");
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let launcher = Launcher::open(None)?;
+            startup::phase("opening_launcher_data");
+            let launcher = Launcher::open(None)
+                .inspect_err(|error| startup::failure("startup_data", error))?;
             app.manage(AppState {
                 launcher,
                 jobs: jobs::Jobs::default(),
                 updater: updater::UpdateManager::default(),
                 folder_scan: folder_scan::FolderScanManager::default(),
             });
+            startup::phase("launcher_ready");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![command])
-        .build(context)
-        .expect("猫咪盒子启动器启动失败")
-        .run(|app, event| {
-            if let tauri::RunEvent::Exit = event {
-                let state = app.state::<AppState>();
-                state.launcher.stop_all();
-                state.folder_scan.cancel(None);
-                state.jobs.cancel_all();
-            }
-        });
+        .build(context);
+    let app = match app {
+        Ok(app) => app,
+        Err(error) => {
+            startup::failure("startup_tauri", &error.into());
+            std::process::exit(1);
+        }
+    };
+    app.run(|app, event| {
+        if let tauri::RunEvent::Exit = event
+            && let Some(state) = app.try_state::<AppState>()
+        {
+            state.launcher.stop_all();
+            state.folder_scan.cancel(None);
+            state.jobs.cancel_all();
+        }
+    });
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    #[test]
+    fn ipc_entry_does_not_embed_the_large_operation_future() {
+        let size = command_future_size();
+        assert!(
+            size <= 4096,
+            "IPC command future: {size} bytes; keep the dispatch state on the heap"
+        );
+    }
 }

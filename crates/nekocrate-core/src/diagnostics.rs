@@ -1,4 +1,4 @@
-//! Persistent launcher failures, separate from Minecraft stdout/stderr.
+//! Persistent launcher diagnostics, separate from Minecraft stdout/stderr.
 use std::{
     fs,
     io::Write,
@@ -38,14 +38,28 @@ pub fn redact(message: &str) -> String {
 }
 
 pub fn record_error(root: &Path, operation: &str, error: &anyhow::Error) -> std::io::Result<()> {
+    record(root, "ERROR", operation, "error", &format!("{error:#}"))
+}
+
+pub fn record_startup(root: &Path, phase: &str) -> std::io::Result<()> {
+    record(root, "INFO", "startup", "message", phase)
+}
+
+fn record(
+    root: &Path,
+    level: &str,
+    operation: &str,
+    field: &str,
+    message: &str,
+) -> std::io::Result<()> {
     let started = *START.get_or_init(Instant::now);
     let local_time = chrono::Local::now();
-    let detail: String = redact(&format!("{error:#}")).chars().take(16384).collect();
+    let detail: String = redact(message).chars().take(16384).collect();
     let record = serde_json::json!({
-        "level": "ERROR", "local_time": local_time.to_rfc3339(),
+        "level": level, "pid": std::process::id(), "local_time": local_time.to_rfc3339(),
         "system_unix_ms": local_time.timestamp_millis(), "elapsed_ms": started.elapsed().as_millis(),
         "version": env!("CARGO_PKG_VERSION"), "os": std::env::consts::OS, "arch": std::env::consts::ARCH,
-        "operation": operation, "error": detail,
+        "operation": operation, (field): detail,
     });
     let mut bytes = serde_json::to_vec(&record)?;
     bytes.push(b'\n');
@@ -83,6 +97,31 @@ pub fn record_error(root: &Path, operation: &str, error: &anyhow::Error) -> std:
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn startup_phases_are_recorded_before_the_database_is_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("not-created-yet");
+        record_startup(&root, "process_started").unwrap();
+        record_startup(&root, "initializing_tauri").unwrap();
+        let records: Vec<serde_json::Value> = fs::read_to_string(root.join("logs/launcher.log"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["level"], "INFO");
+        assert_eq!(records[0]["operation"], "startup");
+        assert_eq!(records[0]["pid"], std::process::id());
+        assert_eq!(records[0]["message"], "process_started");
+        assert_eq!(records[1]["message"], "initializing_tauri");
+        assert!(records[0].get("error").is_none());
+        assert_eq!(
+            fs::read_dir(root).unwrap().count(),
+            1,
+            "only logs are created"
+        );
+    }
+
     #[test]
     fn removes_url_credentials_signed_queries_and_authentication_secrets() {
         let value = redact(

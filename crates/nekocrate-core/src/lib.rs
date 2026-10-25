@@ -80,13 +80,7 @@ impl Launcher {
     }
 
     pub fn open(root: Option<PathBuf>) -> Result<Self> {
-        let root = root
-            .or_else(|| std::env::var_os("NEKOCRATE_DATA_DIR").map(PathBuf::from))
-            .or_else(|| {
-                directories::ProjectDirs::from("dev", "NekoCrate", "NekoCrate")
-                    .map(|p| p.data_local_dir().to_owned())
-            })
-            .context("无法确定数据目录")?;
+        let root = storage::data_root(root)?;
         fs::create_dir_all(&root)?;
         let root = root.canonicalize()?;
         let lock = fs::OpenOptions::new()

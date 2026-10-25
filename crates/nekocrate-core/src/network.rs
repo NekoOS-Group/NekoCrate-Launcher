@@ -94,6 +94,13 @@ pub fn validate(settings: &Settings) -> Result<()> {
 /// All launcher traffic uses the same policy, including authentication and skins.
 pub fn client_builder(root: &Path, settings: &Settings) -> Result<ClientBuilder> {
     validate(settings)?;
+    // reqwest 0.13's rustls-no-provider does not auto-select a provider even
+    // when only ring is compiled in. Core/CLI must work before Tauri's updater
+    // initializes; keep one provider for both clients without adding aws-lc.
+    static TLS: std::sync::Once = std::sync::Once::new();
+    TLS.call_once(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
     let builder = Client::builder().user_agent(concat!(
         "NekoCrate/",
         env!("CARGO_PKG_VERSION"),
@@ -168,6 +175,36 @@ pub fn urls(settings: &Settings, input: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_initializes_tls_without_tauri_or_another_request() {
+        const CHILD: &str = "NEKOCRATE_TEST_FRESH_HTTP_CLIENT";
+        if std::env::var_os(CHILD).is_some() {
+            let root = tempfile::tempdir().unwrap();
+            client_builder(root.path(), &Settings::default())
+                .unwrap()
+                .build()
+                .unwrap();
+            return;
+        }
+        // A fresh process prevents another parallel test from masking missing
+        // provider initialization with its process-global rustls default.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "network::tests::client_initializes_tls_without_tauri_or_another_request",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "fresh client failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn clock_hint_uses_typed_certificate_errors_and_preserves_the_cause() {

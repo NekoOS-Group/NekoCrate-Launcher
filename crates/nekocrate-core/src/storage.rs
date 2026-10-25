@@ -11,6 +11,17 @@ pub fn now() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
+
+/// Resolve the path without opening/locking the database, so early startup
+/// failures can be logged to the same directory.
+pub fn data_root(root: Option<PathBuf>) -> Result<PathBuf> {
+    root.or_else(|| std::env::var_os("NEKOCRATE_DATA_DIR").map(PathBuf::from))
+        .or_else(|| {
+            directories::ProjectDirs::from("dev", "NekoCrate", "NekoCrate")
+                .map(|p| p.data_local_dir().to_owned())
+        })
+        .context("无法确定数据目录")
+}
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     serde_json::from_slice(&fs::read(path).with_context(|| format!("无法读取 {}", path.display()))?)
         .with_context(|| format!("JSON 损坏：{}，请保留原文件后恢复备份", path.display()))

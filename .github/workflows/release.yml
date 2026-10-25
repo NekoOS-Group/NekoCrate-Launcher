@@ -9,7 +9,7 @@ on:
       tag:
         description: Existing preview tag to build
         required: true
-        default: dev0.7
+        default: dev0.7.1
         type: string
 
 permissions:
@@ -200,7 +200,7 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN: "1"
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-      - name: Verify embedded frontend in the native executable
+      - name: Verify embedded frontend and IPC future size in the native executable
         run: python scripts/frontend_artifact.py embedded --target "${{ matrix.target }}"
       - name: Collect and verify architecture
         run: python scripts/release_assets.py collect --tag "$RELEASE_TAG" --target "${{ matrix.target }}"

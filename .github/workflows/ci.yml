@@ -73,7 +73,7 @@ jobs:
           overwrite: true
 
   filesystem:
-    # Only OS-dependent filesystem behavior; the full suite and Clippy run once above.
+    # OS-dependent filesystem/TLS behavior; the full suite and Clippy run once above.
     name: Filesystem behavior (${{ matrix.os }})
     strategy:
       fail-fast: false
@@ -87,5 +87,5 @@ jobs:
         with:
           cache-on-failure: true
           cache-workspace-crates: true
-      - name: Check filesystem behavior and platform-specific launch regressions
-        run: cargo test -p nekocrate-core --lib --locked -- verification::tests storage::tests tests::linked_directories tests::removing_linked_instance folder_import::tests java::tests::windows modloader_tests::forge_launch_arguments modloader_tests::legacy_forge_import version_management::tests
+      - name: Check filesystem, TLS initialization and platform-specific launch regressions
+        run: cargo test -p nekocrate-core --lib --locked -- verification::tests storage::tests tests::linked_directories tests::removing_linked_instance folder_import::tests java::tests::windows modloader_tests::forge_launch_arguments modloader_tests::legacy_forge_import version_management::tests network::tests::client_initializes_tls download::tests::skewed_clock

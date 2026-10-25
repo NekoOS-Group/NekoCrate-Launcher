@@ -4,6 +4,19 @@ use tokio::{
     net::TcpListener,
 };
 
+pub fn client() -> reqwest::Client {
+    crate::network::client_builder(
+        std::path::Path::new("unused-test-vault"),
+        &crate::model::Settings {
+            proxy_mode: "none".into(),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .build()
+    .unwrap()
+}
+
 pub async fn serve(replies: Vec<(u16, String)>) -> (String, tokio::task::JoinHandle<Vec<String>>) {
     serve_with_headers(
         replies

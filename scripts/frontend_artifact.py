@@ -44,7 +44,7 @@ def embedded(target):
     suffix = ".exe" if "windows" in target else ""
     binary = root / "target" / target / "release" / f"nekocrate-launcher{suffix}"
     subprocess.run([str(binary), "--verify-frontend"], check=True, timeout=30)
-    print(f"Embedded frontend verified: {binary.name}")
+    print(f"Embedded frontend and IPC future size verified: {binary.name}")
 
 
 if __name__ == "__main__":

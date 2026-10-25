@@ -950,7 +950,7 @@ mod tests {
             config.time_provider = Arc::new(Clock(clock));
             reqwest::Client::builder()
                 .no_proxy()
-                .use_preconfigured_tls(config)
+                .tls_backend_preconfigured(config)
                 .timeout(Duration::from_secs(3))
                 .build()
                 .unwrap()
