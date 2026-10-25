@@ -3,27 +3,39 @@ import type { Challenge } from "./types";
 interface LoginOperations {
   begin: () => Promise<Challenge>;
   showChallenge: (challenge: Challenge) => void;
+  copyCode: (code: string) => Promise<void>;
+  copyFailed: () => void;
   openBrowser: (url: string) => Promise<void>;
   browserFailed: (error: unknown) => void;
-  waitForLogin: () => Promise<unknown>;
+  waitForLogin: (challenge: Challenge) => Promise<unknown>;
+  isCurrent?: () => boolean;
 }
 
 export async function signInWithMicrosoft(
   operations: LoginOperations,
 ): Promise<void> {
   const challenge = await operations.begin();
+  if (operations.isCurrent?.() === false) return;
   operations.showChallenge(challenge);
   // Poll while the browser opens, so cancellation is already available.
   // A browser failure must leave the device code usable for manual sign-in.
   let active = true;
   try {
     await Promise.all([
-      operations.waitForLogin(),
+      operations.waitForLogin(challenge),
       (async () => {
+        try {
+          await operations.copyCode(challenge.user_code);
+        } catch {
+          if (active && operations.isCurrent?.() !== false)
+            operations.copyFailed();
+        }
+        if (!active || operations.isCurrent?.() === false) return;
         try {
           await operations.openBrowser(challenge.verification_uri);
         } catch (error) {
-          if (active) operations.browserFailed(error);
+          if (active && operations.isCurrent?.() !== false)
+            operations.browserFailed(error);
         }
       })(),
     ]);

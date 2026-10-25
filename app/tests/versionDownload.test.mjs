@@ -82,10 +82,10 @@ test("switching installation targets preserves version, Fabric and the new-direc
   try {
     ui.form.version = "1.20.1";
     ui.form.loader = "fabric";
-    fixture.handlers.fabric_versions = () => [
+    fixture.handlers.loader_versions = () => [
       { version: "0.16.14", stable: true },
     ];
-    await ui.loadFabricVersions();
+    await ui.loadLoaderVersions();
     ui.switchDownloadTarget(null);
     assert.equal(ui.modal.value, "version");
     assert.equal(ui.form.name, "新实例");
@@ -97,7 +97,7 @@ test("switching installation targets preserves version, Fabric and the new-direc
     assert.equal(ui.editing.value.name, "官方启动器");
     assert.equal(ui.form.version, "1.20.1");
     assert.equal(ui.form.loader, "fabric");
-    assert.equal(ui.form.fabric_version, "0.16.14");
+    assert.equal(ui.form.loader_version, "0.16.14");
     ui.switchDownloadTarget(null);
     assert.equal(ui.form.name, "Fabric World");
     assert.equal(ui.form.external_directory, "/Games/Fabric World");
@@ -163,10 +163,10 @@ test("new external installation validates first, creates once and reuses its dir
     ui.form.loader = "fabric";
     ui.form.location = "external";
     ui.form.name = "Fabric World";
-    fixture.handlers.fabric_versions = () => [
+    fixture.handlers.loader_versions = () => [
       { version: "0.16.14", stable: true },
     ];
-    await ui.loadFabricVersions();
+    await ui.loadLoaderVersions();
     await ui.submit();
     assert.equal(
       fixture.calls.some(({ op }) => op === "create"),
@@ -179,7 +179,7 @@ test("new external installation validates first, creates once and reuses its dir
       assert.equal(directory, "/Games/Fabric World");
       return creation.promise;
     };
-    fixture.handlers.add_fabric_version = () => {
+    fixture.handlers.add_loader_version = () => {
       throw new Error("Network unavailable");
     };
     const submitting = ui.submit();
@@ -201,15 +201,11 @@ test("new external installation validates first, creates once and reuses its dir
     await submitting;
     assert.equal(ui.modal.value, "version");
     assert.equal(ui.editing.value.id, "created");
-    assert.equal(ui.form.fabric_version, "0.16.14");
-    fixture.handlers.add_fabric_version = ({
-      id,
-      game_version,
-      loader_version,
-    }) => {
+    assert.equal(ui.form.loader_version, "0.16.14");
+    fixture.handlers.add_loader_version = ({ id, game_version, loader }) => {
       assert.equal(id, "created");
       assert.equal(game_version, "1.20.1");
-      assert.equal(loader_version, "0.16.14");
+      assert.equal(loader.version, "0.16.14");
       target.selected_version = "fabric-loader-0.16.14-1.20.1";
       target.versions.push({ id: target.selected_version, installed: false });
       return structuredClone(target);
@@ -232,21 +228,21 @@ test("changing the game clears Fabric eligibility synchronously and ignores an o
   const { fixture, context: ui, dispose } = await downloadFixture();
   try {
     ui.form.loader = "fabric";
-    fixture.handlers.fabric_versions = () => [
+    fixture.handlers.loader_versions = () => [
       { version: "0.16.14", stable: true },
     ];
-    await ui.loadFabricVersions();
+    await ui.loadLoaderVersions();
     assert.equal(ui.canSubmitDownload.value, true);
     const old = deferred();
-    fixture.handlers.fabric_versions = () => old.promise;
-    const pending = ui.loadFabricVersions();
+    fixture.handlers.loader_versions = () => old.promise;
+    const pending = ui.loadLoaderVersions();
     ui.form.version = "1.20.1";
-    assert.equal(ui.form.fabric_version, "");
+    assert.equal(ui.form.loader_version, "");
     assert.equal(ui.canSubmitDownload.value, false);
     ui.form.loader = "vanilla";
     old.resolve([{ version: "0.99.0", stable: true }]);
     await pending;
-    assert.equal(ui.form.fabric_version, "");
+    assert.equal(ui.form.loader_version, "");
     assert.equal(ui.canSubmitDownload.value, true);
   } finally {
     dispose();
@@ -277,18 +273,18 @@ test("unavailable Fabric turns its switch off and shows only a brief information
   const { fixture, context: ui, dispose } = await downloadFixture();
   t.mock.timers.enable({ apis: ["setTimeout"] });
   try {
-    fixture.handlers.fabric_versions = () => [];
+    fixture.handlers.loader_versions = () => [];
     ui.form.loader = "fabric";
     assert.equal(ui.canSubmitDownload.value, false);
-    await ui.loadFabricVersions();
+    await ui.loadLoaderVersions();
     assert.equal(ui.form.loader, "vanilla");
-    assert.equal(ui.form.fabric_version, "");
-    assert.equal(ui.fabricLoading.value, false);
+    assert.equal(ui.form.loader_version, "");
+    assert.equal(ui.loaderLoading.value, false);
     assert.equal(ui.error.value, "");
-    assert.equal(ui.fabricNotice.value, "此游戏版本暂无可用的 Fabric");
+    assert.equal(ui.loaderNotice.value, "此游戏版本暂无可用的加载器 · Fabric");
     assert.equal(ui.canSubmitDownload.value, true);
     t.mock.timers.tick(2000);
-    assert.equal(ui.fabricNotice.value, "");
+    assert.equal(ui.loaderNotice.value, "");
   } finally {
     dispose();
   }
@@ -298,27 +294,28 @@ test("late empty Fabric responses cannot turn off a new selection; network failu
   const { fixture, context: ui, dispose } = await downloadFixture();
   try {
     const old = deferred();
-    fixture.handlers.fabric_versions = () => old.promise;
+    fixture.handlers.loader_versions = () => old.promise;
     ui.form.loader = "fabric";
-    const pending = ui.loadFabricVersions();
+    const pending = ui.loadLoaderVersions();
     ui.form.version = "1.20.1";
-    fixture.handlers.fabric_versions = () => [
+    fixture.handlers.loader_versions = () => [
       { version: "0.16.14", stable: true },
     ];
-    await ui.loadFabricVersions();
+    await ui.loadLoaderVersions();
     old.resolve([]);
     await pending;
     assert.equal(ui.form.loader, "fabric");
-    assert.equal(ui.form.fabric_version, "0.16.14");
-    assert.equal(ui.fabricNotice.value, "");
-    fixture.handlers.fabric_versions = () => {
+    assert.equal(ui.form.loader_version, "0.16.14");
+    assert.equal(ui.loaderNotice.value, "");
+    fixture.handlers.loader_versions = () => {
       throw new Error("503 Service Unavailable");
     };
-    await ui.loadFabricVersions();
+    await ui.loadLoaderVersions(true);
     assert.equal(ui.error.value, "503 Service Unavailable");
     assert.equal(ui.form.loader, "fabric");
-    assert.equal(ui.canSubmitDownload.value, false);
-    assert.equal(ui.fabricNotice.value, "");
+    assert.equal(ui.canSubmitDownload.value, true);
+    assert.equal(ui.form.loader_version, "0.16.14");
+    assert.equal(ui.loaderNotice.value, "");
   } finally {
     dispose();
   }

@@ -1,5 +1,85 @@
 /** Launcher-owned messages only. Game output and user-supplied values are never translated. */
 export const backendEnglish: Readonly<Record<string, string>> = {
+  "HTTPS 证书不在有效期内，请检查系统日期、时间和时区并开启自动同步；若时间正确，可能是服务器证书异常":
+    "The HTTPS certificate is outside its validity period. Check your system date, time and time zone and enable automatic time sync. If your clock is correct, the server certificate may be at fault",
+  "HTTPS 证书验证失败，请检查代理或网络的证书配置":
+    "HTTPS certificate verification failed. Check your proxy or network certificate configuration",
+  安装加载器: "Installing loader",
+  游戏与加载器已安装: "Minecraft and loader installed",
+  加载器安装记录与版本目录不匹配:
+    "Loader installation record does not match its version directory",
+  "所选加载器不支持此游戏版本，请重新选择":
+    "The selected loader does not support this Minecraft version. Select another version",
+  "同名版本已经存在，请保留原版本或选择其他加载器版本":
+    "A version with this name already exists. Keep it or select another loader version",
+  "同名版本已经存在，未覆盖原目录":
+    "A version with this name already exists; the original directory was preserved",
+  "本地版本配置已改变，未覆盖已有加载器":
+    "The local profile has changed; the existing loader was preserved",
+  安装器生成的加载器与所选版本不一致:
+    "The installed loader does not match the selected version",
+  "NeoForge 版本目录格式无效": "Invalid NeoForge version catalog",
+  "运行加载器安装步骤 {step}": "Running loader installation step {step}",
+  "加载器安装步骤失败：{error}": "Loader installation step failed: {error}",
+  "加载器生成文件校验失败：{path}":
+    "Generated loader file verification failed: {path}",
+
+  "此文件尚未下载，暂无本地元数据":
+    "This file has not been downloaded; local metadata is unavailable",
+  不支持此加载器安装器格式: "This loader installer format is not supported",
+  "无法读取 CurseForge API Key": "Could not read the CurseForge API key",
+  "无法保存 CurseForge API Key": "Could not save the CurseForge API key",
+  "暂不支持整合包加载器：{loader}": "Unsupported modpack loader: {loader}",
+  "整合包包含不安全的路径：{path}": "Unsafe modpack path: {path}",
+  "请选择含有唯一 Modrinth 或 CurseForge 清单的整合包":
+    "Select a pack containing exactly one Modrinth or CurseForge manifest",
+  整合包已安装: "Modpack installed",
+  "版本名称重复：{name}，请修改整合包名称":
+    "Version name already exists: {name}. Choose a different modpack name",
+  "整合包名称不能用作版本目录：{name}":
+    "The modpack name cannot be used as a version folder: {name}",
+  "整合包名称与保留文件冲突：{name}":
+    "The modpack name conflicts with a reserved file: {name}",
+  "整合包名称不能与基础游戏版本相同：{version}":
+    "The modpack name must differ from the base Minecraft version: {version}",
+  整合包不能覆盖版本配置或原始清单:
+    "The modpack cannot overwrite its launch profile or original manifest",
+  "无法读取整合包清单：{error}": "Could not read the modpack manifest: {error}",
+  "原始整合包缓存不存在，无法迁移":
+    "The original modpack archive is missing; migration could not finish",
+  整合包缓存路径无效: "Invalid modpack cache path",
+  "版本目录中的整合包缓存与原记录不一致，未覆盖文件":
+    "The local modpack archive differs from the old record. No files were overwritten",
+  "保存迁移结果失败，版本文件保留在：{path}":
+    "Could not save the migration. Version files remain at: {path}",
+  完成整合包安装: "Finishing modpack installation",
+  安装游戏与加载器: "Installing Minecraft and loader",
+  写入整合包配置: "Applying modpack overrides",
+  下载整合包文件: "Downloading modpack files",
+  解析整合包依赖: "Resolving modpack dependencies",
+  所选文件与整合包声明的文件校验值不匹配:
+    "The selected files do not match the modpack's declared checksums",
+  "此整合包有 {count} 个文件需要从作者页面手动下载，请补齐后继续":
+    "This modpack requires {count} files to be downloaded from their project pages; add them to continue",
+  "CurseForge API Key 无效或没有访问权限，请在网络设置中更新":
+    "The CurseForge API key is invalid or lacks access; update it in network settings",
+  "尚未配置 CurseForge API Key，请在网络设置中配置后继续导入":
+    "Configure a CurseForge API key in network settings to continue importing",
+  此文件不在当前版本的内容列表中:
+    "This file is not in the selected version\u2019s content list",
+  内容路径不能离开所选目录:
+    "Content paths must stay inside the selected directory",
+  元数据内容过大: "Metadata is too large",
+  "Mod 描述缺少 mods 列表": "Mod metadata is missing the mods list",
+  "Mod 描述格式无效": "Invalid mod metadata format",
+  "未找到 pack.mcmeta": "pack.mcmeta was not found",
+  "pack.mcmeta 缺少 pack 配置": "pack.mcmeta is missing its pack section",
+  "元数据文件超过 8 MiB": "Metadata file exceeds 8 MiB",
+  "元数据文件必须是 JSON 对象": "Metadata file must be a JSON object",
+  版本继承存在循环或层数过多: "Version inheritance is circular or too deep",
+  版本元数据与所选版本不一致: "Profile does not match the selected version",
+  "版本配置超过 8 MiB": "Profile exceeds 8 MiB",
+  路径不能离开版本目录: "Path must stay within the version folder",
   "子实例名称应为 1–80 个字符，且不能包含控制字符":
     "Version names must contain 1–80 characters and no control characters",
   "有任务正在运行，请稍后删除版本":
@@ -208,8 +288,8 @@ export const backendEnglish: Readonly<Record<string, string>> = {
     "No Java Edition profile found. Make sure the account owns Java Edition and has a player name at minecraft.net.",
   "{stage}失败（HTTP {status}）：{detail}":
     "{stage} failed (HTTP {status}): {detail}",
-  "请先在设置中填写你自己的 Microsoft 应用 Client ID（UUID），无需 Client Secret":
-    "Configure your Microsoft app Client ID (UUID) first. A Client Secret is not required",
+  "微软登录应用 ID 配置无效，请联系启动器维护者。":
+    "The Microsoft sign-in app ID is invalid. Please contact the launcher maintainer.",
   无法连接微软身份服务: "Could not connect to Microsoft sign-in",
   获取验证码: "Request sign-in code",
   微软返回了无效登录地址: "Microsoft returned an invalid sign-in URL",

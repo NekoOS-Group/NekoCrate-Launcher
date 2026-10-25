@@ -9,7 +9,13 @@ import {
   type Ref,
 } from "vue";
 import type { Instance } from "./types";
-import { instanceDropTarget, moveInstanceBefore } from "./instanceOrder.ts";
+import {
+  instanceGridDropTarget,
+  instanceZoneDropTarget,
+  moveInstanceBefore,
+  VISIBLE_INSTANCES,
+  instanceVisibleLimit,
+} from "./instanceOrder.ts";
 import {
   createInstanceLanding,
   instanceTranslation,
@@ -26,6 +32,19 @@ export function useInstanceSorting(
   },
 ) {
   const strip = ref<HTMLElement>();
+  const overflow = ref<HTMLElement>();
+  const toggle = ref<HTMLElement>();
+  const expanded = ref(false);
+  let hoverStarted = 0;
+  function setSurface(zone: "main" | "overflow", element: unknown) {
+    (zone === "main" ? strip : overflow).value = (element || undefined) as
+      HTMLElement | undefined;
+  }
+  function toggleExpanded() {
+    if (draggedId.value) return;
+    expanded.value = !expanded.value;
+    hideTooltip();
+  }
   const ghost = ref<HTMLElement>();
   const trash = ref<HTMLElement>();
   const trashHovered = ref(false);
@@ -76,6 +95,7 @@ export function useInstanceSorting(
 
   function clearPreview() {
     settlement++;
+    hoverStarted = 0;
     landing?.dispose();
     landing = undefined;
     removalAnimation?.cancel();
@@ -91,7 +111,12 @@ export function useInstanceSorting(
     const ticket = ++settlement;
     await nextTick();
     if (disposed || ticket !== settlement || !settling.value) return;
-    const list = strip.value;
+    const lists = [strip.value, ...(expanded.value ? [overflow.value] : [])];
+    const list = lists.find((surface) =>
+      Array.from(
+        surface?.querySelectorAll<HTMLElement>("[data-instance-id]") ?? [],
+      ).some((item) => item.dataset.instanceId === draggedId.value),
+    );
     const tile = Array.from(
       list?.querySelectorAll<HTMLElement>("[data-instance-id]") ?? [],
     ).find((item) => item.dataset.instanceId === draggedId.value);
@@ -99,10 +124,16 @@ export function useInstanceSorting(
       clearPreview();
       return;
     }
-    const left = tile.offsetLeft;
-    if (left < list.scrollLeft + 4) list.scrollLeft = left - 4;
-    else if (left + tile.offsetWidth > list.scrollLeft + list.clientWidth - 4)
-      list.scrollLeft = left + tile.offsetWidth - list.clientWidth + 4;
+    if (list === overflow.value) {
+      if (tile.offsetTop < list.scrollTop + 4)
+        list.scrollTop = tile.offsetTop - 4;
+      else if (
+        tile.offsetTop + tile.offsetHeight >
+        list.scrollTop + list.clientHeight - 4
+      )
+        list.scrollTop =
+          tile.offsetTop + tile.offsetHeight - list.clientHeight + 4;
+    }
     const box = list.getBoundingClientRect();
     landing ??= createInstanceLanding(
       ghost.value,
@@ -169,48 +200,74 @@ export function useInstanceSorting(
   }
 
   function updateTarget() {
-    const list = strip.value;
-    if (!pointer || !draggedId.value || !list) return;
-    const box = list.getBoundingClientRect();
+    if (!pointer || !draggedId.value || !strip.value) return;
+    const inside = (box: DOMRect, padding = 0) =>
+      pointer!.x >= box.left - padding &&
+      pointer!.x <= box.right + padding &&
+      pointer!.y >= box.top - padding &&
+      pointer!.y <= box.bottom + padding;
     const bin = trash.value?.getBoundingClientRect();
-    trashHovered.value =
-      !!bin &&
-      pointer.x >= bin.left &&
-      pointer.x <= bin.right &&
-      pointer.y >= bin.top &&
-      pointer.y <= bin.bottom;
+    trashHovered.value = !!bin && inside(bin);
+    const trigger = toggle.value?.getBoundingClientRect();
+    if (
+      instances.value.length > VISIBLE_INSTANCES &&
+      !expanded.value &&
+      trigger &&
+      inside(trigger, 8)
+    ) {
+      hoverStarted ||= Date.now();
+      if (Date.now() - hoverStarted >= 280) expanded.value = true;
+    } else hoverStarted = 0;
+    const order = displayInstances.value;
+    const tray = expanded.value ? overflow.value : undefined;
+    const zone =
+      tray && inside(tray.getBoundingClientRect(), 8) ? "overflow" : "main";
+    const list = zone === "overflow" ? tray! : strip.value;
+    const box = list.getBoundingClientRect();
     dropAllowed.value =
-      !trashHovered.value &&
-      pointer.x >= box.left - 16 &&
-      pointer.x <= box.right + 16 &&
-      pointer.y >= box.top - 24 &&
-      pointer.y <= box.bottom + 24;
+      !trashHovered.value && inside(box, zone === "main" ? 16 : 8);
     ghostPosition.value = {
       transform: instanceTranslation(pointer),
       opacity: "1",
     };
     if (!dropAllowed.value) return;
-    const edge = Math.min(28, box.width / 4);
-    const delta =
-      pointer.x < box.left + edge
-        ? pointer.x - box.left - edge
-        : pointer.x > box.right - edge
-          ? pointer.x - box.right + edge
-          : 0;
-    list.scrollLeft += Math.max(-8, Math.min(8, delta / 3));
+    if (zone === "overflow") {
+      const delta =
+        pointer.y < box.top + 28
+          ? pointer.y - box.top - 28
+          : pointer.y > box.bottom - 28
+            ? pointer.y - box.bottom + 28
+            : 0;
+      list.scrollTop += Math.max(-8, Math.min(8, delta / 3));
+    }
     const positions = Array.from(
       list.querySelectorAll<HTMLElement>("[data-instance-id]"),
-      (item) => {
-        return {
-          id: item.dataset.instanceId!,
-          // Layout coordinates ignore FLIP animation transforms, so an item
-          // moving out of the way cannot move the drop boundary back and forth.
-          left: box.left + item.offsetLeft - list.scrollLeft,
-          width: item.offsetWidth,
-        };
-      },
+      (item) => ({
+        id: item.dataset.instanceId!,
+        // Ignore FLIP transforms so the target does not oscillate as tiles move.
+        left: box.left + item.offsetLeft - list.scrollLeft,
+        top: box.top + item.offsetTop - list.scrollTop,
+        width: item.offsetWidth,
+        height: item.offsetHeight,
+      }),
     );
-    beforeId.value = instanceDropTarget(positions, draggedId.value, pointer.x);
+    let target = instanceGridDropTarget(
+      positions,
+      draggedId.value,
+      pointer.x,
+      pointer.y,
+    );
+    if (zone === "main" && target === null)
+      target =
+        order
+          .slice(instanceVisibleLimit(order.length))
+          .find((item) => item.id !== draggedId.value)?.id ?? null;
+    beforeId.value = instanceZoneDropTarget(
+      order,
+      draggedId.value,
+      target,
+      zone,
+    );
   }
   function animate() {
     updateTarget();
@@ -332,19 +389,53 @@ export function useInstanceSorting(
     event.preventDefault();
     if (blocked.value || draggedId.value) return;
     const index = instances.value.findIndex((item) => item.id === id);
-    if (event.key === "ArrowLeft" && index > 0)
-      move(id, instances.value[index - 1].id);
+    const nextIndex = index + (event.key === "ArrowLeft" ? -1 : 1);
+    if (index < 0 || nextIndex < 0 || nextIndex >= instances.value.length)
+      return;
     if (
-      event.key === "ArrowRight" &&
-      index >= 0 &&
-      index < instances.value.length - 1
+      Math.max(index, nextIndex) >= instanceVisibleLimit(instances.value.length)
     )
-      move(id, instances.value[index + 2]?.id ?? null);
+      expanded.value = true;
+    move(
+      id,
+      event.key === "ArrowLeft"
+        ? instances.value[index - 1].id
+        : (instances.value[index + 2]?.id ?? null),
+    );
+    void nextTick(() => {
+      const tile = [strip.value, ...(expanded.value ? [overflow.value] : [])]
+        .flatMap((surface) =>
+          Array.from(
+            surface?.querySelectorAll<HTMLElement>("[data-instance-id]") ?? [],
+          ),
+        )
+        .find((item) => item.dataset.instanceId === id);
+      tile?.querySelector<HTMLButtonElement>("button")?.focus();
+    });
   }
+
   function escape(event: KeyboardEvent) {
-    if (event.key === "Escape" && pointer) {
+    if (event.key !== "Escape") return;
+    if (pointer) {
       event.preventDefault();
       cancel();
+    } else if (expanded.value) {
+      event.preventDefault();
+      expanded.value = false;
+      hideTooltip();
+      toggle.value?.focus();
+    }
+  }
+  function outside(event: PointerEvent) {
+    if (!expanded.value || draggedId.value) return;
+    const target = event.target as Node;
+    if (
+      ![strip.value, overflow.value, toggle.value].some((element) =>
+        element?.contains(target),
+      )
+    ) {
+      expanded.value = false;
+      hideTooltip();
     }
   }
   function visibility() {
@@ -354,6 +445,7 @@ export function useInstanceSorting(
     if (value) cancel();
   });
   watch(instances, (items) => {
+    if (items.length <= VISIBLE_INSTANCES) expanded.value = false;
     // A committed removal updates the list before the ghost finishes shrinking.
     if (removing.value) return;
     if (draggedId.value && !items.some((item) => item.id === draggedId.value)) {
@@ -363,6 +455,7 @@ export function useInstanceSorting(
   });
   onMounted(() => {
     window.addEventListener("blur", cancel);
+    document.addEventListener("pointerdown", outside, true);
     document.addEventListener("keydown", escape);
     document.addEventListener("visibilitychange", visibility);
   });
@@ -371,11 +464,17 @@ export function useInstanceSorting(
     cancel();
     clearPreview();
     window.removeEventListener("blur", cancel);
+    document.removeEventListener("pointerdown", outside, true);
     document.removeEventListener("keydown", escape);
     document.removeEventListener("visibilitychange", visibility);
   });
   return {
     strip,
+    overflow,
+    toggle,
+    expanded,
+    setSurface,
+    toggleExpanded,
     ghost,
     trash,
     trashHovered,

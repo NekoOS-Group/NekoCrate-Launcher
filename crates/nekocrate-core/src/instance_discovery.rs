@@ -44,6 +44,12 @@ pub(crate) fn official_directory() -> Option<PathBuf> {
     )
 }
 
+pub(crate) fn is_official_path(path: &Path, official: Option<&Path>) -> bool {
+    official
+        .and_then(|path| path.canonicalize().ok())
+        .is_some_and(|official| path.canonicalize().is_ok_and(|path| path == official))
+}
+
 fn locations(
     platform: &str,
     home: Option<&Path>,
@@ -174,7 +180,11 @@ mod tests {
             .unwrap();
         assert!(linked.failures.is_empty());
         assert_eq!(linked.added.len(), 2);
-        assert!(linked.added.iter().all(|instance| instance.icon == Some(0)));
+        assert!(linked.added.iter().all(|instance| {
+            instance
+                .icon
+                .is_some_and(|icon| icon < crate::model::INSTANCE_ICON_COUNT)
+        }));
         assert_eq!(
             linked.added[0].game_dir(launcher.root()),
             game.canonicalize().unwrap()
@@ -188,6 +198,7 @@ mod tests {
             .unwrap();
         assert!(repeat.added.is_empty());
         assert_eq!(repeat.existing[0].id, linked.added[0].id);
+        assert_eq!(repeat.existing[0].icon, linked.added[0].icon);
         assert_eq!(
             fs::read(game.join("saves/world/level.dat")).unwrap(),
             b"original"

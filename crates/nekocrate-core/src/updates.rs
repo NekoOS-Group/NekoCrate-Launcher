@@ -122,6 +122,7 @@ pub async fn check(
         .header("X-GitHub-Api-Version", "2022-11-28")
         .send()
         .await
+        .map_err(|error| crate::network::explain_error(error.into()))
         .context("无法连接更新服务器")?;
     if response.status() == reqwest::StatusCode::FORBIDDEN
         || response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS

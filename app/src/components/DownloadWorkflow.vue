@@ -150,6 +150,7 @@ const labels = {
               :class="{ expanded: expanded === step.id }"
             />
           </button>
+          <slot name="step-details" :step="step" />
           <Transition name="network-options"
             ><DownloadFiles
               v-if="expanded === step.id && step.fileCount"

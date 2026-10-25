@@ -12,22 +12,40 @@ export function createWorkflow(
   title: string,
 ): WorkflowState {
   const plan =
-    operation === "install"
+    operation === "modpack"
       ? [
-          ["metadata", "解析游戏版本"],
-          ["files", "下载与校验文件"],
-          ["natives", "准备原生库"],
+          ["pack_resolve", "解析整合包依赖"],
+          ["pack_files", "下载整合包文件"],
+          ["pack_overrides", "写入整合包配置"],
+          ["pack_game", "安装游戏与加载器"],
           ["java", "准备 Java"],
-          ["finalize", "完成安装"],
+          ["finalize", "完成整合包安装"],
         ]
-      : operation === "launch"
+      : operation === "loader"
         ? [
-            ["prepare", "检查启动配置"],
+            ["metadata", "解析游戏版本"],
+            ["loader", "安装加载器"],
+            ["files", "下载与校验文件"],
+            ["natives", "准备原生库"],
             ["java", "准备 Java"],
-            ["account", "准备游戏身份"],
-            ["start", "启动游戏"],
+            ["finalize", "完成安装"],
           ]
-        : [["request", title]];
+        : operation === "install"
+          ? [
+              ["metadata", "解析游戏版本"],
+              ["files", "下载与校验文件"],
+              ["natives", "准备原生库"],
+              ["java", "准备 Java"],
+              ["finalize", "完成安装"],
+            ]
+          : operation === "launch"
+            ? [
+                ["prepare", "检查启动配置"],
+                ["java", "准备 Java"],
+                ["account", "准备游戏身份"],
+                ["start", "启动游戏"],
+              ]
+            : [["request", title]];
   return {
     steps: plan.map(([id, label], index) => ({
       id,

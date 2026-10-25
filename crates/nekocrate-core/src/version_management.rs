@@ -9,13 +9,34 @@ use std::{
     path::{Path, PathBuf},
 };
 
-#[derive(Debug, Serialize)]
+mod cache;
+mod declarations;
+pub mod details;
+pub(crate) use cache::SummaryCache;
+
+#[derive(Clone, Debug, Serialize)]
 pub struct LocalContentFile {
     pub file_name: String,
     pub name: String,
     pub version: Option<String>,
     pub enabled: bool,
     pub size: u64,
+    pub mod_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declaration: Option<ContentDeclaration>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct ContentDeclaration {
+    pub key: String,
+    pub source: String,
+    pub project: Option<u64>,
+    pub file: Option<u64>,
+    pub path: Option<String>,
+    pub status: &'static str,
+    pub downloaded: u64,
+    pub total: u64,
+    pub optional: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -25,11 +46,20 @@ pub struct VersionContent {
 }
 
 #[derive(Debug, Serialize)]
+pub struct VersionContentIndex {
+    #[serde(flatten)]
+    pub content: VersionContent,
+    pub pending: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct VersionContentCounts {
     pub mods: usize,
     pub datapacks: usize,
     pub resourcepacks: usize,
     pub saves: usize,
+    pub unresolved: usize,
+    pub libraries: usize,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -39,6 +69,7 @@ pub enum ContentKind {
     Datapacks,
     Resourcepacks,
     Saves,
+    Unresolved,
 }
 
 impl Launcher {
@@ -148,7 +179,85 @@ impl Launcher {
         kind: ContentKind,
     ) -> Result<VersionContent> {
         let (working, resolved) = self.content_location(id, version_id)?;
-        read_content(&working, resolved.as_ref(), kind, true)
+        let mut content = read_content(&working, resolved.as_ref(), kind, true)?;
+        self.merge_declared_content(id, version_id, &working, kind, &mut content)?;
+        sort_content(&mut content.files);
+        Ok(content)
+    }
+
+    /// Return directory entries immediately, using cached identities where still valid.
+    /// Opening unknown JARs happens in small, cancellable client-requested batches.
+    pub fn version_content_index(&self, id: &str, version_id: &str) -> Result<VersionContentIndex> {
+        let (working, resolved) = self.content_location(id, version_id)?;
+        let mut content = read_content(&working, resolved.as_ref(), ContentKind::Mods, false)?;
+        let mut pending = Vec::new();
+        for file in &mut content.files {
+            if let Some(identity) = self
+                .0
+                .mod_summaries
+                .get(&content.directory.join(&file.file_name))
+            {
+                apply_identity(file, identity);
+            } else {
+                pending.push(file.file_name.clone());
+            }
+        }
+        self.merge_declared_content(id, version_id, &working, ContentKind::Mods, &mut content)?;
+        sort_content(&mut content.files);
+        // Read visible rows first, rather than the filesystem's arbitrary enumeration order.
+        let pending: std::collections::HashSet<_> = pending.into_iter().collect();
+        let pending = content
+            .files
+            .iter()
+            .filter(|f| {
+                pending.contains(&f.file_name)
+                    && f.declaration.as_ref().is_none_or(|d| d.status == "local")
+            })
+            .map(|f| f.file_name.clone())
+            .collect();
+        Ok(VersionContentIndex { content, pending })
+    }
+
+    pub fn version_content_summaries(
+        &self,
+        id: &str,
+        version_id: &str,
+        files: &[String],
+    ) -> Result<Vec<LocalContentFile>> {
+        if files.len() > 24 {
+            bail!("单次读取的 Mod 数量过多");
+        }
+        let (working, resolved) = self.content_location(id, version_id)?;
+        // Re-check membership on each batch: renamed/deleted files and a switched
+        // working directory must not reuse arbitrary paths supplied by the UI.
+        let mut content = read_content(&working, resolved.as_ref(), ContentKind::Mods, false)?;
+        self.merge_declared_content(id, version_id, &working, ContentKind::Mods, &mut content)?;
+        let mut listed: std::collections::HashMap<_, _> = content
+            .files
+            .into_iter()
+            .map(|f| (f.file_name.clone(), f))
+            .collect();
+        let mut result = Vec::new();
+        for name in files {
+            storage::safe_relative(name)?;
+            let Some(mut file) = listed.remove(name) else {
+                continue;
+            };
+            if file
+                .declaration
+                .as_ref()
+                .is_some_and(|d| d.status != "local")
+            {
+                result.push(file);
+                continue;
+            }
+            apply_identity(
+                &mut file,
+                self.0.mod_summaries.read(&content.directory.join(name)),
+            );
+            result.push(file);
+        }
+        Ok(result)
     }
 
     /// Enumerate all tabs eagerly without opening each mod archive or sorting its metadata.
@@ -158,19 +267,47 @@ impl Launcher {
         version_id: &str,
     ) -> Result<VersionContentCounts> {
         let (working, resolved) = self.content_location(id, version_id)?;
+        let game = self.available_game_dir(id)?;
+        let declarations = crate::pack_content::load(&game, version_id, &working)?;
         let count = |kind| {
-            Ok::<_, anyhow::Error>(
-                read_content(&working, resolved.as_ref(), kind, false)?
-                    .files
-                    .len(),
-            )
+            let mut content = read_content(&working, resolved.as_ref(), kind, false)?;
+            declarations::merge(
+                &game.join("versions").join(version_id),
+                kind,
+                &declarations,
+                &mut content,
+            );
+            Ok::<_, anyhow::Error>(content.files.len())
         };
         Ok(VersionContentCounts {
             mods: count(ContentKind::Mods)?,
             datapacks: count(ContentKind::Datapacks)?,
             resourcepacks: count(ContentKind::Resourcepacks)?,
             saves: count(ContentKind::Saves)?,
+            unresolved: count(ContentKind::Unresolved)?,
+            libraries: resolved
+                .as_ref()
+                .map_or(0, |resolved| resolved.version.libraries.len()),
         })
+    }
+
+    fn merge_declared_content(
+        &self,
+        id: &str,
+        version: &str,
+        working: &Path,
+        kind: ContentKind,
+        content: &mut VersionContent,
+    ) -> Result<()> {
+        let game = self.available_game_dir(id)?;
+        let declarations = crate::pack_content::load(&game, version, working)?;
+        declarations::merge(
+            &game.join("versions").join(version),
+            kind,
+            &declarations,
+            content,
+        );
+        Ok(())
     }
 
     fn content_location(
@@ -180,9 +317,11 @@ impl Launcher {
     ) -> Result<(PathBuf, Option<version::ResolvedVersion>)> {
         storage::safe_version(version_id)?;
         let instance = self.instance(id)?;
-        if !instance.versions.iter().any(|v| v.id == version_id) {
-            bail!("此实例未添加该版本");
-        }
+        let tracked = instance
+            .versions
+            .iter()
+            .find(|v| v.id == version_id)
+            .context("此实例未添加该版本")?;
         let game = self.available_game_dir(id)?;
         let resolved = if version::metadata_path(&game, version_id)?.is_file() {
             Some(version::resolve(self.root(), &game, version_id)?)
@@ -191,6 +330,9 @@ impl Launcher {
         };
         let working = match &resolved {
             Some(resolved) => version::working_directory(&game, &resolved.version)?,
+            None if tracked.modpack || crate::loader::has_record(&game, version_id) => {
+                game.join("versions").join(version_id)
+            }
             None => game,
         };
         Ok((working, resolved))
@@ -208,10 +350,11 @@ fn read_content(
         ContentKind::Resourcepacks => working.join("resourcepacks"),
         ContentKind::Saves => working.join("saves"),
         // Data packs may be global or installed separately in each world.
-        ContentKind::Datapacks => working.to_owned(),
+        ContentKind::Datapacks | ContentKind::Unresolved => working.to_owned(),
     };
     let mut files = Vec::new();
     match kind {
+        ContentKind::Unresolved => {}
         ContentKind::Mods => {
             scan_mods(&directory, &directory, &mut files, read_metadata)?;
             // Legacy Forge also loads mods/<Minecraft version>.
@@ -240,9 +383,20 @@ fn read_content(
         }
     }
     if read_metadata {
-        files.sort_by_cached_key(|item| (item.name.to_lowercase(), item.file_name.to_lowercase()));
+        sort_content(&mut files);
     }
     Ok(VersionContent { directory, files })
+}
+
+fn sort_content(files: &mut [LocalContentFile]) {
+    files.sort_by_cached_key(|item| (item.name.to_lowercase(), item.file_name.to_lowercase()));
+}
+fn apply_identity(file: &mut LocalContentFile, identity: ModIdentity) {
+    if let Some(name) = identity.name {
+        file.name = name;
+    }
+    file.version = identity.version;
+    file.mod_ids = identity.ids;
 }
 
 fn content_entries(directory: &Path) -> Result<Vec<PathBuf>> {
@@ -287,8 +441,10 @@ fn scan_content(
         }
         let metadata = fs::metadata(&path)?;
         files.push(LocalContentFile {
-            file_name: path.strip_prefix(root)?.to_string_lossy().into_owned(),
+            declaration: None,
+            file_name: relative_name(&path, root)?,
             name,
+            mod_ids: Vec::new(),
             version: None,
             enabled: true,
             size: if metadata.is_file() {
@@ -325,15 +481,17 @@ fn scan_mods(
         if !metadata.is_file() {
             continue;
         }
-        let (title, version) = if read_metadata {
+        let identity = if read_metadata {
             mod_metadata(&path).unwrap_or_default()
         } else {
-            (None, None)
+            ModIdentity::default()
         };
         files.push(LocalContentFile {
-            file_name: path.strip_prefix(root)?.to_string_lossy().into_owned(),
-            name: title.unwrap_or(name),
-            version,
+            declaration: None,
+            file_name: relative_name(&path, root)?,
+            name: identity.name.unwrap_or(name),
+            version: identity.version,
+            mod_ids: identity.ids,
             enabled,
             size: metadata.len(),
         });
@@ -341,15 +499,26 @@ fn scan_mods(
     Ok(())
 }
 
-fn mod_metadata(path: &Path) -> Option<(Option<String>, Option<String>)> {
+fn relative_name(path: &Path, root: &Path) -> Result<String> {
+    Ok(path
+        .strip_prefix(root)?
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/"))
+}
+
+#[derive(Clone, Default)]
+struct ModIdentity {
+    name: Option<String>,
+    version: Option<String>,
+    ids: Vec<String>,
+}
+
+fn mod_metadata(path: &Path) -> Option<ModIdentity> {
     let mut archive = zip::ZipArchive::new(fs::File::open(path).ok()?).ok()?;
-    for descriptor in [
-        "fabric.mod.json",
-        "quilt.mod.json",
-        "META-INF/neoforge.mods.toml",
-        "META-INF/mods.toml",
-        "mcmod.info",
-    ] {
+    let mut result = ModIdentity::default();
+    for descriptor in details::MOD_DESCRIPTORS {
         let Ok(mut file) = archive.by_name(descriptor) else {
             continue;
         };
@@ -357,52 +526,80 @@ fn mod_metadata(path: &Path) -> Option<(Option<String>, Option<String>)> {
             continue;
         }
         let mut bytes = Vec::new();
-        file.by_ref()
+        if file
+            .by_ref()
             .take(1024 * 1024 + 1)
             .read_to_end(&mut bytes)
-            .ok()?;
-        if bytes.len() > 1024 * 1024 {
+            .is_err()
+            || bytes.len() > 1024 * 1024
+        {
             continue;
         }
-        let value: Value = if descriptor.ends_with(".toml") {
-            let value: toml::Value = toml::from_str(std::str::from_utf8(&bytes).ok()?).ok()?;
-            serde_json::to_value(value).ok()?
+        let value: Option<Value> = if descriptor.ends_with(".toml") {
+            std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(|s| toml::from_str::<toml::Value>(s).ok())
+                .and_then(|v| serde_json::to_value(v).ok())
         } else {
-            serde_json::from_slice(&bytes).ok()?
+            serde_json::from_slice(&bytes).ok()
         };
-        let info = if descriptor == "quilt.mod.json" {
-            &value["quilt_loader"]
+        let Some(value) = value else { continue };
+        let infos: Vec<&Value> = if descriptor == "quilt.mod.json" {
+            vec![&value["quilt_loader"]]
         } else if descriptor.ends_with(".toml") {
-            &value["mods"][0]
+            value["mods"]
+                .as_array()
+                .map(|a| a.iter().collect())
+                .unwrap_or_default()
         } else if descriptor == "mcmod.info" {
-            if value.is_array() {
-                &value[0]
-            } else {
-                &value["modList"][0]
-            }
+            value
+                .as_array()
+                .or_else(|| value["modList"].as_array())
+                .map(|a| a.iter().collect())
+                .unwrap_or_default()
         } else {
-            &value
+            vec![&value]
         };
-        let name = [
-            info.get("name"),
-            info.get("displayName"),
-            info["metadata"].get("name"),
-            info.get("id"),
-            info.get("modid"),
-            info.get("modId"),
-        ]
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .find(|s| !s.trim().is_empty())
-        .map(str::to_owned);
-        let version = info["version"]
-            .as_str()
-            .filter(|s| !s.is_empty() && !s.contains("${"))
-            .map(str::to_owned);
-        return Some((name, version));
+        for info in infos {
+            let id = info["id"]
+                .as_str()
+                .or_else(|| info["modid"].as_str())
+                .or_else(|| info["modId"].as_str());
+            for id in id.into_iter().chain(
+                info["provides"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|v| v.as_str().or_else(|| v["id"].as_str())),
+            ) {
+                if !id.is_empty() && !result.ids.iter().any(|v| v == id) {
+                    result.ids.push(id.to_owned());
+                }
+            }
+            // Keep the first descriptor's display identity while indexing every
+            // mod and declared alias in this JAR, using the same bounded reads.
+            if result.name.is_none() {
+                result.name = [
+                    info.get("name"),
+                    info.get("displayName"),
+                    info["metadata"].get("name"),
+                    info.get("id"),
+                    info.get("modid"),
+                    info.get("modId"),
+                ]
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .find(|s| !s.trim().is_empty())
+                .map(str::to_owned);
+                result.version = info["version"]
+                    .as_str()
+                    .filter(|s| !s.is_empty() && !s.contains("${"))
+                    .map(str::to_owned);
+            }
+        }
     }
-    None
+    Some(result)
 }
 
 #[cfg(test)]
@@ -427,10 +624,170 @@ mod tests {
     fn jar(path: &Path, entry: &str, text: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let mut zip = zip::ZipWriter::new(fs::File::create(path).unwrap());
-        zip.start_file(entry, zip::write::SimpleFileOptions::default())
-            .unwrap();
+        zip.start_file(
+            entry,
+            zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored),
+        )
+        .unwrap();
         zip.write_all(text.as_bytes()).unwrap();
         zip.finish().unwrap();
+    }
+
+    #[test]
+    fn installed_curseforge_manifest_matches_local_mods_and_resourcepacks_without_api() {
+        let temp = tempfile::tempdir().unwrap();
+        let launcher = Launcher::open(Some(temp.path().join("launcher"))).unwrap();
+        let instance = launcher.create_instance("Games", "RLCraft").unwrap();
+        let game = instance.game_dir(launcher.root());
+        profile(&game, "RLCraft");
+        let directory = game.join("versions/RLCraft");
+        fs::create_dir_all(directory.join("mods")).unwrap();
+        fs::create_dir_all(directory.join("resourcepacks")).unwrap();
+        let mut manifest = json!({"manifestType":"minecraftModpack","files":[]});
+        for id in 0..187 {
+            let (folder, filename) = if id < 177 {
+                ("mods", format!("mod-{id}.jar"))
+            } else {
+                ("resourcepacks", format!("resources-{id}.zip"))
+            };
+            fs::write(directory.join(folder).join(&filename), b"existing").unwrap();
+            manifest["files"].as_array_mut().unwrap().push(json!({
+                "projectID":1000+id,"fileID":2000+id,"fileName":filename
+            }));
+        }
+        storage::write_json(&directory.join("manifest.json"), &manifest).unwrap();
+        // HMCL's record also contains the manifest, but without enriched filenames.
+        let mut hmcl = manifest.clone();
+        for file in hmcl["files"].as_array_mut().unwrap() {
+            file.as_object_mut().unwrap().remove("fileName");
+        }
+        storage::write_json(&directory.join("modpack.cfg"), &json!({"manifest":hmcl})).unwrap();
+        fs::write(directory.join("mods/user-added.jar"), b"custom").unwrap();
+        fs::rename(
+            directory.join("mods/mod-0.jar"),
+            directory.join("mods/mod-0.jar.disabled"),
+        )
+        .unwrap();
+        let counts = launcher
+            .version_content_counts(&instance.id, "RLCraft")
+            .unwrap();
+        assert_eq!(
+            (counts.mods, counts.resourcepacks, counts.unresolved),
+            (178, 10, 0)
+        );
+        let mods = launcher
+            .version_content_index(&instance.id, "RLCraft")
+            .unwrap();
+        assert_eq!(
+            mods.content
+                .files
+                .iter()
+                .filter(|f| f.declaration.as_ref().is_some_and(|d| d.status == "local"))
+                .count(),
+            177
+        );
+        let metadata = launcher.version_metadata(&instance.id, "RLCraft").unwrap();
+        for name in ["manifest.json", "modpack.cfg"] {
+            let document = metadata.documents.iter().find(|d| d.name == name).unwrap();
+            assert_eq!(
+                document
+                    .sections
+                    .iter()
+                    .map(|s| (s.target, s.entries.len()))
+                    .collect::<Vec<_>>(),
+                [(Some("mods"), 177), (Some("resourcepacks"), 10)]
+            );
+        }
+        // Viewing content must not rewrite the user's original manifest.
+        assert_eq!(
+            storage::read_json::<Value>(&directory.join("manifest.json")).unwrap(),
+            manifest
+        );
+    }
+    #[test]
+    fn progressive_mod_index_reuses_summaries_and_invalidates_replaced_files() {
+        use std::sync::atomic::Ordering;
+        let temp = tempfile::tempdir().unwrap();
+        let launcher = Launcher::open(Some(temp.path().join("launcher"))).unwrap();
+        let instance = launcher.create_instance("Game", "pack").unwrap();
+        let game = launcher.game_dir(&instance.id).unwrap();
+        profile(&game, "pack");
+        let first = game.join("mods/first.jar");
+        jar(
+            &first,
+            "fabric.mod.json",
+            r#"{"id":"old","name":"Old mod","version":"1"}"#,
+        );
+        jar(
+            &game.join("mods/second.jar.disabled"),
+            "mcmod.info",
+            r#"[{"modid":"legacy","name":"Legacy"}]"#,
+        );
+        let cold = launcher
+            .version_content_index(&instance.id, "pack")
+            .unwrap();
+        assert_eq!(cold.pending.len(), 2);
+        assert_eq!(cold.content.files[0].name, "first.jar");
+        assert_eq!(launcher.0.mod_summaries.reads.load(Ordering::Relaxed), 0);
+        let batch = launcher
+            .version_content_summaries(&instance.id, "pack", &cold.pending)
+            .unwrap();
+        assert_eq!(batch[0].name, "Old mod");
+        assert!(!batch[1].enabled);
+        assert_eq!(launcher.0.mod_summaries.reads.load(Ordering::Relaxed), 2);
+        let warm = launcher
+            .version_content_index(&instance.id, "pack")
+            .unwrap();
+        assert!(warm.pending.is_empty());
+        assert_eq!(warm.content.files[0].name, "Legacy");
+        assert_eq!(launcher.0.mod_summaries.reads.load(Ordering::Relaxed), 2);
+        let previous = fs::metadata(&first).unwrap();
+        let replacement = game.join("replacement.jar");
+        jar(
+            &replacement,
+            "fabric.mod.json",
+            r#"{"id":"new","name":"New mod","version":"2"}"#,
+        );
+        fs::File::options()
+            .write(true)
+            .open(&replacement)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(previous.modified().unwrap()))
+            .unwrap();
+        fs::remove_file(&first).unwrap();
+        fs::rename(replacement, &first).unwrap();
+        assert_eq!(fs::metadata(&first).unwrap().len(), previous.len());
+        let changed = launcher
+            .version_content_index(&instance.id, "pack")
+            .unwrap();
+        assert_eq!(changed.pending, vec!["first.jar"]);
+        let batch = launcher
+            .version_content_summaries(&instance.id, "pack", &changed.pending)
+            .unwrap();
+        assert_eq!(batch[0].name, "New mod");
+        assert_eq!(batch[0].mod_ids, vec!["new"]);
+        assert_eq!(launcher.0.mod_summaries.reads.load(Ordering::Relaxed), 3);
+        fs::remove_file(first).unwrap();
+        let removed = launcher
+            .version_content_index(&instance.id, "pack")
+            .unwrap();
+        assert_eq!(removed.content.files.len(), 1);
+        assert!(removed.pending.is_empty());
+        assert!(
+            launcher
+                .version_content_summaries(&instance.id, "pack", &["../outside.jar".into()])
+                .is_err()
+        );
+        assert!(
+            launcher
+                .version_content_summaries(
+                    &instance.id,
+                    "pack",
+                    &vec!["second.jar.disabled".into(); 25]
+                )
+                .is_err()
+        );
     }
     #[test]
     fn rename_persists_across_discovery_without_changing_profile_or_directory() {

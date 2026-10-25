@@ -65,6 +65,7 @@ pub struct Downloader {
     locks: Arc<Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>>>,
     verification: Arc<crate::verification::VerificationCache>,
     full_verification: bool,
+    mirrors: Arc<std::collections::HashMap<PathBuf, Vec<String>>>,
 }
 #[derive(Default)]
 struct TransferMetrics {
@@ -208,7 +209,51 @@ impl Downloader {
             sources: Arc::new(Mutex::new(Default::default())),
             verification: crate::verification::VerificationCache::shared(root),
             full_verification: false,
+            mirrors: Arc::default(),
         })
+    }
+    pub(crate) fn with_mirrors(
+        mut self,
+        mirrors: std::collections::HashMap<PathBuf, Vec<String>>,
+    ) -> Self {
+        self.mirrors = Arc::new(mirrors);
+        self
+    }
+    /// Pack downloads keep resumable bytes beside the version, so the directory
+    /// can be moved to another launcher without losing an interrupted transfer.
+    pub(crate) fn with_cache(mut self, directory: PathBuf) -> Self {
+        self.cache = directory;
+        self
+    }
+
+    pub(crate) async fn import_cached_files(
+        &self,
+        root: &Path,
+        files: &[FileSpec],
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        for file in files {
+            check_cancel(cancel)?;
+            if file.path.is_file() {
+                continue;
+            }
+            let old = object_path(&root.join("cache/objects"), file)?;
+            let new = self.cache_path(file)?;
+            for (source, target) in [
+                (old.clone(), new.clone()),
+                (old.with_extension("part"), new.with_extension("part")),
+            ] {
+                if target.try_exists()? || !source.is_file() {
+                    continue;
+                }
+                tokio::fs::create_dir_all(target.parent().context("无效下载目标")?).await?;
+                let temporary =
+                    Partial(target.with_extension(format!("{}.tmp", uuid::Uuid::new_v4())));
+                tokio::fs::copy(&source, &temporary.0).await?;
+                tokio::fs::rename(&temporary.0, target).await?;
+            }
+        }
+        Ok(())
     }
     pub fn urls(&self, url: &str) -> Vec<String> {
         crate::network::urls(&self.settings, url)
@@ -301,7 +346,13 @@ impl Downloader {
                 };
                 match result {
                     Ok(v) => return Ok(v),
-                    Err(e) => last = format!("{e:#}"),
+                    Err(e) => {
+                        let certificate = crate::network::is_certificate_error(&e);
+                        last = format!("{:#}", crate::network::explain_error(e));
+                        if certificate {
+                            break;
+                        }
+                    }
                 }
                 if attempt < self.settings.retries {
                     tokio::select! { _=cancel.cancelled()=>bail!("操作已取消"), _=tokio::time::sleep(Duration::from_millis(300 * (1<<attempt)))=>{} }
@@ -333,7 +384,13 @@ impl Downloader {
                 };
                 match result {
                     Ok(hash) => return Ok(hash),
-                    Err(error) => last = format!("{error:#}"),
+                    Err(error) => {
+                        let certificate = crate::network::is_certificate_error(&error);
+                        last = format!("{:#}", crate::network::explain_error(error));
+                        if certificate {
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -582,6 +639,8 @@ impl Downloader {
                             break 'sources;
                         }
                         Err(e) => {
+                            let certificate = crate::network::is_certificate_error(&e);
+                            let e = crate::network::explain_error(e);
                             // Invalid responses/hash failures may have discarded
                             // the partial. Reflect the actual retained bytes.
                             let bytes = self.partial_bytes(file).await?;
@@ -590,6 +649,11 @@ impl Downloader {
                                 self.metrics.retries.fetch_add(1, Ordering::Relaxed);
                             }
                             errors.push(format!("{e:#}"));
+                            // A new attempt cannot fix this certificate. Still
+                            // allow a separately verified mirror to succeed.
+                            if certificate || attempt == self.settings.retries {
+                                break;
+                            }
                             sink(Event::new(
                                 "retry",
                                 format!(
@@ -709,8 +773,25 @@ impl Downloader {
                 };
                 let sink = sink.clone();
                 active.push(async move {
-                    self.file_with_progress(&file, known.downloaded, cancel, &sink)
-                        .await?;
+                    let mut result = self
+                        .file_with_progress(&file, known.downloaded, cancel, &sink)
+                        .await;
+                    if let Some(urls) = self.mirrors.get(&file.path) {
+                        for url in urls.iter().filter(|u| **u != file.url) {
+                            if result.is_ok() {
+                                break;
+                            }
+                            check_cancel(cancel)?;
+                            let alternative = FileSpec {
+                                url: url.clone(),
+                                ..file.clone()
+                            };
+                            result = self
+                                .file_with_progress(&alternative, known.downloaded, cancel, &sink)
+                                .await;
+                        }
+                    }
+                    result?;
                     Ok::<_, anyhow::Error>(file.path)
                 });
             }
@@ -807,6 +888,139 @@ mod tests {
     use super::*;
     use sha1::{Digest, Sha1};
     use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn skewed_clock_reports_tls_failure_once_and_recovers_after_clock_sync() {
+        use rustls::{
+            ClientConfig, RootCertStore, ServerConfig,
+            pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, UnixTime},
+            time_provider::TimeProvider,
+        };
+        #[derive(Debug)]
+        struct Clock(u64);
+        impl TimeProvider for Clock {
+            fn current_time(&self) -> Option<UnixTime> {
+                Some(UnixTime::since_unix_epoch(Duration::from_secs(self.0)))
+            }
+        }
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let cert =
+            CertificateDer::from(include_bytes!("../tests/fixtures/tls/localhost.der").to_vec());
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            include_bytes!("../tests/fixtures/tls/localhost.key.der").to_vec(),
+        ));
+        let config = ServerConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert], key)
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counted = attempts.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let (socket, _) = listener.accept().await.unwrap();
+                counted.fetch_add(1, Ordering::Relaxed);
+                if let Ok(mut stream) = acceptor.accept(socket).await {
+                    let mut bytes = [0; 4096];
+                    let _ = stream.read(&mut bytes).await;
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                        )
+                        .await;
+                }
+            }
+        });
+        let client = |clock| {
+            let mut roots = RootCertStore::empty();
+            roots
+                .add(CertificateDer::from(
+                    include_bytes!("../tests/fixtures/tls/ca.der").to_vec(),
+                ))
+                .unwrap();
+            let mut config = ClientConfig::builder_with_provider(provider.clone())
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            config.time_provider = Arc::new(Clock(clock));
+            reqwest::Client::builder()
+                .no_proxy()
+                .use_preconfigured_tls(config)
+                .timeout(Duration::from_secs(3))
+                .build()
+                .unwrap()
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let mut downloader = Downloader::new(
+            temp.path(),
+            Settings {
+                proxy_mode: "none".into(),
+                retries: 3,
+                ..Settings::default()
+            },
+        )
+        .unwrap();
+        let url = format!("https://localhost:{port}/version.json");
+        let cancel = CancellationToken::new();
+        // June 2027: one year beyond the test's June 2026 reference clock.
+        downloader.client = client(1_811_808_000);
+        let error = downloader
+            .json::<serde_json::Value>(&url, &cancel)
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("系统日期"), "{error:#}");
+        assert_eq!(attempts.load(Ordering::Relaxed), 1);
+        // Signed partial download data must survive a TLS failure untouched.
+        let file = FileSpec {
+            url: url.clone(),
+            path: temp.path().join("game.json"),
+            hash: hex::encode(Sha1::digest(b"{}")),
+            sha256: false,
+            size: 2,
+        };
+        let part = downloader.cache_path(&file).unwrap().with_extension("part");
+        std::fs::create_dir_all(part.parent().unwrap()).unwrap();
+        std::fs::write(&part, b"{").unwrap();
+        let sink: EventSink = Arc::new(|_| {});
+        assert!(
+            format!(
+                "{:#}",
+                downloader.file(&file, &cancel, &sink).await.unwrap_err()
+            )
+            .contains("系统日期")
+        );
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+        assert_eq!(std::fs::read(&part).unwrap(), b"{");
+        downloader.client = client(1_780_272_000); // June 2026: valid.
+        assert_eq!(
+            downloader
+                .json::<serde_json::Value>(&url, &cancel)
+                .await
+                .unwrap(),
+            serde_json::json!({})
+        );
+        downloader.file(&file, &cancel, &sink).await.unwrap();
+        assert_eq!(std::fs::read(&file.path).unwrap(), b"{}");
+        // January 2025: too early must be diagnosed as a clock issue too.
+        downloader.client = client(1_735_689_600);
+        assert!(
+            format!(
+                "{:#}",
+                downloader
+                    .json::<serde_json::Value>(&url, &cancel)
+                    .await
+                    .unwrap_err()
+            )
+            .contains("系统日期")
+        );
+        server.abort();
+        let _ = server.await;
+    }
     #[tokio::test]
     async fn batch_receipts_survive_cancel_and_restart_and_progress_scan_never_hashes() {
         let temp = tempfile::tempdir().unwrap();

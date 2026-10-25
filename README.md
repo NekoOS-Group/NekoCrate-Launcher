@@ -12,7 +12,7 @@
 | --- | --- |
 | 账户 | Microsoft 设备验证码授权 → Xbox Live → XSTS → Minecraft；权益与档案检查；刷新令牌；多账户切换/移除；未登录时以 Player 本地身份启动 |
 | 凭据 | 刷新令牌存入 macOS Keychain / Windows Credential Manager / Linux Secret Service；数据库与前端不接收令牌 |
-| 游戏 | 原版与 Fabric 安装；已有 Fabric / Forge / NeoForge 版本启动；版本继承、现代/旧式启动参数、依赖与原生库解析 |
+| 游戏 | 原版、Fabric、Forge、NeoForge 安装；版本目录与推荐版本选择；已有加载器版本启动；版本继承、现代/旧式启动参数、依赖与原生库解析 |
 | Java | 检测本机及托管运行时；综合已知加载器范围、ASM 与模组声明选择兼容 Java，优先复用本地版本；信息不足时保守匹配；现代加载器自动使用完整 JDK；下载 SHA-256 校验 |
 | 内存 | 自动（默认）、推荐、最小、自定义；按游戏版本、Mod 规模及支持的整合包声明估算；启动前重新读取可用内存 |
 | 下载 | 1–32 并发与自适应、暂停/继续、重试、取消、HTTP Range 续传、SHA-1/SHA-256 和长度校验、共享内容缓存；游戏源自动测速与回退、官方/BMCLAPI 手动选择；独立 Mod 源设置与系统/手动代理 |
@@ -23,8 +23,10 @@
 
 ## 支持边界
 
-- 支持原版与 Fabric 的下载安装；Forge / NeoForge 本阶段支持启动已有安装，尚不执行其安装器的 processors 或自动修复生成的补丁文件。不是整合包下载器，也不自动安装 Fabric API / 其他模组。
-- 已有关联目录会在启动器启动时重新识别版本。支持 `inheritsFrom` 和 HMCL 合并配置；有隔离目录的整合包保留 `versions/<子实例>` 中的模组、配置和存档，普通版本继续共用 `.minecraft`。
+- 普通游戏下载页可选择原版、Fabric、Forge、NeoForge；加载器版本目录缓存一小时，联网失败时复用已有目录。支持导入 Modrinth / CurseForge 整合包；不自动添加 Fabric API 或未声明的其他模组。CurseForge 文件解析仍需要配置应用 API Key。
+- 新建加载器版本使用 `versions/<版本>` 隔离 Mods、配置和存档，安装记录保存在其 `.nekocrate/loader.json`；暂停时终止正在运行的 Java 安装步骤，继续时重跑该步骤，已校验完成的步骤保留。支持修复本启动器安装的加载器；不原地升级或替换已有整合包加载器，不覆盖同名的外部版本。
+- Forge 安装支持含 `install_profile.json` 的新旧安装器格式，早于 1.6 的传统分发包不在选择列表中；没有逐个历史构建做实机验证。
+- 已有关联目录会在启动器启动时重新识别版本。支持 `inheritsFrom` 和 HMCL 合并配置；有隔离目录的整合包保留 `versions/<子实例>` 中的模组、配置和存档，原版及已有普通版本继续沿用原工作目录。
 - 支持旧式 Forge 启动参数；Apple Silicon 上缺少 ARM 原生库的旧版本匹配 Intel Java，需要系统可运行 Intel 程序。没有逐个游戏、加载器及整合包版本做实机验证。
 - 外置认证、Bedrock、Quilt 安装尚未实现。
 - 下载恢复支持 HTTP Range 字节级续传；未变化的完整文件复用持久化校验记录，主动修复仍完整校验。服务器不支持续传时安全地重新下载对应文件。
@@ -68,7 +70,7 @@ npm run tauri build
 
 Linux CI 和发布构建使用固定 digest 的 Ubuntu 22.04 预装依赖镜像。镜像升级前在全新的 runner 上比较三次 apt 安装与三次冷拉取；构建缓存自动保留各平台最新代次，定期清理旧标签范围与重复代次。规则、实测数据、手动操作和发布文件说明见 [构建基础设施](docs/build-infrastructure.md)。
 
-开发版本发布由 `.github/workflows/release.yml` 管理：先将提交推送到 `neko_dev` / `main`，再推送 `dev*` 标签；标签任务将构建调度到默认分支，复用跨版本的 Rust 发布缓存（手动发布也选择默认分支），实际源码仍固定为标签提交；发布等待相同提交的 CI 成功，直接复用其前端产物，不再安装前端依赖、重跑检查或重建前端。三个原生 runner 仅安装锁定版本的 Tauri CLI，在编译前检查前端入口与资源，编译后执行实际二进制的 `--verify-frontend`，不打开窗口或用户数据；分别编译并打包 macOS ARM64、Windows AMD64、Ubuntu 22.04 AMD64。全部成功后校验来源提交、架构与 SHA-256，上传 DMG、NSIS EXE、DEB / AppImage，再公开 GitHub 预发布版。若 CI 失败或产物已过期，需要先重跑对应提交的 CI，再重跑发布任务。构建使用 Rust 1.93.1、Node.js 22 和锁定依赖，`docs/releases/<标签>.md` 保存发布说明。`dev0.1` 对应应用版本 `0.1.0-dev.1`；`dev0.2` 对应 `0.2.0-dev.1`；`dev0.3` 对应 `0.3.0-dev.1`；`dev0.3.1` 对应 `0.3.1-dev.1`；`dev0.3.2` 对应 `0.3.2-dev.1`；`dev0.4` 对应 `0.4.0-dev.1`；`dev0.5` 对应 `0.5.0-dev.1`；`dev0.6` 对应 `0.6.0-dev.1`。
+开发版本发布由 `.github/workflows/release.yml` 管理：先将提交推送到 `neko_dev` / `main`，再推送 `dev*` 标签；标签任务将构建调度到默认分支，复用跨版本的 Rust 发布缓存（手动发布也选择默认分支），实际源码仍固定为标签提交；发布等待相同提交的 CI 成功，直接复用其前端产物，不再安装前端依赖、重跑检查或重建前端。三个原生 runner 仅安装锁定版本的 Tauri CLI，在编译前检查前端入口与资源，编译后执行实际二进制的 `--verify-frontend`，不打开窗口或用户数据；分别编译并打包 macOS ARM64、Windows AMD64、Ubuntu 22.04 AMD64。全部成功后校验来源提交、架构与 SHA-256，上传 DMG、NSIS EXE、DEB / AppImage，再公开 GitHub 预发布版。若 CI 失败或产物已过期，需要先重跑对应提交的 CI，再重跑发布任务。构建使用 Rust 1.93.1、Node.js 22 和锁定依赖，`docs/releases/<标签>.md` 保存发布说明。`dev0.1` 对应应用版本 `0.1.0-dev.1`；`dev0.2` 对应 `0.2.0-dev.1`；`dev0.3` 对应 `0.3.0-dev.1`；`dev0.3.1` 对应 `0.3.1-dev.1`；`dev0.3.2` 对应 `0.3.2-dev.1`；`dev0.4` 对应 `0.4.0-dev.1`；`dev0.5` 对应 `0.5.0-dev.1`；`dev0.6` 对应 `0.6.0-dev.1`；`dev0.7` 对应 `0.7.0-dev.1`。
 
 应用内更新使用 Tauri updater：macOS 安装后的 `.app`、Windows NSIS 安装版和 Linux AppImage 支持下载、签名验证、安装替换及重启；开发模式、未安装的 macOS 二进制和 Linux DEB 保留手动安装入口。下载可取消，游戏或下载任务运行时保留准备好的更新，任务结束后点击「安装并重启」。已发布的 dev0.4 及以前版本仍需手动安装一次带更新器的新版本。
 

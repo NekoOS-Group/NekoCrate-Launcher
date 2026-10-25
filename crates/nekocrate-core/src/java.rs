@@ -5,7 +5,10 @@ use crate::{
 };
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 use tokio_util::sync::CancellationToken;
 
 pub(crate) fn background_command(path: &Path) -> tokio::process::Command {
@@ -249,12 +252,23 @@ pub async fn inspect(path: &Path) -> Result<JavaInfo> {
             .unwrap_or("")
             .into(),
         arch: arch.into(),
-        jdk: path.parent().is_some_and(|bin| {
-            bin.join(if cfg!(windows) { "javac.exe" } else { "javac" })
-                .is_file()
-        }),
+        jdk: runtime_is_jdk(path),
     })
 }
+fn runtime_is_jdk(path: &Path) -> bool {
+    let executable = path.canonicalize().unwrap_or_else(|_| path.to_owned());
+    let Some(bin) = executable.parent() else {
+        return false;
+    };
+    let javac = if cfg!(windows) { "javac.exe" } else { "javac" };
+    bin.join(javac).is_file()
+        || bin
+            .parent()
+            .filter(|home| home.ends_with("jre"))
+            .and_then(|jre| jre.parent())
+            .is_some_and(|home| home.join("bin").join(javac).is_file())
+}
+
 fn executable_name() -> &'static str {
     if cfg!(windows) { "java.exe" } else { "java" }
 }
@@ -285,30 +299,50 @@ pub async fn discover(root: &Path) -> Vec<JavaInfo> {
     }
     if let Ok(entries) = std::fs::read_dir(root.join("runtimes")) {
         for e in entries.flatten() {
+            if e.file_name().to_string_lossy().starts_with(".install-") {
+                continue;
+            }
             if let Some(p) = find_java(&e.path()) {
                 candidates.push(p);
             }
         }
     }
     #[cfg(target_os = "macos")]
-    for base in ["/Library/Java/JavaVirtualMachines", "/opt/homebrew/opt"] {
-        if let Ok(entries) = std::fs::read_dir(base) {
-            for e in entries.flatten() {
-                if (e.file_name().to_string_lossy().contains("jdk")
-                    || base.contains("JavaVirtualMachines"))
-                    && let Some(p) = find_java(&e.path())
-                {
-                    candidates.push(p);
+    {
+        let mut bases = vec![
+            PathBuf::from("/Library/Java/JavaVirtualMachines"),
+            PathBuf::from("/opt/homebrew/opt"),
+        ];
+        if let Some(home) = std::env::var_os("HOME") {
+            bases.push(PathBuf::from(home).join("Library/Java/JavaVirtualMachines"));
+        }
+        for base in bases {
+            if let Ok(entries) = std::fs::read_dir(&base) {
+                for entry in entries.flatten() {
+                    if (base.ends_with("JavaVirtualMachines")
+                        || entry.file_name().to_string_lossy().contains("jdk"))
+                        && let Some(path) = find_java(&entry.path())
+                    {
+                        candidates.push(path);
+                    }
                 }
             }
         }
     }
+    inspect_candidates(candidates).await
+}
+
+async fn inspect_candidates(mut candidates: Vec<PathBuf>) -> Vec<JavaInfo> {
     candidates.sort();
     candidates.dedup();
+    let mut seen = HashSet::new();
     let mut found = vec![];
     for path in candidates {
-        if let Ok(info) = inspect(&path).await
-            && !found.iter().any(|v: &JavaInfo| v.path == info.path)
+        // Homebrew's bin/java, opt/java and opt/openjdk can all be the same JVM.
+        // Deduplicate before probing; keep the original stable alias for display/use.
+        let identity = path.canonicalize().unwrap_or_else(|_| path.clone());
+        if seen.insert(identity)
+            && let Ok(info) = inspect(&path).await
         {
             found.push(info);
         }
@@ -365,7 +399,7 @@ pub async fn ensure(
     if let Some(java) = available
         .iter()
         .filter(|j| requirement.matches(j))
-        .max_by_key(|j| (j.major, version_numbers(&j.version)))
+        .max_by_key(|j| (j.major, version_numbers(&j.version), j.jdk))
     {
         sink(Event::new(
             "info",
@@ -412,11 +446,12 @@ pub async fn ensure(
         .last()
         .context("没有兼容的 Java 版本")?;
     check_cancel(cancel)?;
+    let image_type = download_image_type(major, requirement.jdk);
     sink(Event::new(
         "stage",
         format!(
             "正在安装 {} {major} ({})",
-            if requirement.jdk { "JDK" } else { "Java" },
+            if image_type == "jdk" { "JDK" } else { "Java" },
             requirement.arch
         ),
     ));
@@ -432,7 +467,6 @@ pub async fn ensure(
         "x86_64" => "x64",
         _ => bail!("此架构暂不支持自动安装 Java，请手动配置"),
     };
-    let image_type = if requirement.jdk { "jdk" } else { "jre" };
     let url = format!(
         "https://api.adoptium.net/v3/assets/latest/{major}/hotspot?architecture={arch}&image_type={image_type}&os={os}&vendor=eclipse"
     );
@@ -486,6 +520,16 @@ pub async fn ensure(
     }
     Ok(java)
 }
+fn download_image_type(major: u32, needs_jdk: bool) -> &'static str {
+    // A modern JDK also serves vanilla games and avoids installing a second JVM
+    // when a modded profile later needs full JDK classes/debug information.
+    if major >= 9 || needs_jdk {
+        "jdk"
+    } else {
+        "jre"
+    }
+}
+
 fn version_numbers(version: &str) -> Vec<u32> {
     version
         .split('"')
@@ -539,6 +583,66 @@ fn extract_runtime(archive: &Path, dest: &Path, cancel: &CancellationToken) -> R
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn aliases_are_probed_once_and_jdk_detection_uses_the_real_installation() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("Cellar/openjdk/26.0.2.1/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let java = bin.join("java");
+        std::fs::write(&java, "#!/bin/sh\nprintf 'openjdk version \"26.0.2.1\"\\n    os.arch = aarch64\\n' >&2\nprintf x >> \"$(dirname \"$0\")/probes\"\n").unwrap();
+        std::fs::set_permissions(&java, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(bin.join("javac"), "").unwrap();
+        let opt = temp.path().join("opt");
+        std::fs::create_dir_all(&opt).unwrap();
+        let alias = opt.join("java");
+        let second = opt.join("openjdk-java");
+        symlink(&java, &alias).unwrap();
+        symlink(&java, &second).unwrap();
+        assert!(super::inspect(&alias).await.unwrap().jdk);
+        let available = super::inspect_candidates(vec![java.clone(), alias, second]).await;
+        assert_eq!(available.len(), 1);
+        assert_eq!(available[0].major, 26);
+        assert!(available[0].jdk);
+        // The direct alias inspection above writes in opt; candidate discovery
+        // probes the canonical-sorted Cellar path exactly once.
+        assert_eq!(std::fs::read(bin.join("probes")).unwrap(), b"x");
+        let jre_bin = temp.path().join("another-jre/bin");
+        std::fs::create_dir_all(&jre_bin).unwrap();
+        std::fs::copy(&java, jre_bin.join("java")).unwrap();
+        let distinct = super::inspect_candidates(vec![java, jre_bin.join("java")]).await;
+        assert_eq!(
+            distinct.len(),
+            2,
+            "real separate JRE/JDK installations remain selectable"
+        );
+        assert!(distinct.iter().any(|j| !j.jdk));
+    }
+
+    #[test]
+    fn new_modern_installations_use_jdk_while_local_jre_remains_reusable() {
+        for major in [17, 21, 26] {
+            assert_eq!(super::download_image_type(major, false), "jdk");
+            assert_eq!(super::download_image_type(major, true), "jdk");
+            let requirement = super::JavaRequirement {
+                major,
+                arch: "aarch64",
+                jdk: false,
+                compatibility: None,
+                bytecode_ceiling: None,
+            };
+            assert!(requirement.matches(&super::JavaInfo {
+                path: "java".into(),
+                major,
+                version: format!("{major}.0.1"),
+                arch: "aarch64".into(),
+                jdk: false
+            }));
+        }
+        assert_eq!(super::download_image_type(8, false), "jre");
+    }
+
     #[test]
     fn windowed_java_is_selected_only_from_the_same_runtime_and_keeps_a_fallback() {
         let temp = tempfile::tempdir().unwrap();

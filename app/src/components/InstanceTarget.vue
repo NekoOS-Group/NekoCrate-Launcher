@@ -10,6 +10,8 @@ const props = defineProps<{
   target: Instance | null;
   instances: readonly Instance[];
   disabled: boolean;
+  context?: "download" | "manage";
+  iconOnly?: boolean;
 }>();
 const emit = defineEmits<{ select: [id: string | null] }>();
 const root = ref<HTMLElement>();
@@ -62,7 +64,7 @@ function navigate(event: KeyboardEvent) {
   focus(next);
 }
 function choose(id: string | null) {
-  if (props.disabled) return;
+  if (props.disabled || (props.context === "manage" && id === null)) return;
   close(true);
   emit("select", id);
 }
@@ -92,44 +94,82 @@ onBeforeUnmount(() =>
 <template>
   <div
     ref="root"
-    class="download-target"
+    class="instance-target"
+    :class="{ management: context === 'manage' }"
     @focusout="leave"
     @keydown.esc.stop.prevent="close(true)"
   >
     <button
       ref="trigger"
       type="button"
-      class="download-target-trigger"
+      class="instance-target-trigger"
       :disabled="disabled"
       :aria-label="
-        t('安装到 {name}，点击切换实例', {
-          name: target?.name || t('新建实例'),
-        })
+        t(
+          context === 'manage'
+            ? '管理 {name}，点击切换实例'
+            : '安装到 {name}，点击切换实例',
+          {
+            name: target?.name || t('新建实例'),
+          },
+        )
       "
       aria-haspopup="menu"
-      aria-controls="download-target-menu"
+      aria-controls="instance-target-menu"
       :aria-expanded="expanded"
       @click="expanded ? close() : open()"
       @keydown.down.prevent="open"
       @keydown.up.prevent="open"
     >
-      <span class="download-target-prefix">{{ t("到") }}</span>
-      <InstanceIcon
-        v-if="target"
-        :icon="resolveInstanceIcon(target.icon, target.id)"
-      />
-      <Plus v-else :size="22" />
-      <span>{{ target?.name || t("新建实例") }}</span>
-      <ChevronDown :size="13" :class="{ expanded }" />
+      <span
+        v-if="context !== 'manage' && !iconOnly"
+        class="instance-target-prefix"
+        data-slide-key="instance-prefix"
+        >{{ t("到") }}</span
+      >
+      <span
+        v-if="!iconOnly"
+        class="target-icon-stage"
+        data-slide-key="instance-icon"
+      >
+        <Transition name="target-icon">
+          <span
+            :key="`${target?.id || 'new'}:${target?.icon}`"
+            class="target-icon"
+          >
+            <InstanceIcon
+              v-if="target"
+              :icon="resolveInstanceIcon(target.icon, target.id)"
+            />
+            <Plus v-else :size="22" />
+          </span>
+        </Transition>
+      </span>
+      <span
+        v-if="!iconOnly"
+        class="target-name-stage"
+        data-slide-key="instance-name"
+      >
+        <Transition name="target-name">
+          <span :key="target?.name || 'new'" class="target-name">{{
+            target?.name || t("新建实例")
+          }}</span>
+        </Transition>
+      </span>
+      <span class="target-chevron" data-slide-key="instance-chevron">
+        <ChevronDown :size="13" :class="{ expanded }" />
+      </span>
     </button>
     <Transition name="source-menu">
       <div
         v-if="expanded"
-        id="download-target-menu"
+        id="instance-target-menu"
         ref="menu"
-        class="download-target-menu glass-surface"
+        class="instance-target-menu glass-surface"
         role="menu"
-        :aria-label="t('选择安装实例')"
+        :aria-label="
+          t(context === 'manage' ? '选择管理的实例' : '选择安装实例')
+        "
         @keydown="navigate"
       >
         <button
@@ -139,16 +179,19 @@ onBeforeUnmount(() =>
           role="menuitemradio"
           :aria-checked="target?.id === item.id"
           :class="{ selected: target?.id === item.id }"
+          @pointerdown.prevent
           @click="choose(item.id)"
         >
           <InstanceIcon :icon="resolveInstanceIcon(item.icon, item.id)" />
           <span>{{ item.name }}</span>
         </button>
         <button
+          v-if="context !== 'manage'"
           type="button"
           role="menuitemradio"
           :aria-checked="!target"
           :class="{ selected: !target }"
+          @pointerdown.prevent
           @click="choose(null)"
         >
           <Plus :size="24" /><span>{{ t("新建实例") }}</span>
@@ -159,12 +202,21 @@ onBeforeUnmount(() =>
 </template>
 
 <style scoped>
-.download-target {
+.instance-target {
   position: relative;
   flex-shrink: 0;
   max-width: 42%;
 }
-.download-target-trigger {
+.instance-target.management {
+  min-width: 0;
+  max-width: none;
+  flex-shrink: 1;
+}
+.instance-target.management .instance-target-menu {
+  left: 0;
+  right: auto;
+}
+.instance-target-trigger {
   display: flex;
   align-items: center;
   gap: 10px;
@@ -175,50 +227,50 @@ onBeforeUnmount(() =>
   background: transparent;
   color: var(--muted);
 }
-.download-target-trigger span {
+.instance-target-trigger span {
   font-size: 12px;
 }
-.download-target-trigger .download-target-prefix {
+.instance-target-trigger .instance-target-prefix {
   flex-shrink: 0;
   color: var(--muted);
 }
-.download-target span {
+.instance-target span {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   text-align: left;
 }
-.download-target :deep(.instance-art) {
+.instance-target :deep(.instance-art) {
   width: 28px;
   height: 28px;
   flex-shrink: 0;
 }
-.download-target svg {
+.instance-target svg {
   flex-shrink: 0;
 }
-.download-target-trigger > svg:last-child {
+.target-chevron svg {
   transition: transform 220ms var(--motion-ease);
 }
-.download-target-trigger > svg.expanded {
+.target-chevron svg.expanded {
   transform: rotate(180deg);
 }
-.download-target button {
+.instance-target button {
   transition:
     color 180ms var(--motion-ease),
     text-shadow 180ms var(--motion-ease);
 }
-.download-target button:hover:not(:disabled),
-.download-target button:focus-visible,
-.download-target .selected {
+.instance-target button:hover:not(:disabled),
+.instance-target button:focus-visible,
+.instance-target .selected {
   color: var(--blue);
   text-shadow: 0 0 12px var(--glow);
   outline: none;
 }
-.download-target button:focus-visible :deep(.instance-art) {
+.instance-target button:focus-visible :deep(.instance-art) {
   filter: drop-shadow(0 0 5px var(--glow));
 }
-.download-target-menu {
+.instance-target-menu {
   --glass-fill: color-mix(in srgb, var(--surface) 96%, transparent);
   position: absolute;
   z-index: 12;
@@ -232,7 +284,7 @@ onBeforeUnmount(() =>
     var(--glass-rim),
     0 10px 32px #0005;
 }
-.download-target-menu button {
+.instance-target-menu button {
   display: flex;
   align-items: center;
   gap: 12px;
@@ -244,7 +296,65 @@ onBeforeUnmount(() =>
   color: var(--muted);
   font-size: 13px;
 }
-.download-target-menu button > svg {
+.instance-target-menu button > svg {
   width: 28px;
+}
+.target-icon-stage {
+  position: relative;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+}
+.target-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+}
+.target-name-stage {
+  position: relative;
+  display: block;
+  min-width: 0;
+}
+.target-name {
+  display: block;
+}
+.target-chevron {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  overflow: visible;
+}
+.target-icon-enter-active,
+.target-icon-leave-active,
+.target-name-enter-active,
+.target-name-leave-active {
+  transition:
+    opacity 180ms ease-out,
+    transform 360ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.target-icon-enter-from,
+.target-name-enter-from {
+  opacity: 0;
+  transform: translateX(6px);
+}
+.target-icon-leave-to,
+.target-name-leave-to {
+  opacity: 0;
+  transform: translateX(-4px);
+}
+.target-icon-leave-active,
+.target-name-leave-active {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .target-icon-enter-active,
+  .target-icon-leave-active,
+  .target-name-enter-active,
+  .target-name-leave-active {
+    transition: none;
+  }
 }
 </style>

@@ -84,6 +84,239 @@ function manager(options = {}) {
   return { ui, props, events, dispose: () => app.unmount() };
 }
 
+test("zero-count tabs hide and an emptied active tab moves to available content", async () => {
+  let populated = true;
+  const h = manager({
+    loadCounts: async () => ({
+      mods: 0,
+      datapacks: 0,
+      resourcepacks: 1,
+      saves: 0,
+      libraries: 0,
+      unresolved: 0,
+    }),
+    loadContent: async () => ({
+      directory: "/packs",
+      files: populated ? [{ name: "Style", file_name: "style.zip" }] : [],
+    }),
+  });
+  try {
+    await flush();
+    assert.deepEqual(
+      h.ui.visibleTabs.value.map((item) => item.id),
+      ["metadata", "resourcepacks"],
+    );
+    await h.ui.showContent("resourcepacks");
+    await flush();
+    assert.equal(h.ui.tab.value, "resourcepacks");
+    populated = false;
+    await h.ui.reload(true);
+    await flush();
+    assert.equal(h.ui.tab.value, "metadata");
+    assert.deepEqual(
+      h.ui.visibleTabs.value.map((item) => item.id),
+      ["metadata"],
+    );
+  } finally {
+    h.dispose();
+  }
+});
+
+test("runtime libraries use resolved metadata, support filtering and discard stale version results", async () => {
+  const old = deferred(),
+    contentCalls = [];
+  const h = manager({
+    loadCounts: async () => ({
+      mods: 0,
+      datapacks: 0,
+      resourcepacks: 0,
+      saves: 0,
+      libraries: 2,
+      unresolved: 0,
+    }),
+    loadContent: async (...args) => {
+      contentCalls.push(args);
+      return { directory: "/", files: [] };
+    },
+    loadMetadata: async (version) =>
+      version === "first"
+        ? old.promise
+        : {
+            libraries: [
+              {
+                name: "org.lwjgl:lwjgl:3.3.3",
+                detail: "org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3.jar",
+              },
+              { name: "com.example:codec:2.0", detail: null },
+            ],
+          },
+  });
+  try {
+    await flush();
+    await h.ui.showContent("libraries");
+    h.ui.selected.value = "second";
+    await flush();
+    assert.equal(h.ui.counts.value.libraries, 2);
+    h.ui.query.value = "LWJGL 3.3";
+    assert.equal(h.ui.filteredLibraries.value.length, 1);
+    old.resolve({ libraries: [{ name: "old", detail: null }] });
+    await flush();
+    assert.equal(h.ui.libraries.value.length, 2);
+    assert.deepEqual(contentCalls, []);
+    assert.equal(h.ui.tab.value, "libraries");
+  } finally {
+    h.dispose();
+  }
+});
+
+test("manifest links open their own content category and empty tabs disappear", async () => {
+  const calls = [];
+  const h = manager({
+    loadCounts: async () => ({
+      mods: 2,
+      datapacks: 1,
+      resourcepacks: 1,
+      saves: 0,
+      unresolved: 435,
+    }),
+    loadContent: async (version, kind) => {
+      calls.push([version, kind]);
+      return {
+        directory: "/pack",
+        files: [{ file_name: kind + "-file", name: "Entry" }],
+      };
+    },
+  });
+  try {
+    await flush();
+    assert.ok(h.ui.visibleTabs.value.some((tab) => tab.id === "unresolved"));
+    for (const kind of ["mods", "resourcepacks", "datapacks", "unresolved"]) {
+      await h.ui.showContent(kind);
+      await flush();
+      assert.equal(h.ui.tab.value, kind);
+      assert.deepEqual(calls.at(-1), ["first", kind]);
+      assert.equal(h.props.instance.id, "instance-a");
+    }
+    h.ui.counts.value.unresolved = 0;
+    assert.ok(!h.ui.visibleTabs.value.some((tab) => tab.id === "unresolved"));
+    h.ui.ensureVisibleTab();
+    await h.ui.showContent("mods");
+    assert.ok(!h.ui.visibleTabs.value.some((tab) => tab.id === "unresolved"));
+  } finally {
+    h.dispose();
+  }
+});
+
+test("background content refresh keeps visible rows and ignores late responses after a version switch", async () => {
+  const pending = deferred();
+  const h = manager({
+    loadContent: async () => ({
+      directory: "/mods",
+      files: [{ name: "Mod", file_name: "mod.jar" }],
+    }),
+  });
+  try {
+    await h.ui.showContent("mods");
+    await flush();
+    const before = h.ui.content.value;
+    let options;
+    h.props.loadContent = async (_version, _kind, opts) => {
+      options = opts;
+      return pending.promise;
+    };
+    const refresh = h.ui.reload(true);
+    assert.equal(options.fresh, true);
+    assert.equal(
+      h.ui.content.value,
+      before,
+      "Do not clear visible rows during polling",
+    );
+    h.props.loadContent = async () => ({
+      directory: "/second/mods",
+      files: [{ name: "New Mod", file_name: "new.jar" }],
+    });
+    h.ui.selected.value = "second";
+    await flush();
+    pending.resolve({ directory: "/first/mods", files: [] });
+    await refresh;
+    assert.equal(h.ui.content.value.directory, "/second/mods");
+  } finally {
+    h.dispose();
+  }
+});
+
+test("switching from unresolved dependencies to an installed pack removes the empty unresolved tab", async () => {
+  const h = manager({
+    loadContent: async (version, kind) => ({
+      directory: "/pack",
+      files:
+        version === "first" || kind === "mods"
+          ? [{ name: "File", file_name: "file.jar" }]
+          : [],
+    }),
+    loadCounts: async (version) => ({
+      mods: version === "first" ? 0 : 177,
+      resourcepacks: version === "first" ? 0 : 10,
+      unresolved: version === "first" ? 435 : 0,
+      datapacks: 0,
+      saves: 0,
+    }),
+  });
+  try {
+    await flush();
+    await h.ui.showContent("unresolved");
+    h.ui.selected.value = "second";
+    await flush();
+    assert.equal(h.ui.tab.value, "mods");
+    assert.ok(!h.ui.visibleTabs.value.some((tab) => tab.id === "unresolved"));
+  } finally {
+    h.dispose();
+  }
+});
+
+test("only the active download is polled and stopping it reconciles the final state", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  let reads = 0;
+  const h = manager({
+    downloading: true,
+    downloadVersion: "first",
+    loadContent: async () => {
+      reads++;
+      return {
+        directory: "/mods",
+        files: [{ name: "Mod", file_name: "mod.jar" }],
+      };
+    },
+  });
+  try {
+    await h.ui.showContent("mods");
+    await flush();
+    const initial = reads;
+    context.mock.timers.tick(500);
+    await flush();
+    assert.equal(reads, initial + 1);
+    h.props.downloading = false;
+    await flush();
+    assert.equal(
+      reads,
+      initial + 2,
+      "Pause/completion triggers one final refresh",
+    );
+    context.mock.timers.tick(5000);
+    await flush();
+    assert.equal(reads, initial + 2, "No polling while paused");
+    h.props.downloading = true;
+    h.props.downloadVersion = "second";
+    await flush();
+    context.mock.timers.tick(5000);
+    await flush();
+    assert.equal(reads, initial + 2, "Do not poll an unrelated version");
+  } finally {
+    h.dispose();
+    context.mock.timers.reset();
+  }
+});
+
 test("late mod lists and failures never overwrite the newly selected version", async () => {
   const first = deferred(),
     second = deferred();
@@ -92,6 +325,8 @@ test("late mod lists and failures never overwrite the newly selected version", a
       version === "first" ? first.promise : second.promise,
   });
   try {
+    h.ui.tab.value = "mods";
+    await flush();
     h.ui.selected.value = "second";
     await flush();
     second.resolve({
@@ -127,6 +362,87 @@ test("late mod lists and failures never overwrite the newly selected version", a
   } finally {
     h.dispose();
   }
+});
+
+test("instance changes retain previous counts until the new scan completes", async () => {
+  const pending = deferred();
+  const h = manager({
+    loadCounts: async () => ({
+      mods: 199,
+      datapacks: 0,
+      resourcepacks: 10,
+      saves: 0,
+    }),
+  });
+  try {
+    await flush();
+    h.props.loadCounts = () => pending.promise;
+    h.props.instance = {
+      id: "instance-b",
+      name: "Next",
+      versions: [{ id: "next" }],
+      selected_version: "next",
+    };
+    await flush();
+    assert.deepEqual(h.ui.counts.value, {
+      mods: 199,
+      datapacks: 0,
+      resourcepacks: 10,
+      saves: 0,
+    });
+    pending.resolve({ mods: 5, datapacks: 1, resourcepacks: 2, saves: 3 });
+    await flush();
+    assert.deepEqual(h.ui.counts.value, {
+      mods: 5,
+      datapacks: 1,
+      resourcepacks: 2,
+      saves: 3,
+    });
+  } finally {
+    h.dispose();
+  }
+});
+
+test("progressive lists render while loading and stale callbacks cannot cross instance switches", async () => {
+  const first = deferred(),
+    second = deferred();
+  const options = [];
+  const h = manager({
+    loadContent: (version, kind, request) => {
+      options.push(request);
+      return options.length === 1 ? first.promise : second.promise;
+    },
+  });
+  try {
+    h.ui.tab.value = "mods";
+    await flush();
+    options[0].onProgress({
+      directory: "/first/mods",
+      files: [{ file_name: "one.jar", name: "One" }],
+    });
+    assert.equal(h.ui.loading.value, true);
+    assert.equal(h.ui.filteredFiles.value[0].name, "One");
+    h.ui.selected.value = "second";
+    await flush();
+    assert.equal(options[0].signal.aborted, true);
+    options[1].onProgress({
+      directory: "/second/mods",
+      files: [{ file_name: "two.jar", name: "Two" }],
+    });
+    options[0].onProgress({ directory: "/wrong", files: [] });
+    first.resolve({ directory: "/wrong", files: [] });
+    await flush();
+    assert.equal(h.ui.content.value.directory, "/second/mods");
+    second.resolve({
+      directory: "/second/mods",
+      files: [{ file_name: "two.jar", name: "Two" }],
+    });
+    await flush();
+    assert.equal(h.ui.loading.value, false);
+  } finally {
+    h.dispose();
+  }
+  assert.equal(options[1].signal.aborted, true);
 });
 
 test("renaming retains drafts on failure; deletion is guarded and updates the remaining selection", async () => {
@@ -172,6 +488,8 @@ test("renaming retains drafts on failure; deletion is guarded and updates the re
       datapacks: 0,
       resourcepacks: 0,
       saves: 0,
+      unresolved: 0,
+      libraries: 0,
     });
   } finally {
     h.dispose();
@@ -239,6 +557,8 @@ test("switching content tabs drops stale results and resets the filter without r
     },
   });
   try {
+    h.ui.tab.value = "mods";
+    await flush();
     await h.ui.startRename();
     h.ui.name.value = "Draft name";
     h.ui.query.value = "stale search";
@@ -294,7 +614,7 @@ test("all tab counts load before opening those tabs, refresh together, and ignor
   });
   try {
     assert.deepEqual(calls, ["first"]);
-    assert.equal(h.ui.tab.value, "mods");
+    assert.equal(h.ui.tab.value, "metadata");
     h.ui.selected.value = "second";
     await flush();
     second.resolve({ mods: 0, datapacks: 4, resourcepacks: 6, saves: 2 });
@@ -312,7 +632,7 @@ test("all tab counts load before opening those tabs, refresh together, and ignor
       resourcepacks: 6,
       saves: 2,
     });
-    assert.equal(h.ui.tab.value, "mods"); // No other tab has been opened.
+    assert.equal(h.ui.tab.value, "metadata"); // No other tab has been opened.
     h.ui.tab.value = "saves";
     await flush();
     assert.deepEqual(calls, ["first", "second"]);
@@ -329,6 +649,254 @@ test("all tab counts load before opening those tabs, refresh together, and ignor
       saves: 0,
     });
     assert.deepEqual(calls, ["first", "second", "second"]);
+  } finally {
+    h.dispose();
+  }
+});
+
+test("metadata is a separate lazy tab and never becomes a content-kind request", async () => {
+  const calls = [];
+  const pending = deferred();
+  const h = manager({
+    loadContent: (version, kind) => {
+      calls.push([version, kind]);
+      return pending.promise;
+    },
+  });
+  try {
+    assert.equal(h.ui.tabs[0].id, "metadata");
+    assert.equal(h.ui.tab.value, "metadata");
+    assert.deepEqual(calls, []);
+    h.ui.tab.value = "mods";
+    await flush();
+    h.ui.tab.value = "metadata";
+    await flush();
+    pending.resolve({ directory: "/stale", files: [{ name: "old" }] });
+    await flush();
+    assert.equal(h.ui.content.value, null);
+    assert.equal(h.ui.loading.value, false);
+    h.ui.refresh();
+    await flush();
+    assert.deepEqual(calls, [["first", "mods"]]);
+    assert.equal(h.ui.metadataRefresh.value, 1);
+    assert.deepEqual(Object.keys(h.ui.counts.value).sort(), [
+      "datapacks",
+      "mods",
+      "resourcepacks",
+      "saves",
+    ]);
+  } finally {
+    h.dispose();
+  }
+});
+
+test("changing instances reloads identical version IDs, retains the tab and ignores old results", async () => {
+  const old = deferred();
+  let reads = 0;
+  const h = manager({
+    loadContent: async () => {
+      if (++reads === 1) return old.promise;
+      return {
+        directory: "/second/saves",
+        files: [{ name: "World", file_name: "World" }],
+      };
+    },
+  });
+  try {
+    h.ui.tab.value = "saves";
+    await flush();
+    h.ui.confirming.value = true;
+    h.ui.chooseInstance("instance-b");
+    assert.deepEqual(h.events.at(-1), ["select-instance", "instance-b"]);
+    h.ui.saving.value = true;
+    const count = h.events.length;
+    h.ui.chooseInstance("instance-c");
+    assert.equal(h.events.length, count);
+    h.ui.saving.value = false;
+    h.props.instance = {
+      ...h.props.instance,
+      id: "instance-b",
+      name: "Second",
+    };
+    await flush();
+    old.reject(new Error("old instance is gone"));
+    await flush();
+    assert.equal(h.ui.tab.value, "saves");
+    assert.equal(h.ui.selected.value, "first");
+    assert.equal(h.ui.content.value.directory, "/second/saves");
+    assert.equal(h.ui.confirming.value, false);
+    assert.equal(
+      h.events.some((e) => e[0] === "error"),
+      false,
+    );
+  } finally {
+    h.dispose();
+  }
+});
+
+test("management target switches without changing the main launch selection and scopes file requests", async () => {
+  const { fixture, context: ui, dispose } = await settingsFixture();
+  try {
+    const first = fixture.state.database.instances[0];
+    const second = { ...first, id: "instance-b", name: "Other directory" };
+    fixture.state.database.instances.push(second);
+    await ui.sync();
+    ui.manageVersions(first);
+    const main = ui.selectedInstance.value?.id;
+    ui.switchManagedInstance(second.id);
+    assert.equal(ui.managedInstance.value.id, second.id);
+    assert.equal(ui.selectedInstance.value?.id, main);
+    for (const op of ["version_metadata"])
+      fixture.handlers[op] = (request) => {
+        assert.equal(request.id, second.id);
+        return {};
+      };
+    await ui.readVersionMetadata("1.21.1");
+    ui.managing.value = true;
+    ui.switchManagedInstance(first.id);
+    assert.equal(ui.managedInstance.value.id, second.id);
+    ui.managing.value = false;
+    ui.switchManagedInstance("missing");
+    assert.equal(ui.managedInstance.value.id, second.id);
+  } finally {
+    dispose();
+  }
+});
+
+test("metadata Mod links open the selected version's Mods tab without changing the instance", async () => {
+  const calls = [];
+  let focused = false;
+  const h = manager({
+    loadContent: async (version, kind) => {
+      calls.push([version, kind]);
+      return {
+        directory: `/instance-a/${version}/mods`,
+        files: [{ name: "Mod", file_name: "mod.jar" }],
+      };
+    },
+  });
+  try {
+    h.ui.selected.value = "second";
+    h.ui.tabBar.value = {
+      querySelector: (selector) => {
+        assert.equal(selector, "#version-content-tab-mods");
+        return {
+          focus: () => {
+            focused = true;
+          },
+        };
+      },
+    };
+    await flush();
+    assert.deepEqual(calls, []);
+    await h.ui.showContent("mods");
+    await flush();
+    assert.equal(h.ui.tab.value, "mods");
+    assert.equal(h.ui.selected.value, "second");
+    assert.equal(h.props.instance.id, "instance-a");
+    assert.equal(h.ui.content.value.directory, "/instance-a/second/mods");
+    assert.deepEqual(calls, [["second", "mods"]]);
+    assert.equal(focused, true);
+    assert.deepEqual(h.events, []);
+  } finally {
+    h.dispose();
+  }
+});
+
+test("content detail IPC uses the row's captured instance, version, type and relative path", async () => {
+  const { fixture, context: ui, dispose } = await settingsFixture();
+  try {
+    fixture.handlers.version_content_metadata = (request) => {
+      assert.equal(request.id, "row-instance");
+      assert.equal(request.version, "row-version");
+      assert.equal(request.kind, "datapacks");
+      assert.equal(request.file, "saves/World/datapacks/Pack");
+      return {
+        path: "/row-instance/saves/World/datapacks/Pack",
+        size: null,
+        sources: [],
+      };
+    };
+    ui.editing.value = { id: "different-current-instance" };
+    const result = await ui.readContentMetadata(
+      "row-instance",
+      "row-version",
+      "datapacks",
+      "saves/World/datapacks/Pack",
+    );
+    assert.equal(result.path, "/row-instance/saves/World/datapacks/Pack");
+  } finally {
+    dispose();
+  }
+});
+
+test("opening a content folder preserves the row context when another instance is selected", async () => {
+  const { fixture, context: ui, dispose } = await settingsFixture();
+  try {
+    let opened = false;
+    fixture.handlers.open_content_folder = (request) => {
+      assert.equal(request.id, "row-instance");
+      assert.equal(request.version, "row-version");
+      assert.equal(request.kind, "mods");
+      assert.equal(request.file, "1.12.2/cat.jar");
+      opened = true;
+      return true;
+    };
+    ui.editing.value = { id: "different-current-instance" };
+    await ui.openContentFolder(
+      "row-instance",
+      "row-version",
+      "mods",
+      "1.12.2/cat.jar",
+    );
+    assert.equal(opened, true);
+  } finally {
+    dispose();
+  }
+});
+
+test("Mod ID navigation clears filters, prefers enabled providers and stays within the selected instance", async () => {
+  const files = [
+    { name: "Cat", file_name: "cat.jar", mod_ids: ["cat"], enabled: true },
+    {
+      name: "Fish old",
+      file_name: "fish.jar.disabled",
+      mod_ids: ["fish"],
+      enabled: false,
+    },
+    {
+      name: "Fish",
+      file_name: "fish.jar",
+      mod_ids: ["fish", "fins"],
+      enabled: true,
+    },
+  ];
+  const h = manager({
+    loadContent: async () => ({ directory: "/mods", files }),
+  });
+  let reveals = 0;
+  try {
+    h.ui.tab.value = "mods";
+    await flush();
+    assert.equal(h.ui.dependencyTargets.value.get("fish"), "fish.jar");
+    assert.equal(h.ui.dependencyTargets.value.get("fins"), "fish.jar");
+    assert.equal(h.ui.dependencyTargets.value.has("missing"), false);
+    h.ui.query.value = "cat";
+    h.ui.setContentRow("fish.jar", { reveal: async () => reveals++ });
+    await h.ui.showMod("instance-a", "first", "fish.jar");
+    assert.equal(h.ui.query.value, "");
+    assert.equal(reveals, 1);
+    h.ui.query.value = "fins";
+    assert.deepEqual(
+      h.ui.filteredFiles.value.map((f) => f.file_name),
+      ["fish.jar"],
+    );
+    await h.ui.showMod("old-instance", "first", "fish.jar");
+    assert.equal(h.ui.query.value, "fins");
+    const stale = h.ui.showMod("instance-a", "first", "fish.jar");
+    h.ui.selected.value = "second";
+    await stale;
+    assert.equal(reveals, 1);
   } finally {
     h.dispose();
   }

@@ -1,4 +1,6 @@
+mod archive_support;
 pub mod auth;
+pub mod diagnostics;
 pub mod download;
 mod download_concurrency;
 pub mod fabric;
@@ -9,13 +11,16 @@ pub mod instance_discovery;
 pub mod java;
 pub mod java_compatibility;
 mod language;
+pub mod loader;
 pub mod memory;
 mod migration;
 pub mod minecraft;
 pub mod model;
 #[cfg(test)]
 mod modloader_tests;
+pub mod modpack;
 pub mod network;
+mod pack_content;
 mod proxy_credentials;
 mod runtime_compatibility;
 pub mod skin;
@@ -26,6 +31,7 @@ pub mod updates;
 mod verification;
 pub mod version;
 pub mod version_management;
+pub mod version_metadata;
 
 use anyhow::{Context, Result, bail};
 use fs2::FileExt;
@@ -47,6 +53,8 @@ struct Shared {
     operation: tokio::sync::Mutex<()>,
     progress_scanned: tokio::sync::Mutex<HashSet<(String, String)>>,
     games: Mutex<HashMap<String, CancellationToken>>,
+    mod_summaries: version_management::SummaryCache,
+    modpack_migration_issues: Mutex<HashMap<(String, String), String>>,
 }
 impl Drop for Shared {
     fn drop(&mut self) {
@@ -110,7 +118,10 @@ impl Launcher {
             operation: tokio::sync::Mutex::new(()),
             progress_scanned: tokio::sync::Mutex::new(HashSet::new()),
             games: Mutex::new(HashMap::new()),
+            mod_summaries: version_management::SummaryCache::default(),
+            modpack_migration_issues: Mutex::default(),
         }));
+        launcher.migrate_modpack_records();
         launcher.refresh_local_versions()?;
         Ok(launcher)
     }
@@ -146,10 +157,19 @@ impl Launcher {
             let mut versions = instance.versions.clone();
             for mut found in discovered {
                 if let Some(existing) = versions.iter_mut().find(|v| v.id == found.id) {
+                    if found.modpack || loader::has_record(&game, &found.id) {
+                        found.name = existing.name.clone().or(found.name);
+                        *existing = found;
+                        continue;
+                    }
                     // Readiness is only a cheap discovery hint; a prior completed
                     // install is not downgraded by this scan. Launch validates it.
                     found.installed |= existing.installed;
                     found.name = existing.name.clone();
+                    found.modpack = existing.modpack;
+                    if existing.modpack {
+                        found.installed = existing.installed;
+                    }
                     found.download_progress = if found.installed {
                         100.0
                     } else {
@@ -351,6 +371,9 @@ impl Launcher {
         })
     }
     fn set_installed(&self, id: &str, version: &str, installed: bool) -> Result<()> {
+        if installed {
+            self.save_pack_progress(id, version, 100.0)?;
+        }
         self.mutate(|db| {
             let entry = db
                 .instances
@@ -366,6 +389,7 @@ impl Launcher {
         })
     }
     fn save_download_progress(&self, id: &str, version: &str, progress: f64) -> Result<()> {
+        self.save_pack_progress(id, version, progress.clamp(0.0, 99.0))?;
         self.mutate(|db| {
             let entry = db
                 .instances
@@ -454,10 +478,20 @@ impl Launcher {
     ) -> Result<Instance> {
         let name = name.trim();
         instance_creation::validate(name, version)?;
+        let identity = uuid::Uuid::new_v4();
+        let official = instance_discovery::official_directory();
+        let icon = if game_directory
+            .as_deref()
+            .is_some_and(|path| instance_discovery::is_official_path(path, official.as_deref()))
+        {
+            0
+        } else {
+            identity.as_bytes()[0] % INSTANCE_ICON_COUNT
+        };
         let i = Instance {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: identity.to_string(),
             name: name.into(),
-            icon: Some(0),
+            icon: Some(icon),
             game_directory,
             versions: if version.is_empty() {
                 vec![]
@@ -585,6 +619,14 @@ impl Launcher {
                 let entry = entry?;
                 let id = entry.file_name().to_string_lossy().into_owned();
                 if !entry.file_type()?.is_dir() || storage::safe_version(&id).is_err() {
+                    continue;
+                }
+                if let Ok(loader) = loader::describe(source, &id) {
+                    versions.push(loader);
+                    continue;
+                }
+                if let Ok(pack) = modpack::describe(source, &id) {
+                    versions.push(pack);
                     continue;
                 }
                 if let Ok(metadata) = storage::read_json::<serde_json::Value>(
@@ -880,6 +922,19 @@ impl Launcher {
         sink: &EventSink,
         full_verification: bool,
     ) -> Result<()> {
+        if let Some(selected) = self.instance(id)?.selected().filter(|v| v.modpack) {
+            return self
+                .install_modpack(id, &selected.id, cancel, sink, full_verification)
+                .await;
+        }
+        if let Some(selected) = self.instance(id)?.selected() {
+            let game = self.available_game_dir(id)?;
+            if loader::has_record(&game, &selected.id) {
+                return self
+                    .install_loader(id, &selected.id, cancel, sink, full_verification)
+                    .await;
+            }
+        }
         let _guard = self.0.operation.lock().await;
         self.idle(id)?;
         let sink = Event::scoped(sink, id, None);
@@ -1734,7 +1789,7 @@ mod tests {
         let launcher = Launcher::open(Some(temp.path().into())).unwrap();
         let instance = launcher.create_instance("原名称", "").unwrap();
         let directory = launcher.game_dir(&instance.id).unwrap();
-        assert_eq!(instance.icon, Some(0));
+        assert!(instance.icon.is_some_and(|icon| icon < INSTANCE_ICON_COUNT));
         launcher
             .update_instance(&instance.id, "  新名称  ", 4096, None, Some(2))
             .unwrap();

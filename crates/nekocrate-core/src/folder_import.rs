@@ -97,9 +97,7 @@ pub(crate) fn default_name(path: &Path) -> String {
 fn default_name_with_official(path: &Path, official: Option<&Path>) -> String {
     // Canonical paths also recognize an official folder reached through a symlink
     // or the native folder picker, not just the automatic suggestion button.
-    if let Some(official) = official.and_then(|path| path.canonicalize().ok())
-        && path.canonicalize().is_ok_and(|path| path == official)
-    {
+    if crate::instance_discovery::is_official_path(path, official) {
         return crate::instance_discovery::OFFICIAL_INSTANCE_NAME.into();
     }
     let name = path

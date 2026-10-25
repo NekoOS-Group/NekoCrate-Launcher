@@ -25,6 +25,7 @@ import {
   Square,
   RefreshCw,
   ChevronDown,
+  ChevronUp,
   Terminal,
   X,
   Check,
@@ -36,11 +37,19 @@ import {
 } from "lucide-vue-next";
 import { backdropThemes } from "./backdropThemes";
 import { resolveInstanceIcon } from "./instanceIcons";
-import { moveInstanceBefore } from "./instanceOrder";
+import {
+  moveInstanceBefore,
+  VISIBLE_INSTANCES,
+  instanceVisibleLimit,
+} from "./instanceOrder";
 import { useInstanceSorting } from "./useInstanceSorting";
 import { prepareDialogLeave, finishDialogLeave } from "./dialogMotion";
 import { version as launcherVersion } from "../package.json";
 import { prepareAndLaunch } from "./launch";
+import {
+  createLoaderCatalog,
+  type LoaderVersion as LoaderChoice,
+} from "./loaderCatalog";
 import { signInWithMicrosoft } from "./login";
 import type { LogLine } from "./logPresentation";
 import { createLogStore } from "./logStore";
@@ -70,8 +79,13 @@ import SkinStage from "./components/SkinStage.vue";
 import WorldBackdrop from "./components/WorldBackdrop.vue";
 import VersionMenu from "./components/VersionMenu.vue";
 import VersionDownload from "./components/VersionDownload.vue";
+import ModpackImport from "./components/ModpackImport.vue";
+import ModpackMissing from "./components/ModpackMissing.vue";
+import CurseForgeKey from "./components/CurseForgeKey.vue";
+import type { ModpackPreview, ModpackStatus } from "./types";
 import VersionManager from "./components/VersionManager.vue";
 import { versionName } from "./versionDescription";
+import { createVersionContentLoader } from "./versionContentLoader";
 import AccountAvatar from "./components/AccountAvatar.vue";
 import InstanceHeader from "./components/InstanceHeader.vue";
 import DownloadSourceSelect from "./components/DownloadSourceSelect.vue";
@@ -97,9 +111,11 @@ import type {
   JavaInfo,
   MemoryMode,
   MemoryOptions,
-  VersionContent,
+  ContentLoadOptions,
   VersionContentCounts,
+  VersionMetadata,
   ContentKind,
+  ContentMetadata,
 } from "./types";
 
 const desktop = isTauri();
@@ -157,7 +173,6 @@ const pendingSettings = new Map<EditableSetting, number>();
 let settingsRevision = 0;
 let hydratingSettings = false;
 let settingsWrite: Promise<void> | null = null;
-let loginSettingsWrite: Promise<boolean | undefined> | null = null;
 const proxyFields = [
   "proxy_mode",
   "proxy_url",
@@ -371,6 +386,7 @@ async function downloadLauncherUpdate() {
       error: message(e),
     };
     error.value = message(e);
+    appendLog({ time: stamp(), kind: "error", message: message(e) });
   }
 }
 async function cancelLauncherUpdate() {
@@ -406,6 +422,7 @@ async function checkLauncherUpdate() {
     updateStatus.value = await rpc<UpdateStatus>("check_update");
   } catch (e) {
     updateError.value = message(e);
+    appendLog({ time: stamp(), kind: "error", message: updateError.value });
   } finally {
     updateChecking.value = false;
   }
@@ -428,6 +445,9 @@ const downloadSubmitting = ref(false);
 let downloadDraftInitialized = false;
 const selectedInstanceId = ref("");
 const busy = ref(false);
+const loginBusy = ref(false);
+let loginSession: string | null = null;
+let loginCancellation: Promise<void> | null = null;
 const directoryPicking = ref(false);
 const windowHidden = ref(document.hidden);
 function updateVisibility() {
@@ -443,16 +463,16 @@ const taskInstance = computed(() =>
   ),
 );
 const notice = ref("");
-const fabricNotice = ref("");
-let fabricNoticeTimer: ReturnType<typeof setTimeout> | undefined;
-function clearFabricNotice() {
-  clearTimeout(fabricNoticeTimer);
-  fabricNotice.value = "";
+const loaderNotice = ref("");
+let loaderNoticeTimer: ReturnType<typeof setTimeout> | undefined;
+function clearLoaderNotice() {
+  clearTimeout(loaderNoticeTimer);
+  loaderNotice.value = "";
 }
-function notifyFabricUnavailable() {
-  clearFabricNotice();
-  fabricNotice.value = "此游戏版本暂无可用的 Fabric";
-  fabricNoticeTimer = setTimeout(clearFabricNotice, 2000);
+function notifyLoaderUnavailable(kind: string) {
+  clearLoaderNotice();
+  loaderNotice.value = `${t("此游戏版本暂无可用的加载器")} · ${loaderLabel(kind)}`;
+  loaderNoticeTimer = setTimeout(clearLoaderNotice, 2000);
 }
 const error = ref("");
 const visibleError = computed(
@@ -515,7 +535,7 @@ const form = reactive({
   java_path: "",
   icon: 0,
   loader: "vanilla",
-  fabric_version: "",
+  loader_version: "",
 });
 const invalidCreationLocation = computed(
   () =>
@@ -557,20 +577,46 @@ async function loadMemoryOptions(id: string) {
     // A failed preview must not prevent saving; launch samples RAM independently.
   }
 }
-const fabricVersions = ref<{ version: string; stable: boolean }[]>([]);
-const fabricLoading = ref(false);
-const fabricOptions = computed(() =>
-  fabricVersions.value.map((item) => ({
+const loaderCatalog = createLoaderCatalog((game, kind) =>
+  rpc<LoaderChoice[]>("loader_versions", { game_version: game, kind }),
+);
+const loaderLabel = (kind: string) =>
+  ({ fabric: "Fabric", forge: "Forge", neoforge: "NeoForge" })[
+    kind as "fabric" | "forge" | "neoforge"
+  ] || t("原版");
+const loaderVersions = ref<LoaderChoice[]>([]);
+const unavailableLoaders = ref<string[]>([]);
+const loaderLoading = ref(false);
+const loaderOptions = computed(() =>
+  loaderVersions.value.map((item) => ({
     value: item.version,
     label: item.version,
-    detail: item.stable ? t("稳定版") : t("测试版"),
+    detail: item.recommended
+      ? t("推荐")
+      : item.stable
+        ? t("稳定版")
+        : form.loader === "forge"
+          ? undefined
+          : t("测试版"),
   })),
 );
-const fabricUnavailable = computed(
+const loaderUnavailable = computed(
   () =>
     modal.value === "version" &&
-    form.loader === "fabric" &&
-    (fabricLoading.value || !form.fabric_version),
+    form.loader !== "vanilla" &&
+    (loaderLoading.value || !form.loader_version),
+);
+const packPreview = ref<ModpackPreview | null>(null);
+const packPath = ref("");
+let packPreviewRequest = 0;
+const canSubmitPack = computed(
+  () =>
+    !busy.value &&
+    !downloadSubmitting.value &&
+    !directoryPicking.value &&
+    !downloadTargetRunning.value &&
+    !invalidCreationLocation.value &&
+    (!!editing.value || !!form.name.trim()),
 );
 const downloadTargetRunning = computed(
   () => !!editing.value && snapshot.value.running.includes(editing.value.id),
@@ -581,75 +627,133 @@ const canSubmitDownload = computed(
     !downloadSubmitting.value &&
     !directoryPicking.value &&
     !versionsLoading.value &&
-    !fabricUnavailable.value &&
+    !loaderUnavailable.value &&
     !downloadTargetRunning.value &&
     !invalidCreationLocation.value &&
     (!!editing.value || !!form.name.trim()) &&
     !!manifest.value?.versions.some((version) => version.id === form.version),
 );
-let fabricRequest = 0;
-async function loadFabricVersions() {
+let loaderRequest = 0;
+async function loadLoaderVersions(refresh = false) {
   if (
     modal.value !== "version" ||
-    form.loader !== "fabric" ||
+    packPreview.value ||
+    form.loader === "vanilla" ||
     !form.version.trim()
   )
     return;
-  const request = ++fabricRequest;
+  const request = ++loaderRequest;
   const game = form.version.trim();
-  clearFabricNotice();
+  const kind = form.loader;
+  clearLoaderNotice();
   error.value = "";
-  fabricVersions.value = [];
-  form.fabric_version = "";
-  fabricLoading.value = true;
+  const cached = loaderCatalog.peek(game, kind);
+  if (cached) {
+    loaderVersions.value = cached.versions;
+    form.loader_version = loaderCatalog.selected(game, kind, cached.versions);
+  } else {
+    loaderVersions.value = [];
+    form.loader_version = "";
+  }
+  loaderLoading.value = !cached;
   try {
-    const result = await rpc<{ version: string; stable: boolean }[]>(
-      "fabric_versions",
-      { game_version: game },
-    );
+    const result = await loaderCatalog.load(game, kind, refresh);
     if (
-      request !== fabricRequest ||
+      request !== loaderRequest ||
       modal.value !== "version" ||
-      form.loader !== "fabric" ||
+      form.loader !== kind ||
       form.version.trim() !== game
     )
       return;
     if (!result.length) {
+      if (!unavailableLoaders.value.includes(kind))
+        unavailableLoaders.value.push(kind);
       form.loader = "vanilla";
-      notifyFabricUnavailable();
+      notifyLoaderUnavailable(kind);
       return;
     }
-    fabricVersions.value = result;
-    form.fabric_version =
-      result.find((item) => item.stable)?.version || result[0]?.version || "";
+    unavailableLoaders.value = unavailableLoaders.value.filter(
+      (item) => item !== kind,
+    );
+    loaderVersions.value = result;
+    form.loader_version = loaderCatalog.selected(game, kind, result);
   } catch (e) {
-    if (request === fabricRequest) error.value = message(e);
+    if (request === loaderRequest) error.value = message(e);
   } finally {
-    if (request === fabricRequest) fabricLoading.value = false;
+    if (request === loaderRequest) loaderLoading.value = false;
   }
 }
 watch(
   () => [modal.value, form.loader, form.version],
   (_, __, cleanup) => {
-    clearFabricNotice();
-    ++fabricRequest;
-    fabricVersions.value = [];
-    form.fabric_version = "";
-    fabricLoading.value = false;
+    clearLoaderNotice();
+    ++loaderRequest;
+    loaderVersions.value = [];
+    form.loader_version = "";
+    loaderLoading.value = false;
     if (
       modal.value !== "version" ||
-      form.loader !== "fabric" ||
+      form.loader === "vanilla" ||
       !form.version.trim()
     )
       return;
-    fabricLoading.value = true;
-    const request = fabricRequest;
+    const cached = loaderCatalog.peek(form.version, form.loader);
+    if (cached) {
+      loaderVersions.value = cached.versions;
+      form.loader_version = loaderCatalog.selected(
+        form.version,
+        form.loader,
+        cached.versions,
+      );
+    }
+    loaderLoading.value = !cached;
+    const request = loaderRequest;
     const timer = setTimeout(() => {
-      if (request === fabricRequest) void loadFabricVersions();
+      if (request === loaderRequest) void loadLoaderVersions();
     }, 300);
     cleanup(() => {
       clearTimeout(timer);
-      ++fabricRequest;
+      ++loaderRequest;
+    });
+  },
+  { flush: "sync" },
+);
+watch(
+  () => form.loader_version,
+  (version) => {
+    if (version) loaderCatalog.remember(form.version, form.loader, version);
+  },
+  { flush: "sync" },
+);
+let availabilityRequest = 0;
+watch(
+  () => [modal.value, form.version],
+  (_, __, cleanup) => {
+    const request = ++availabilityRequest;
+    unavailableLoaders.value = ["fabric", "forge", "neoforge"].filter(
+      (kind) => loaderCatalog.peek(form.version, kind)?.versions.length === 0,
+    );
+    if (modal.value !== "version" || !form.version || packPreview.value) return;
+    const game = form.version;
+    const timer = setTimeout(() => {
+      for (const kind of ["fabric", "forge", "neoforge"]) {
+        if (form.loader === kind) continue;
+        void loaderCatalog
+          .load(game, kind)
+          .then((result) => {
+            if (
+              request === availabilityRequest &&
+              !result.length &&
+              !unavailableLoaders.value.includes(kind)
+            )
+              unavailableLoaders.value.push(kind);
+          })
+          .catch(() => {});
+      }
+    }, 350);
+    cleanup(() => {
+      clearTimeout(timer);
+      ++availabilityRequest;
     });
   },
   { flush: "sync" },
@@ -689,7 +793,7 @@ const javaChoices = computed(() => {
     const version = runtime.version.match(/"([^"]+)"/)?.[1] || runtime.major;
     choices.push({
       value: runtime.path,
-      label: `Java ${version}`,
+      label: `${runtime.jdk === undefined ? "Java" : runtime.jdk ? "JDK" : "JRE"} ${version}${runtime.arch ? ` · ${runtime.arch === "aarch64" ? "ARM64" : runtime.arch}` : ""}`,
       detail: runtime.path,
     });
   }
@@ -717,8 +821,9 @@ async function discoverJava() {
   }
 }
 const challenge = ref<Challenge | null>(null);
-const loginSetup = ref(false);
-const loginClientId = ref("");
+const loginAddress = computed(() =>
+  challenge.value?.verification_uri.replace(/^https:\/\/(?:www\.)?/, ""),
+);
 const themes = backdropThemes;
 const theme = ref("tide");
 const hoveredInstance = ref<Instance | null>(null);
@@ -751,6 +856,8 @@ const instances = computed(() => snapshot.value.database.instances);
 const instanceOrderSaving = ref(false);
 const {
   strip: instanceStrip,
+  toggle: instanceOverflowToggle,
+  expanded: instanceDockExpanded,
   ghost: instanceGhost,
   trash: instanceTrash,
   trashVisible: instanceTrashVisible,
@@ -776,6 +883,23 @@ const {
     hoveredInstance.value = null;
   },
   { allowed: canRemoveDraggedInstance, remove: removeDraggedInstance },
+);
+watch([modal, utility, showLogs], ([dialog, panel, logs]) => {
+  if (dialog || panel || logs) instanceDockExpanded.value = false;
+});
+const dockLimit = computed(() => instanceVisibleLimit(instances.value.length));
+const dockSections = computed(() => [
+  {
+    id: "main" as const,
+    items: dockInstances.value.slice(0, dockLimit.value),
+  },
+  {
+    id: "overflow" as const,
+    items: dockInstances.value.slice(dockLimit.value),
+  },
+]);
+const hiddenInstanceCount = computed(() =>
+  Math.max(0, instances.value.length - dockLimit.value),
 );
 const selectedAccount = computed(() =>
   snapshot.value.database.accounts.find(
@@ -848,6 +972,15 @@ const utilityTitles = {
   downloads: "下载任务",
   settings: "全局设置",
 };
+const utilityTitle = computed(() =>
+  t(
+    utility.value === "accounts" && challenge.value
+      ? "微软登录"
+      : utility.value
+        ? utilityTitles[utility.value]
+        : "",
+  ),
+);
 watch(utility, (panel) => {
   proxyPasswordRequest++;
   proxyPasswordLoading.value = false;
@@ -867,8 +1000,15 @@ watch(utility, (panel) => {
 function toggleUtility(panel: "accounts" | "downloads" | "settings") {
   showLogs.value = false;
   modal.value = null;
-  if (panel === "accounts") loginSetup.value = false;
-  utility.value = utility.value === panel ? null : panel;
+  if (utility.value === panel) closeUtility();
+  else utility.value = panel;
+}
+function closeUtility() {
+  if (utility.value === "accounts")
+    void endLogin().catch((e) => {
+      error.value = message(e);
+    });
+  utility.value = null;
 }
 function instanceMaterial(instance: Instance) {
   return resolveInstanceIcon(instance.icon, instance.id);
@@ -895,6 +1035,7 @@ async function removeDraggedInstance(id: string): Promise<boolean> {
   error.value = "";
   let removed = false;
   try {
+    await endLogin();
     await rpc("delete", { id });
     removed = true;
     const wasSelected = selectedInstance.value?.id === id;
@@ -964,11 +1105,18 @@ const folderDrop = useFolderDrop({
     error.value = text;
   },
 });
+const packDragging = ref(false);
 let unlistenDrop: UnlistenFn | undefined;
 let dropDisposed = false;
 async function listenForFolders() {
   try {
     const stop = await getCurrentWindow().onDragDropEvent((e) => {
+      if (e.payload.type === "enter")
+        packDragging.value = e.payload.paths.some((path) =>
+          /\.(mrpack|zip)$/i.test(path),
+        );
+      if (e.payload.type === "drop" || e.payload.type === "leave")
+        packDragging.value = false;
       if (
         e.payload.type === "drop" &&
         e.payload.paths.length &&
@@ -976,6 +1124,18 @@ async function listenForFolders() {
         !busy.value
       )
         modal.value = null;
+      if (
+        e.payload.type === "drop" &&
+        e.payload.paths.some((path) => /\.(mrpack|zip)$/i.test(path))
+      ) {
+        folderDrop.handle({ type: "leave" });
+        if (e.payload.paths.length !== 1) {
+          notify("请一次选择一个整合包");
+          return;
+        }
+        void openModpack(e.payload.paths[0]);
+        return;
+      }
       folderDrop.handle(e.payload);
     });
     if (dropDisposed) stop();
@@ -1057,7 +1217,7 @@ async function action<T>(
       download_progress: Math.min(99, savedProgress),
       cancellable: [
         "versions",
-        "add_fabric_version",
+        "add_loader_version",
         "install",
         "launch",
       ].includes(op),
@@ -1067,12 +1227,22 @@ async function action<T>(
       progress: Math.min(99, savedProgress),
       indeterminate: savedProgress <= 0,
       started: stamp(),
-      workflow: createWorkflow(op, title),
+      workflow: createWorkflow(
+        op === "install"
+          ? version?.modpack
+            ? "modpack"
+            : version?.loader
+              ? "loader"
+              : op
+          : op,
+        title,
+      ),
     });
     tasks.value.unshift(entry);
     current.value = entry;
   }
   try {
+    await endLogin();
     if (task && (settingsWrite || pendingSettings.size)) {
       await persistSettings();
       if (settingsSaveError.value) throw new Error(settingsSaveError.value);
@@ -1198,6 +1368,7 @@ function resetInstanceDraft() {
     name = `${baseName} ${suffix}`;
   form.name = name;
   form.location = "managed";
+  form.icon = Math.floor(Math.random() * 16);
   form.external_directory = "";
 }
 function newInstance() {
@@ -1226,7 +1397,7 @@ function switchDownloadTarget(id: string | null) {
     if (instance) editing.value = instance;
   }
 }
-async function chooseCreationDirectory() {
+async function chooseCreationDirectory(direct = false) {
   if (
     directoryPicking.value ||
     busy.value ||
@@ -1234,7 +1405,7 @@ async function chooseCreationDirectory() {
       modal.value === "create" ||
       (modal.value === "version" && !editing.value)
     ) ||
-    form.location !== "external"
+    (!direct && form.location !== "external")
   )
     return;
   const session = modalSession;
@@ -1247,10 +1418,12 @@ async function chooseCreationDirectory() {
       path &&
       (modal.value === "create" ||
         (modal.value === "version" && !editing.value)) &&
-      form.location === "external" &&
+      (direct || form.location === "external") &&
       session === modalSession
-    )
+    ) {
       form.external_directory = path;
+      form.location = "external";
+    }
   } catch (e) {
     if (session === modalSession) error.value = message(e);
   } finally {
@@ -1409,7 +1582,7 @@ async function submitDownload() {
   const selection = {
     game: form.version,
     loader: form.loader,
-    fabric: form.fabric_version,
+    loaderVersion: form.loader_version,
   };
   downloadSubmitting.value = true;
   try {
@@ -1417,6 +1590,7 @@ async function submitDownload() {
     if (!target) {
       const created = await action<Instance>("创建实例", "create", {
         name: form.name.trim(),
+        icon: form.icon,
         directory:
           form.location === "external" ? form.external_directory : null,
       });
@@ -1427,14 +1601,17 @@ async function submitDownload() {
       if (session === modalSession) editing.value = created;
     }
     const instance =
-      selection.loader === "fabric"
+      selection.loader !== "vanilla"
         ? await action<Instance>(
-            "添加 Fabric 版本",
-            "add_fabric_version",
+            "添加加载器版本",
+            "add_loader_version",
             {
               id: target.id,
               game_version: selection.game,
-              loader_version: selection.fabric,
+              loader: {
+                kind: selection.loader,
+                version: selection.loaderVersion,
+              },
             },
             true,
           )
@@ -1451,7 +1628,115 @@ async function submitDownload() {
     downloadSubmitting.value = false;
   }
 }
+async function openModpack(source?: string) {
+  if (busy.value || downloadSubmitting.value) {
+    notify("请等待当前任务完成。");
+    return;
+  }
+  const request = ++packPreviewRequest;
+  try {
+    const path =
+      source ||
+      (await open({
+        multiple: false,
+        directory: false,
+        filters: [
+          { name: "Modrinth / CurseForge", extensions: ["mrpack", "zip"] },
+        ],
+      }));
+    if (!path || typeof path !== "string") return;
+    const preview = await rpc<ModpackPreview>("preview_modpack", { path });
+    if (request !== packPreviewRequest) return;
+    if (modal.value !== "version") {
+      editing.value = selectedInstance.value || null;
+      resetInstanceDraft();
+      downloadDraftInitialized = true;
+    }
+    packPath.value = path;
+    packPreview.value = preview;
+    utility.value = null;
+    modal.value = "version";
+  } catch (e) {
+    if (request === packPreviewRequest) error.value = message(e);
+  }
+}
+async function submitModpack(name: string, optional: string[]) {
+  if (!canSubmitPack.value || !packPreview.value) return;
+  const source = packPath.value,
+    configured = packPreview.value.curseforge_key_configured;
+  const session = modalSession;
+  downloadSubmitting.value = true;
+  try {
+    let target = editing.value;
+    if (!target) {
+      const created = await action<Instance>("创建实例", "create", {
+        name: form.name.trim(),
+        icon: form.icon,
+        directory:
+          form.location === "external" ? form.external_directory : null,
+      });
+      if (!created) return;
+      target = created;
+      editing.value = created;
+    }
+    const instance = await action<Instance>("导入整合包", "prepare_modpack", {
+      id: target.id,
+      path: source,
+      name,
+      optional,
+    });
+    if (!instance) return;
+    selectInstance(instance.id);
+    if (session === modalSession) modal.value = null;
+    if (configured) await install(instance);
+    else notify("整合包已添加，配置 CurseForge API Key 后可继续安装");
+  } finally {
+    downloadSubmitting.value = false;
+  }
+}
+function packNetworkSettings() {
+  modal.value = null;
+  utility.value = "settings";
+  void nextTick(() => {
+    settingsTab.value = "network";
+  });
+}
+async function saveCurseforgeKey(key: string) {
+  await rpc("save_curseforge_key", { key });
+}
+async function supplyPackFiles() {
+  const task = displayedTask.value;
+  if (!task?.instance_id || !task.version_id || busy.value) return;
+  try {
+    const paths = await open({ multiple: true, directory: false });
+    if (!paths) return;
+    await rpc("supply_modpack_files", {
+      id: task.instance_id,
+      version: task.version_id,
+      paths: Array.isArray(paths) ? paths : [paths],
+    });
+    task.modpack_status = await rpc<ModpackStatus>("modpack_status", {
+      id: task.instance_id,
+      version: task.version_id,
+    });
+  } catch (e) {
+    error.value = message(e);
+  }
+}
+async function resumePack() {
+  const task = displayedTask.value;
+  const instance = instances.value.find((i) => i.id === task?.instance_id);
+  if (!task?.version_id || !instance || busy.value) return;
+  try {
+    await rpc("select_version", { id: instance.id, version: task.version_id });
+    await sync();
+    await install({ ...instance, selected_version: task.version_id });
+  } catch (e) {
+    error.value = message(e);
+  }
+}
 function newVersion(instance: Instance) {
+  packPreview.value = null;
   error.value = "";
   utility.value = null;
   editing.value = instance;
@@ -1459,7 +1744,7 @@ function newVersion(instance: Instance) {
   form.version =
     manifest.value?.latest.release || manifest.value?.versions[0]?.id || "";
   form.loader = "vanilla";
-  form.fabric_version = "";
+  form.loader_version = "";
   modal.value = "version";
   if (!manifest.value && desktop) void loadVersions();
 }
@@ -1470,17 +1755,71 @@ function manageVersions(instance: Instance) {
   managing.value = false;
   modal.value = "manage";
 }
+function switchManagedInstance(id: string) {
+  if (modal.value !== "manage" || managing.value) return;
+  const instance = instances.value.find((item) => item.id === id);
+  if (!instance) return;
+  error.value = "";
+  editing.value = instance;
+}
 async function readVersionContentCounts(version: string) {
   return rpc<VersionContentCounts>("version_content_counts", {
     id: editing.value!.id,
     version,
   });
 }
-async function readVersionContent(version: string, kind: ContentKind) {
-  return rpc<VersionContent>("version_content", {
-    id: editing.value!.id,
+const loadVersionContent = createVersionContentLoader(rpc);
+async function prefetchVersionContent(version: string, signal: AbortSignal) {
+  return loadVersionContent.preload(editing.value!.id, version, signal);
+}
+async function readVersionContent(
+  version: string,
+  kind: ContentKind,
+  options?: ContentLoadOptions,
+) {
+  return loadVersionContent(editing.value!.id, version, kind, options);
+}
+async function readContentMetadata(
+  id: string,
+  version: string,
+  kind: ContentKind,
+  file: string,
+) {
+  return rpc<ContentMetadata>("version_content_metadata", {
+    id,
     version,
     kind,
+    file,
+  });
+}
+async function readVersionMetadata(version: string) {
+  return rpc<VersionMetadata>("version_metadata", {
+    id: editing.value!.id,
+    version,
+  });
+}
+async function openContentFolder(
+  id: string,
+  version: string,
+  kind: ContentKind,
+  file: string,
+  source?: string,
+) {
+  await rpc("open_content_folder", { id, version, kind, file, source });
+}
+async function readContentSource(
+  id: string,
+  version: string,
+  kind: ContentKind,
+  file: string,
+  source: string,
+) {
+  return rpc<string>("version_content_source", {
+    id,
+    version,
+    kind,
+    file,
+    source,
   });
 }
 async function renameVersion(version: string, name: string) {
@@ -1499,12 +1838,31 @@ async function selectVersion(instance: Instance, version: string) {
   });
 }
 async function install(i: Instance, repair = false) {
-  return action<boolean>(
+  const result = await action<boolean>(
     repair ? "校验与修复" : "安装游戏",
     "install",
     { id: i.id, repair },
     true,
   );
+  const version = i.versions.find((v) => v.id === i.selected_version);
+  if (version?.modpack && result !== true) {
+    const task = tasks.value.find(
+      (task) => task.instance_id === i.id && task.version_id === version.id,
+    );
+    if (task) {
+      try {
+        task.modpack_status = await rpc<ModpackStatus>("modpack_status", {
+          id: i.id,
+          version: version.id,
+        });
+      } catch (e) {
+        error.value = message(e);
+      }
+      if (!modal.value && !utility.value && !showLogs.value)
+        utility.value = "downloads";
+    }
+  }
+  return result;
 }
 async function startGame() {
   if (busy.value || selectedRunning.value || !selectedInstance.value) return;
@@ -1537,75 +1895,75 @@ async function setDownloadPaused(paused: boolean) {
 }
 async function cancel() {
   try {
+    if (loginSession || loginCancellation) {
+      await endLogin();
+      return;
+    }
     await rpc("cancel");
-    notify(
-      challenge.value
-        ? "正在取消登录…"
-        : "正在取消，已校验的文件将保留在缓存中。",
-    );
+    notify("正在取消，已校验的文件将保留在缓存中。");
   } catch (e) {
     error.value = message(e);
   }
 }
+function endLogin(): Promise<void> {
+  if (loginCancellation) return loginCancellation;
+  const session = loginSession;
+  if (!session) return Promise.resolve();
+  loginSession = null;
+  challenge.value = null;
+  loginBusy.value = false;
+  const cancellation = rpc("cancel_login", { session_id: session }).then(
+    () => {},
+  );
+  loginCancellation = cancellation.finally(() => {
+    loginCancellation = null;
+  });
+  return loginCancellation;
+}
 async function login() {
-  if (busy.value) return;
+  if (busy.value || loginCancellation) return;
   if (!desktop) {
     error.value = "请在桌面启动器中登录，浏览器预览不支持微软授权。";
     return;
   }
-  if (!snapshot.value.database.settings.microsoft_client_id.trim()) {
-    configureLogin();
-    return;
-  }
-  busy.value = true;
+  const session = crypto.randomUUID();
+  loginSession = session;
+  loginBusy.value = true;
+  challenge.value = null;
+  const isCurrent = () => loginSession === session;
   error.value = "";
   try {
     await signInWithMicrosoft({
-      begin: () => rpc<Challenge>("begin_login"),
+      begin: () => rpc<Challenge>("begin_login", { session_id: session }),
+      isCurrent,
       showChallenge: (value) => {
         challenge.value = value;
       },
+      copyCode: writeClipboard,
+      copyFailed: () => {
+        error.value = "无法访问剪贴板，请手动选择并复制。";
+      },
       openBrowser: (url) => openUrl(url),
       browserFailed: () => {
-        error.value =
-          "未能自动打开浏览器。请点击「打开登录页」重试，或复制下方登录地址到浏览器。";
+        error.value = "未能自动打开浏览器。请点击下方登录链接重试。";
       },
-      waitForLogin: () => rpc("wait_login"),
+      waitForLogin: (value) =>
+        rpc("wait_login", { session_id: value.session_id }),
     });
+    if (!isCurrent()) return;
     challenge.value = null;
     error.value = "";
     await sync();
   } catch (e) {
+    if (!isCurrent()) return;
     error.value = message(e);
     challenge.value = null;
   } finally {
-    busy.value = false;
+    if (isCurrent()) {
+      loginSession = null;
+      loginBusy.value = false;
+    }
   }
-}
-function configureLogin() {
-  loginClientId.value = snapshot.value.database.settings.microsoft_client_id;
-  loginSetup.value = true;
-  error.value = "";
-}
-async function saveLoginConfiguration() {
-  await persistSettings();
-  if (settingsSaveError.value) {
-    error.value = settingsSaveError.value;
-    return;
-  }
-  loginSettingsWrite = action<boolean>("配置登录应用", "save_settings", {
-    settings: {
-      ...snapshot.value.database.settings,
-      microsoft_client_id: loginClientId.value.trim(),
-    },
-  });
-  const saved = await loginSettingsWrite;
-  loginSettingsWrite = null;
-  if (!saved) return;
-  settings.microsoft_client_id =
-    snapshot.value.database.settings.microsoft_client_id;
-  loginSetup.value = false;
-  await login();
 }
 async function chooseAccount(account: Account) {
   if (busy.value) return;
@@ -1625,8 +1983,6 @@ function persistSettings(): Promise<void> {
   settingsWrite = Promise.resolve().then(async () => {
     try {
       while (pendingSettings.size) {
-        // Account setup writes the same settings record. Keep its Client ID.
-        if (loginSettingsWrite) await loginSettingsWrite;
         const submitted = { ...snapshot.value.database.settings };
         const revisions = new Map(pendingSettings);
         try {
@@ -1680,9 +2036,13 @@ async function openLink(url: string) {
     error.value = message(e);
   }
 }
+async function writeClipboard(text: string): Promise<void> {
+  if (desktop) await rpc("copy_text", { text });
+  else await navigator.clipboard.writeText(text);
+}
 async function copy(text: string) {
   try {
-    await navigator.clipboard.writeText(text);
+    await writeClipboard(text);
     notify("已复制");
   } catch {
     error.value = "无法访问剪贴板，请手动选择并复制。";
@@ -1706,7 +2066,11 @@ function onEvent(e: LauncherEvent) {
         : 0;
       current.value.indeterminate = current.value.progress <= 0;
     }
-    if (e.kind === "progress" && e.total > 0) {
+    if (
+      e.kind === "progress" &&
+      e.total > 0 &&
+      e.overall_progress === undefined
+    ) {
       current.value.progress = Math.min(
         100,
         Math.max(
@@ -1716,11 +2080,22 @@ function onEvent(e: LauncherEvent) {
             : (e.completed / e.total) * 100,
         ),
       );
+      const isPack = current.value.workflow.steps[0]?.id === "pack_resolve";
+      if (isPack) {
+        const [base, weight] =
+          e.step === "pack_game"
+            ? [70, 26]
+            : e.step === "java"
+              ? [96, 3]
+              : [0, 70];
+        current.value.progress = base + (current.value.progress * weight) / 100;
+      }
       current.value.indeterminate = false;
       if (current.value.version_id) {
-        current.value.download_progress = e.reset_progress
-          ? current.value.progress
-          : Math.max(current.value.download_progress, current.value.progress);
+        current.value.download_progress =
+          e.reset_progress && !isPack
+            ? current.value.progress
+            : Math.max(current.value.download_progress, current.value.progress);
         if (e.reset_progress) {
           const version = snapshot.value?.database.instances
             .find((instance) => instance.id === current.value!.instance_id)
@@ -1732,6 +2107,17 @@ function onEvent(e: LauncherEvent) {
         }
         current.value.progress = current.value.download_progress;
       }
+    }
+    if (
+      typeof e.overall_progress === "number" &&
+      Number.isFinite(e.overall_progress)
+    ) {
+      current.value.download_progress = Math.max(
+        current.value.download_progress,
+        Math.min(99, Math.max(0, e.overall_progress)),
+      );
+      current.value.progress = current.value.download_progress;
+      current.value.indeterminate = false;
     }
     if (["stage", "progress", "retry", "warning", "complete"].includes(e.kind))
       current.value.message = e.message;
@@ -1778,12 +2164,13 @@ onMounted(async () => {
   }
 });
 onUnmounted(() => {
+  void endLogin().catch(() => {});
   instanceDiscoveryRequest++;
   dropDisposed = true;
   unlistenDrop?.();
   folderDrop.dispose();
   clearTimeout(noticeTimer);
-  clearFabricNotice();
+  clearLoaderNotice();
   skinGeneration++;
   logStore.dispose();
   unlisten?.();
@@ -1795,14 +2182,14 @@ onUnmounted(() => {
 <template>
   <div class="shell" :data-theme="theme">
     <ErrorNotice
-      :message="visibleError || fabricNotice"
-      :informational="!visibleError && !!fabricNotice"
+      :message="visibleError || loaderNotice"
+      :informational="!visibleError && !!loaderNotice"
       :retry="!!settingsSaveError && visibleError === settingsSaveError"
       :retrying="settingsSaving"
-      @dismiss="visibleError ? dismissError() : clearFabricNotice()"
+      @dismiss="visibleError ? dismissError() : clearLoaderNotice()"
       @retry="persistSettings"
     />
-    <FolderDrop :controller="folderDrop" />
+    <FolderDrop :controller="folderDrop" :pack="packDragging" />
     <WorldBackdrop :key="theme" :theme="theme" :paused="windowHidden" />
     <header class="topbar">
       <button
@@ -1870,7 +2257,21 @@ onUnmounted(() => {
       <div class="game-controls">
         <nav
           class="instance-dock"
-          :class="{ empty: !instances.length, sorting: !!draggedInstanceId }"
+          :class="{
+            empty: !instances.length,
+            sorting: !!draggedInstanceId,
+            overflowing: hiddenInstanceCount > 0,
+          }"
+          :style="{
+            '--overflow-columns': Math.min(
+              VISIBLE_INSTANCES,
+              hiddenInstanceCount + 1,
+            ),
+            '--dock-columns': Math.min(
+              dockLimit,
+              Math.max(1, instances.length),
+            ),
+          }"
           :aria-label="t('实例')"
           @pointerdown.capture="instanceSort.resetClick"
           @pointermove="instanceSort.track"
@@ -1882,6 +2283,37 @@ onUnmounted(() => {
           @dragstart.prevent
         >
           <button
+            v-if="hiddenInstanceCount"
+            ref="instanceOverflowToggle"
+            class="icon-button instance-overflow-toggle"
+            :class="{
+              expanded: instanceDockExpanded,
+              selected: dockSections[1].items.some(
+                (item) => item.id === selectedInstance?.id,
+              ),
+            }"
+            :aria-expanded="instanceDockExpanded"
+            aria-controls="instance-overflow"
+            :aria-label="
+              instanceDockExpanded
+                ? t('收起实例')
+                : t('展开其余 {count} 个实例，可拖动调整顺序', {
+                    count: hiddenInstanceCount,
+                  })
+            "
+            :title="
+              instanceDockExpanded
+                ? t('收起实例')
+                : t('展开其余 {count} 个实例，可拖动调整顺序', {
+                    count: hiddenInstanceCount,
+                  })
+            "
+            @click="instanceSort.toggleExpanded"
+          >
+            <ChevronUp :size="20" /><small>{{ hiddenInstanceCount }}</small>
+          </button>
+          <button
+            v-else
             class="icon-button add-instance"
             :disabled="busy"
             :aria-label="t('添加游戏目录')"
@@ -1890,82 +2322,110 @@ onUnmounted(() => {
           >
             <Plus :size="20" />
           </button>
-          <div
-            ref="instanceStrip"
-            v-show="instances.length"
-            class="instance-strip"
-            @scroll="hoveredInstance = null"
+          <Transition
+            v-for="section in dockSections"
+            :key="section.id"
+            name="instance-overflow"
           >
-            <TransitionGroup
-              tag="div"
-              name="instance-sort"
-              class="instance-track"
+            <div
+              v-show="
+                section.id === 'main'
+                  ? instances.length
+                  : instanceDockExpanded && hiddenInstanceCount
+              "
+              :id="section.id === 'overflow' ? 'instance-overflow' : undefined"
+              :ref="(element) => instanceSort.setSurface(section.id, element)"
+              class="instance-strip"
+              :class="{
+                'instance-overflow glass-surface': section.id === 'overflow',
+              }"
+              :aria-label="
+                section.id === 'overflow' ? t('更多实例') : undefined
+              "
+              @scroll="hoveredInstance = null"
             >
-              <div
-                v-for="instance in dockInstances"
-                :key="instance.id"
-                class="instance-item"
-                :data-instance-id="instance.id"
-                :class="{
-                  dragging: draggedInstanceId === instance.id,
-                }"
+              <TransitionGroup
+                tag="div"
+                name="instance-sort"
+                class="instance-track"
               >
-                <button
-                  class="instance-tile"
-                  :class="{ selected: selectedInstance?.id === instance.id }"
-                  :aria-label="
-                    t(
-                      snapshot.running.includes(instance.id)
-                        ? '{name}，{version}，双击查看运行日志，按 F2 设置，拖动或按 Alt 加左右方向键排序'
-                        : hasInstanceTask(instance.id)
-                          ? '{name}，{version}，双击查看下载进度，按 F2 设置，拖动或按 Alt 加左右方向键排序'
-                          : '{name}，{version}，双击或按 F2 设置，拖动或按 Alt 加左右方向键排序',
-                      {
-                        name: instance.name,
-                        version:
-                          versionName(
-                            instance.versions.find(
-                              (v) => v.id === instance.selected_version,
-                            ),
-                          ) || t('尚无版本'),
-                      },
-                    )
-                  "
-                  :aria-pressed="selectedInstance?.id === instance.id"
-                  aria-keyshortcuts="Alt+ArrowLeft Alt+ArrowRight F2"
-                  @pointerdown="instanceSort.start($event, instance.id)"
-                  @keydown="instanceSort.keyboard($event, instance.id)"
-                  @click="selectInstance(instance.id)"
-                  @dblclick="openInstance(instance)"
-                  @contextmenu.prevent="edit(instance)"
-                  @keydown.f2.prevent="edit(instance)"
-                  @mouseenter="previewInstance($event, instance)"
-                  @mouseleave="hoveredInstance = null"
-                  @focus="previewInstance($event, instance)"
-                  @blur="hoveredInstance = null"
+                <div
+                  v-for="instance in section.items"
+                  :key="instance.id"
+                  class="instance-item"
+                  :data-instance-id="instance.id"
+                  :class="{
+                    dragging: draggedInstanceId === instance.id,
+                  }"
                 >
-                  <InstanceIcon :icon="instanceMaterial(instance)" />
-                  <i
-                    v-if="snapshot.running.includes(instance.id)"
-                    class="running-dot"
+                  <button
+                    class="instance-tile"
+                    :class="{ selected: selectedInstance?.id === instance.id }"
+                    :aria-label="
+                      t(
+                        snapshot.running.includes(instance.id)
+                          ? '{name}，{version}，双击查看运行日志，按 F2 设置，拖动或按 Alt 加左右方向键排序'
+                          : hasInstanceTask(instance.id)
+                            ? '{name}，{version}，双击查看下载进度，按 F2 设置，拖动或按 Alt 加左右方向键排序'
+                            : '{name}，{version}，双击或按 F2 设置，拖动或按 Alt 加左右方向键排序',
+                        {
+                          name: instance.name,
+                          version:
+                            versionName(
+                              instance.versions.find(
+                                (v) => v.id === instance.selected_version,
+                              ),
+                            ) || t('尚无版本'),
+                        },
+                      )
+                    "
+                    :aria-pressed="selectedInstance?.id === instance.id"
+                    aria-keyshortcuts="Alt+ArrowLeft Alt+ArrowRight F2"
+                    @pointerdown="instanceSort.start($event, instance.id)"
+                    @keydown="instanceSort.keyboard($event, instance.id)"
+                    @click="selectInstance(instance.id)"
+                    @dblclick="openInstance(instance)"
+                    @contextmenu.prevent="edit(instance)"
+                    @keydown.f2.prevent="edit(instance)"
+                    @mouseenter="previewInstance($event, instance)"
+                    @mouseleave="hoveredInstance = null"
+                    @focus="previewInstance($event, instance)"
+                    @blur="hoveredInstance = null"
+                  >
+                    <InstanceIcon :icon="instanceMaterial(instance)" />
+                    <i
+                      v-if="snapshot.running.includes(instance.id)"
+                      class="running-dot"
+                    />
+                  </button>
+                  <InstanceProgress
+                    v-if="
+                      current?.instance_id === instance.id &&
+                      ['running', 'paused'].includes(current.status)
+                    "
+                    :title="current.title"
+                    :message="current.message"
+                    :progress="current.progress"
+                    :indeterminate="
+                      current.status === 'running' && current.indeterminate
+                    "
+                    @open="openInstance(instance)"
                   />
+                </div>
+                <button
+                  v-if="section.id === 'overflow'"
+                  key="add-directory"
+                  class="instance-tile overflow-add-instance"
+                  :disabled="busy"
+                  :aria-label="t('添加游戏目录')"
+                  :title="t('添加游戏目录')"
+                  @click="openInstancePicker"
+                >
+                  <Plus :size="20" />
                 </button>
-                <InstanceProgress
-                  v-if="
-                    current?.instance_id === instance.id &&
-                    ['running', 'paused'].includes(current.status)
-                  "
-                  :title="current.title"
-                  :message="current.message"
-                  :progress="current.progress"
-                  :indeterminate="
-                    current.status === 'running' && current.indeterminate
-                  "
-                  @open="openInstance(instance)"
-                />
-              </div>
-            </TransitionGroup>
-          </div>
+              </TransitionGroup>
+            </div>
+          </Transition>
         </nav>
         <div
           class="launch-control glass-surface"
@@ -2126,8 +2586,8 @@ onUnmounted(() => {
       <GlassDialog
         :notice="translateMessage(notice)"
         v-if="utility"
-        :label="t(utilityTitles[utility])"
-        @close="utility = null"
+        :label="utilityTitle"
+        @close="closeUtility"
       >
         <section
           :key="utility"
@@ -2135,6 +2595,7 @@ onUnmounted(() => {
           class="utility-panel glass-surface"
           :class="{
             'account-panel': utility === 'accounts',
+            'account-authorizing': utility === 'accounts' && !!challenge,
             'global-settings': utility === 'settings',
             'download-panel': utility === 'downloads',
           }"
@@ -2165,16 +2626,11 @@ onUnmounted(() => {
               </button>
             </div>
             <h2 v-else class="dialog-heading" tabindex="-1" autofocus>
-              {{ t(utilityTitles[utility]) }}
+              {{ utilityTitle }}
             </h2>
             <div class="inline-actions">
               <button
-                v-if="
-                  utility === 'accounts' &&
-                  selectedAccount &&
-                  !loginSetup &&
-                  !challenge
-                "
+                v-if="utility === 'accounts' && selectedAccount && !challenge"
                 class="icon-button"
                 :disabled="busy"
                 :aria-label="t('刷新账户与皮肤')"
@@ -2186,7 +2642,7 @@ onUnmounted(() => {
               <button
                 class="icon-button"
                 :aria-label="t('关闭面板')"
-                @click="utility = null"
+                @click="closeUtility"
               >
                 <X :size="16" />
               </button>
@@ -2194,95 +2650,46 @@ onUnmounted(() => {
           </header>
           <div class="utility-panel-content">
             <div v-if="utility === 'accounts'" class="page-inner">
-              <form
-                v-if="loginSetup"
-                class="login-setup"
-                @submit.prevent="saveLoginConfiguration"
-              >
-                <p class="login-explanation">
-                  {{
-                    t(
-                      "此开发版本还需要配置微软登录应用。Client ID 是启动器的公开应用编号，由开发者注册提供。",
-                    )
-                  }}
-                </p>
-                <label class="field">
-                  {{ t("应用 ID（Client ID）") }}
-                  <input
-                    v-model="loginClientId"
-                    required
-                    :disabled="busy"
-                    placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-                    spellcheck="false"
-                    autocomplete="off"
-                  />
-                </label>
-                <div class="login-setup-actions">
-                  <button
-                    type="button"
-                    class="text-button"
-                    @click="
-                      openLink(
-                        'https://learn.microsoft.com/entra/identity-platform/v2-oauth2-device-code',
-                      )
-                    "
-                  >
-                    {{ t("注册说明") }} <ExternalLink :size="14" />
-                  </button>
-                  <span class="grow" />
-                  <button
-                    type="button"
-                    class="button"
-                    :disabled="busy"
-                    @click="loginSetup = false"
-                  >
-                    {{ t("取消") }}
-                  </button>
-                  <button
-                    type="submit"
-                    class="button primary"
-                    :disabled="busy || !loginClientId.trim()"
-                  >
-                    {{ t("保存并登录") }}
-                  </button>
-                </div>
-              </form>
-              <div v-else-if="challenge" class="panel login-panel">
-                <h3>{{ t("完成微软授权") }}</h3>
-                <p>
-                  {{
-                    t("在微软页面输入验证码，有效期约 {minutes} 分钟。", {
-                      minutes: Math.ceil(challenge.expires_in / 60),
-                    })
-                  }}
-                </p>
+              <div v-if="challenge" class="login-panel">
                 <button
+                  type="button"
                   class="device-code"
                   :title="t('复制验证码')"
+                  :aria-label="
+                    t('复制验证码 {code}', { code: challenge.user_code })
+                  "
                   @click="copy(challenge.user_code)"
                 >
-                  {{ challenge.user_code }}<Copy :size="16" />
+                  <span class="device-code-value">{{
+                    challenge.user_code
+                  }}</span>
+                  <Copy :size="16" aria-hidden="true" />
                 </button>
-                <div class="inline-actions">
-                  <button
-                    class="button primary"
-                    @click="openLink(challenge.verification_uri)"
-                  >
-                    {{ t("打开登录页") }} <ExternalLink :size="16" /></button
-                  ><button class="button" @click="cancel">
-                    {{ t("取消登录") }}
-                  </button>
+                <div class="login-status">
+                  <span class="waiting" role="status">
+                    <LoaderCircle :size="12" class="spin" aria-hidden="true" />
+                    {{ t("等待授权…") }}
+                  </span>
+                  <span class="login-expiry">
+                    {{
+                      t("有效期约 {minutes} 分钟", {
+                        minutes: Math.ceil(challenge.expires_in / 60),
+                      })
+                    }}
+                  </span>
                 </div>
-                <button
-                  class="text-button login-address"
-                  :title="t('复制登录地址')"
-                  @click="copy(challenge.verification_uri)"
-                >
-                  {{ challenge.verification_uri }} <Copy :size="14" />
-                </button>
-                <p class="waiting">
-                  <LoaderCircle :size="16" class="spin" /> {{ t("等待授权…") }}
-                </p>
+                <div class="login-footer">
+                  <a
+                    class="text-button login-address"
+                    :href="challenge.verification_uri"
+                    :title="challenge.verification_uri"
+                    :aria-label="t('打开微软登录页')"
+                    @click.prevent="openLink(challenge.verification_uri)"
+                  >
+                    <span>{{ loginAddress }}</span>
+                    <ExternalLink :size="12" aria-hidden="true" />
+                  </a>
+                </div>
               </div>
               <template v-else>
                 <div
@@ -2348,7 +2755,7 @@ onUnmounted(() => {
                   </div>
                   <button
                     class="account-add"
-                    :disabled="busy"
+                    :disabled="busy || loginBusy"
                     :aria-label="t('添加微软账户')"
                     :title="t('添加微软账户')"
                     @click="login"
@@ -2382,7 +2789,22 @@ onUnmounted(() => {
                 @cancel="cancel"
                 @pause="setDownloadPaused(true)"
                 @resume="setDownloadPaused(false)"
-              />
+              >
+                <template #step-details="{ step }">
+                  <ModpackMissing
+                    v-if="
+                      displayedTask.modpack_status &&
+                      ['error', 'cancelled'].includes(step.status)
+                    "
+                    :status="displayedTask.modpack_status"
+                    :disabled="busy"
+                    @settings="packNetworkSettings"
+                    @supply="supplyPackFiles"
+                    @resume="resumePack"
+                    @link="openLink"
+                  />
+                </template>
+              </DownloadWorkflow>
               <div v-else class="workflow-empty">
                 <span>{{ t("暂无下载任务") }}</span>
                 <button
@@ -2585,6 +3007,11 @@ onUnmounted(() => {
                         v-model="settings.mod_download_source"
                       />
                     </div>
+                    <CurseForgeKey
+                      :load="() => rpc<boolean>('curseforge_key_status')"
+                      :save="saveCurseforgeKey"
+                      @error="error = message($event)"
+                    />
                     <div class="network-concurrency network-control-heading">
                       <label for="settings-concurrency">{{
                         t("并发数")
@@ -2783,29 +3210,64 @@ onUnmounted(() => {
       >
         <VersionManager
           v-if="modal === 'manage' && managedInstance"
-          :key="managedInstance.id"
           :instance="managedInstance"
+          :instances="instances"
           :locked="busy || snapshot.running.includes(managedInstance.id)"
+          :downloading="
+            busy &&
+            current?.instance_id === managedInstance.id &&
+            current?.status === 'running'
+          "
+          :download-version="current?.version_id || undefined"
           :load-content="readVersionContent"
+          :prefetch-content="prefetchVersionContent"
+          :load-content-metadata="readContentMetadata"
+          :open-content-folder="openContentFolder"
+          :load-content-source="readContentSource"
           :load-counts="readVersionContentCounts"
+          @select-instance="switchManagedInstance"
+          :load-metadata="readVersionMetadata"
           :rename="renameVersion"
           :remove="deleteVersion"
           @error="error = message($event)"
           @busy="managing = $event"
           @close="modal = null"
         />
+        <ModpackImport
+          v-else-if="modal === 'version' && packPreview"
+          :preview="packPreview"
+          :target="editing"
+          :instances="instances"
+          v-model:name="form.name"
+          v-model:icon="form.icon"
+          v-model:location="form.location"
+          :directory="form.external_directory"
+          :root="snapshot.root"
+          :disabled="busy || downloadSubmitting"
+          :picking="directoryPicking"
+          :can-submit="canSubmitPack"
+          @target="switchDownloadTarget"
+          @browse="chooseCreationDirectory(true)"
+          @submit="submitModpack"
+          @choose="openModpack()"
+          @settings="packNetworkSettings"
+          @close="modal = null"
+        />
         <VersionDownload
           v-else-if="modal === 'version'"
           v-model:version="form.version"
           v-model:loader="form.loader"
-          v-model:fabric-version="form.fabric_version"
+          v-model:icon="form.icon"
+          v-model:loader-version="form.loader_version"
           v-model:name="form.name"
           v-model:location="form.location"
           :target="editing"
           :instances="instances"
           :manifest="manifest"
-          :fabric-options="fabricOptions"
-          :fabric-loading="fabricLoading"
+          :loader-options="loaderOptions"
+          :loader-loading="loaderLoading"
+          :unavailable-loaders="unavailableLoaders"
+          @retry-loader="loadLoaderVersions(true)"
           :versions-loading="versionsLoading"
           :disabled="busy || downloadSubmitting"
           :submitting="downloadSubmitting"
@@ -2816,7 +3278,8 @@ onUnmounted(() => {
           :running="downloadTargetRunning"
           @target="switchDownloadTarget"
           @refresh="loadVersions"
-          @browse="chooseCreationDirectory"
+          @browse="chooseCreationDirectory(true)"
+          @import-pack="openModpack()"
           @submit="submitDownload"
           @close="modal = null"
         />
@@ -2999,7 +3462,7 @@ onUnmounted(() => {
                   modal === 'edit'
                     ? instanceSaving || invalidCustomMemory
                     : busy ||
-                      fabricUnavailable ||
+                      loaderUnavailable ||
                       invalidCreationLocation ||
                       (modal === 'create' && directoryPicking)
                 "

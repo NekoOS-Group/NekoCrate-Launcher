@@ -4,6 +4,47 @@ use anyhow::{Result, bail};
 use reqwest::{Client, ClientBuilder, Proxy, Url};
 use std::path::Path;
 
+/// Inspect typed TLS errors, including those wrapped inside an IO error by
+/// hyper. Never infer clock problems from arbitrary server response text.
+fn certificate_error<'a>(
+    error: &'a (dyn std::error::Error + 'static),
+) -> Option<&'a rustls::CertificateError> {
+    if let Some(rustls::Error::InvalidCertificate(reason)) = error.downcast_ref() {
+        return Some(reason);
+    }
+    if let Some(io) = error.downcast_ref::<std::io::Error>()
+        && let Some(inner) = io.get_ref()
+        && let Some(reason) = certificate_error(inner)
+    {
+        return Some(reason);
+    }
+    error.source().and_then(certificate_error)
+}
+
+pub fn is_certificate_error(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| certificate_error(cause).is_some())
+}
+
+pub fn explain_error(error: anyhow::Error) -> anyhow::Error {
+    use rustls::CertificateError::*;
+    let reason = error.chain().find_map(certificate_error);
+    let hint = match reason {
+        Some(Expired | ExpiredContext { .. } | NotValidYet | NotValidYetContext { .. }) => {
+            "HTTPS 证书不在有效期内，请检查系统日期、时间和时区并开启自动同步；若时间正确，可能是服务器证书异常"
+        }
+        Some(_) => "HTTPS 证书验证失败，请检查代理或网络的证书配置",
+        None => return error,
+    };
+    // Several layers may enrich the same error. Keep one actionable hint.
+    if error.chain().any(|cause| cause.to_string() == hint) {
+        error
+    } else {
+        error.context(hint)
+    }
+}
+
 pub fn validate(settings: &Settings) -> Result<()> {
     if !["auto", "official", "bmclapi"].contains(&settings.download_source.as_str())
         || !["auto", "official", "modrinth", "curseforge", "bbsmc"]
@@ -127,6 +168,39 @@ pub fn urls(settings: &Settings, input: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clock_hint_uses_typed_certificate_errors_and_preserves_the_cause() {
+        for reason in [
+            rustls::CertificateError::Expired,
+            rustls::CertificateError::NotValidYet,
+        ] {
+            let error = anyhow::Error::new(std::io::Error::other(
+                rustls::Error::InvalidCertificate(reason),
+            ))
+            .context("request failed");
+            assert!(is_certificate_error(&error));
+            let error = explain_error(error);
+            assert!(error.to_string().contains("系统日期"));
+            assert!(format!("{error:#}").contains("request failed"));
+            assert_eq!(
+                format!("{:#}", explain_error(error))
+                    .matches("系统日期")
+                    .count(),
+                1
+            );
+        }
+        let unknown = anyhow::Error::new(rustls::Error::InvalidCertificate(
+            rustls::CertificateError::UnknownIssuer,
+        ));
+        assert!(!explain_error(unknown).to_string().contains("系统日期"));
+        let arbitrary = anyhow::anyhow!("server said: certificate expired");
+        assert!(!is_certificate_error(&arbitrary));
+        assert_eq!(
+            explain_error(arbitrary).to_string(),
+            "server said: certificate expired"
+        );
+    }
 
     #[test]
     fn mod_catalog_choices_persist_independently_and_never_rewrite_other_platforms() {

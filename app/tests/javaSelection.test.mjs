@@ -120,3 +120,35 @@ test("Java 探测失败时保留已配置路径，仍可自动匹配或选择文
     dispose();
   }
 });
+
+test("same-version JRE and JDK choices show their kind and architecture", async () => {
+  const { context: ui, dispose } = await settingsFixture();
+  try {
+    ui.javaRuntimes.value = [
+      {
+        path: "/jre/bin/java",
+        major: 17,
+        version: 'openjdk version "17.0.21"',
+        jdk: false,
+        arch: "aarch64",
+      },
+      {
+        path: "/jdk/bin/java",
+        major: 17,
+        version: 'openjdk version "17.0.21"',
+        jdk: true,
+        arch: "aarch64",
+      },
+    ];
+    assert.equal(
+      ui.javaChoices.value.find((item) => item.value === "/jre/bin/java").label,
+      "JRE 17.0.21 · ARM64",
+    );
+    assert.equal(
+      ui.javaChoices.value.find((item) => item.value === "/jdk/bin/java").label,
+      "JDK 17.0.21 · ARM64",
+    );
+  } finally {
+    dispose();
+  }
+});

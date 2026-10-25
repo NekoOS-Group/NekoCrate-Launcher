@@ -341,36 +341,48 @@ test("立即启动下载时等待设置写入，任务读取新配置", async ()
   }
 });
 
-test("登录应用配置写入期间的自动保存保留新的 Client ID", async () => {
+test("旧配置的 Client ID 为空时直接开始登录，授权期间仍能自动保存设置", async () => {
   const { fixture, context: ui, dispose } = await settingsFixture();
   try {
-    const save = deferred();
-    let writes = 0;
-    fixture.handlers.save_settings = async (request) => {
-      if (++writes === 1) await save.promise;
-      fixture.state.database.settings = structuredClone(request.settings);
-      return true;
+    const signIn = deferred();
+    const challenge = {
+      session_id: "test-session",
+      user_code: "TEST-CODE",
+      verification_uri: "https://www.microsoft.com/link",
+      expires_in: 900,
+      interval: 5,
     };
-    fixture.handlers.begin_login = () => {
-      throw new Error("login stopped in fixture");
-    };
-    ui.loginClientId.value = "2bc9d1a1-9cbc-49a2-992c-6ab525827e22";
-    const configuring = ui.saveLoginConfiguration();
+    fixture.handlers.begin_login = () => challenge;
+    fixture.handlers.wait_login = () => signIn.promise;
+    ui.toggleUtility("accounts");
+    assert.equal(fixture.state.database.settings.microsoft_client_id, "");
+    const requestStart = fixture.calls.length;
+    const signingIn = ui.login();
     await flush();
+    assert.deepEqual(ui.challenge.value, challenge);
+    assert.equal(ui.busy.value, false);
+    assert.equal(ui.loginBusy.value, true);
+    assert.deepEqual(
+      fixture.calls
+        .slice(requestStart)
+        .filter((call) => call.op !== "snapshot")
+        .map((call) => call.op),
+      ["begin_login", "wait_login", "copy_text"],
+    );
+    assert.equal(fixture.clipboard, challenge.user_code);
     ui.toggleUtility("settings");
     await flush();
     ui.settings.language = "en-US";
     await flush();
-    assert.equal(writes, 1);
-    save.resolve();
-    await configuring;
-    await flush();
-    assert.equal(writes, 2);
-    assert.equal(
-      fixture.state.database.settings.microsoft_client_id,
-      ui.loginClientId.value,
-    );
     assert.equal(fixture.state.database.settings.language, "en-US");
+    assert.equal(fixture.state.database.settings.microsoft_client_id, "");
+    assert.equal(ui.busy.value, false);
+    assert.equal(ui.loginBusy.value, true);
+    signIn.resolve(true);
+    await signingIn;
+    assert.equal(ui.challenge.value, null);
+    assert.equal(ui.loginBusy.value, false);
+    assert.equal(ui.busy.value, false);
   } finally {
     dispose();
   }

@@ -60,7 +60,19 @@ pub async fn versions(
     downloader: &Downloader,
     cancel: &CancellationToken,
 ) -> Result<Vec<LoaderVersion>> {
-    versions_from(root, game, downloader, cancel, META).await
+    match versions_from(root, game, downloader, cancel, META).await {
+        Ok(versions) => Ok(versions),
+        Err(error) => {
+            crate::download::check_cancel(cancel)?;
+            storage::safe_version(game)?;
+            storage::read_json(
+                &root
+                    .join("metadata/fabric/loaders")
+                    .join(format!("{game}.json")),
+            )
+            .map_err(|_| error)
+        }
+    }
 }
 
 async fn versions_from(

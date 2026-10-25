@@ -18,7 +18,7 @@ const stubs = {
   "./instanceIcons": `export const resolveInstanceIcon = () => 0;`,
   "../package.json": `export const version = ${JSON.stringify(packageVersion)};`,
   "./useInstanceSorting": `import { ref } from ${JSON.stringify(vueUrl)};
-    export const useInstanceSorting = instances => ({ strip: ref(), ghost: ref(),
+    export const useInstanceSorting = instances => ({ strip: ref(), toggle: ref(), expanded: ref(false), ghost: ref(),
       draggedId: ref(null), draggedInstance: ref(), displayInstances: instances,
       ghostPosition: ref({}), ghostArtStyle: ref({}) });`,
 };
@@ -122,6 +122,10 @@ export async function settingsFixture() {
     async invoke(_, { request }) {
       this.calls.push(request);
       if (this.handlers[request.op]) return this.handlers[request.op](request);
+      if (request.op === "copy_text") {
+        this.clipboard = request.text;
+        return true;
+      }
       if (request.op === "snapshot") return this.snapshot();
       if (request.op === "proxy_password") return this.proxyPassword;
       if (request.op === "memory_options")

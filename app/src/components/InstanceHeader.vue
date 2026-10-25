@@ -11,6 +11,7 @@ const props = defineProps<{
   directory: string;
   directoryLoading: boolean;
   disabled: boolean;
+  directoryActionLabel?: string;
 }>();
 const emit = defineEmits<{
   "update:name": [name: string];
@@ -95,6 +96,7 @@ defineExpose({ finishRename });
     <div
       ref="iconControl"
       class="instance-icon-control"
+      data-slide-key="instance-icon"
       @focusout="leaveIcons"
       @keydown.esc.stop.prevent="closeIcons(true)"
     >
@@ -149,7 +151,7 @@ defineExpose({ finishRename });
       </Transition>
     </div>
     <div class="settings-heading-details">
-      <h2>
+      <h2 data-slide-key="instance-name">
         <input
           v-if="renaming"
           ref="nameInput"
@@ -178,9 +180,11 @@ defineExpose({ finishRename });
       </h2>
       <button
         class="settings-directory-link"
-        :disabled="!directory"
+        data-slide-key="instance-directory"
+        :disabled="disabled || (!directory && !directoryActionLabel)"
         :title="directory"
         :aria-label="
+          directoryActionLabel ||
           t('打开游戏目录：{path}', { path: directory || t('读取中') })
         "
         @click="emit('openDirectory')"

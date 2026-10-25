@@ -143,7 +143,8 @@ impl UpdateManager {
                 Ok(None) => session.progress = Progress::default(),
                 Err(error) => {
                     session.progress.stage = Stage::Error;
-                    session.progress.error = Some(error.to_string());
+                    session.progress.error =
+                        Some(nekocrate_core::diagnostics::redact(&format!("{error:#}")));
                 }
             }
             if let Ok(Some(package)) = result {
@@ -208,6 +209,7 @@ impl UpdateManager {
             .build()?
             .check()
             .await
+            .map_err(|error| nekocrate_core::network::explain_error(error.into()))
             .context("无法读取更新信息")?
             .context("更新版本已变化，请重新检查更新")?;
         if update.version != release.version
@@ -234,6 +236,7 @@ impl UpdateManager {
                 || self.publish(app, |p| p.stage = Stage::Verifying),
             )
             .await
+            .map_err(|error| nekocrate_core::network::explain_error(error.into()))
             .context("更新包下载或签名验证失败，请重试")?;
         self.publish(app, |p| {
             p.downloaded = bytes.len() as u64;

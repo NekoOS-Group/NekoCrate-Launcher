@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 
 const OAUTH: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0";
 const SCOPE: &str = "XboxLive.signin offline_access";
+const DEFAULT_CLIENT_ID: &str = "31dbb1aa-d741-4983-bae9-c1bc13dc71b2";
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct DeviceChallenge {
@@ -89,10 +90,21 @@ async fn response_value(response: reqwest::Response, stage: &str) -> Result<Valu
     Ok(body)
 }
 pub async fn begin(client: &reqwest::Client, client_id: &str) -> Result<DeviceChallenge> {
-    uuid::Uuid::parse_str(client_id)
-        .context("请先在设置中填写你自己的 Microsoft 应用 Client ID（UUID），无需 Client Secret")?;
+    begin_at(client, client_id, OAUTH).await
+}
+async fn begin_at(
+    client: &reqwest::Client,
+    client_id: &str,
+    oauth_endpoint: &str,
+) -> Result<DeviceChallenge> {
+    // Empty overrides in both new and existing settings use the project app.
+    let client_id = match client_id.trim() {
+        "" => DEFAULT_CLIENT_ID,
+        configured => configured,
+    };
+    uuid::Uuid::parse_str(client_id).context("微软登录应用 ID 配置无效，请联系启动器维护者。")?;
     let response = client
-        .post(format!("{OAUTH}/devicecode"))
+        .post(format!("{oauth_endpoint}/devicecode"))
         .form(&[("client_id", client_id), ("scope", SCOPE)])
         .send()
         .await
@@ -265,6 +277,36 @@ pub fn remove_secret(root: &std::path::Path, id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn device_login_defaults_to_project_app_and_preserves_explicit_overrides() {
+        for configured in ["", " \t", " 2bc9d1a1-9cbc-49a2-992c-6ab525827e22 "] {
+            let expected = if configured.trim().is_empty() {
+                DEFAULT_CLIENT_ID
+            } else {
+                configured.trim()
+            };
+            let (url, server) = crate::test_http::serve(vec![(
+                200,
+                json!({
+                    "device_code": "device-fixture",
+                    "user_code": "TEST-CODE",
+                    "verification_uri": "https://www.microsoft.com/link",
+                    "expires_in": 900,
+                    "interval": 5,
+                })
+                .to_string(),
+            )])
+            .await;
+            let challenge = begin_at(&reqwest::Client::new(), configured, &url)
+                .await
+                .unwrap();
+            let requests = server.await.unwrap();
+            assert!(requests[0].contains(&format!("client_id={expected}")));
+            assert!(requests[0].contains("scope=XboxLive.signin+offline_access"));
+            assert_eq!(challenge.client_id, expected);
+            assert_eq!(challenge.user_code, "TEST-CODE");
+        }
+    }
     #[tokio::test]
     async fn exchange_checks_entitlement_and_binds_profile() {
         for owned in [true, false] {

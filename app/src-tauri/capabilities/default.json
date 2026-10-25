@@ -2,7 +2,9 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Main window, directory selection, Microsoft sign-in and launcher project links",
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-set-title",
@@ -10,15 +12,32 @@
     {
       "identifier": "opener:allow-open-url",
       "allow": [
-        { "url": "https://microsoft.com/*" },
-        { "url": "https://www.microsoft.com/*" },
-        { "url": "https://login.microsoftonline.com/*" },
-        { "url": "https://login.live.com/*" },
-        { "url": "https://learn.microsoft.com/*" },
-        { "url": "https://github.com/NekoOS-Group/NekoCrate-Launcher" },
-        { "url": "https://github.com/NekoOS-Group/NekoCrate-Launcher/issues" },
+        {
+          "url": "https://microsoft.com/*"
+        },
+        {
+          "url": "https://www.microsoft.com/*"
+        },
+        {
+          "url": "https://login.microsoftonline.com/*"
+        },
+        {
+          "url": "https://login.live.com/*"
+        },
+        {
+          "url": "https://learn.microsoft.com/*"
+        },
+        {
+          "url": "https://github.com/NekoOS-Group/NekoCrate-Launcher"
+        },
+        {
+          "url": "https://github.com/NekoOS-Group/NekoCrate-Launcher/issues"
+        },
         {
           "url": "https://github.com/NekoOS-Group/NekoCrate-Launcher/releases/*"
+        },
+        {
+          "url": "https://www.curseforge.com/minecraft/*"
         }
       ]
     }

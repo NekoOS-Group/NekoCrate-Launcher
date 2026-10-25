@@ -514,13 +514,17 @@ input::placeholder {
 }
 .game-controls {
   display: flex;
+  flex: 1;
+  justify-content: flex-end;
   align-items: center;
   gap: 16px;
   min-width: 0;
   height: 64px;
 }
 .instance-dock {
+  position: relative;
   display: flex;
+  max-width: calc(100% - 222px);
   align-items: center;
   min-width: 0;
   height: 64px;
@@ -553,8 +557,11 @@ input::placeholder {
   display: flex;
   align-items: center;
   gap: 4px;
-  max-width: clamp(102px, calc(100vw - 732px), 372px);
-  overflow-x: auto;
+  width: calc(var(--dock-columns) * 60px + 4px);
+  max-width: 100%;
+  min-width: 0;
+  flex-shrink: 1;
+  overflow: visible;
   padding: 4px;
   height: 64px;
   scrollbar-width: none;
@@ -566,11 +573,88 @@ input::placeholder {
   display: none;
 }
 .instance-track {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(var(--dock-columns), minmax(0, 1fr));
   align-items: center;
-  flex-shrink: 0;
+  width: 100%;
   gap: 4px;
 }
+.instance-overflow-toggle {
+  position: relative;
+  flex: 0 0 44px;
+  margin-right: 8px;
+}
+.instance-overflow-toggle svg {
+  transition:
+    transform 220ms var(--motion-ease),
+    filter 180ms;
+}
+.instance-overflow-toggle.expanded svg {
+  transform: rotate(180deg);
+}
+.instance-overflow-toggle.expanded,
+.instance-overflow-toggle.selected {
+  color: var(--blue);
+}
+.instance-overflow-toggle.expanded svg,
+.instance-overflow-toggle.selected svg {
+  filter: drop-shadow(0 0 5px var(--glow));
+}
+.instance-overflow-toggle small {
+  position: absolute;
+  right: 1px;
+  bottom: 3px;
+  color: var(--muted);
+  font: 9px/12px var(--mono);
+  pointer-events: none;
+}
+.instance-strip.instance-overflow {
+  --glass-fill: var(--control-glass-fill);
+  position: absolute;
+  bottom: calc(100% + 18px);
+  left: 0;
+  width: min(100%, calc(var(--overflow-columns) * 60px + 12px));
+  height: auto;
+  max-height: min(360px, calc(100vh - 220px));
+  padding: 14px 8px 24px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  z-index: 6;
+}
+.instance-overflow .instance-track {
+  grid-template-columns: repeat(var(--overflow-columns), minmax(0, 1fr));
+  row-gap: 24px;
+}
+.instance-overflow .overflow-add-instance {
+  width: 100%;
+  height: 56px;
+}
+.instance-overflow-enter-active,
+.instance-overflow-leave-active {
+  transition:
+    opacity 180ms,
+    transform 240ms var(--motion-ease);
+}
+.instance-overflow-enter-from,
+.instance-overflow-leave-to {
+  opacity: 0;
+  transform: translateY(8px);
+}
+.instance-sort-enter-active {
+  transition:
+    opacity 200ms,
+    transform 240ms var(--motion-ease);
+}
+.instance-sort-enter-from {
+  opacity: 0;
+  transform: translateY(6px) scale(0.9);
+}
+/* Removed tiles leave immediately: their visible copy is the travelling ghost. */
+.instance-sort-leave-active {
+  display: none;
+}
+
 .instance-item {
   position: relative;
   flex-shrink: 0;
@@ -674,7 +758,7 @@ input::placeholder {
   color: var(--blue);
 }
 .instance-item > .instance-tile {
-  width: 56px;
+  width: 100%;
   height: 56px;
   touch-action: none;
   cursor: grab;
@@ -1505,60 +1589,103 @@ input:read-only {
 .account-choice:focus-within .account-remove {
   opacity: 1;
 }
-.login-setup {
-  padding-top: 4px;
-}
-.login-explanation {
-  margin-bottom: 20px;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 20px;
-}
-.login-setup-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.account-authorizing .utility-panel-header {
+  margin-bottom: 0;
+  border-bottom-color: transparent;
 }
 .login-panel {
-  padding: 20px;
-}
-.login-panel h3 {
-  font-size: 14px;
-  line-height: 20px;
-  font-weight: 500;
-}
-.login-panel p {
-  margin-top: 12px;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 20px;
+  padding-top: 4px;
+  text-align: center;
 }
 .device-code {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) 16px;
+  align-items: center;
+  width: 100%;
+  gap: 12px;
+  min-height: 76px;
+  padding: 12px 20px;
+  border: 1px solid var(--glass-stroke);
+  border-radius: 0;
+  background: color-mix(in srgb, var(--blue) 4%, transparent);
+  box-shadow: var(--glass-rim);
+  color: var(--blue);
+  transition:
+    border-color 180ms ease,
+    background-color 180ms ease,
+    box-shadow 180ms ease;
+}
+.device-code::before {
+  content: "";
+}
+.device-code-value {
+  padding-left: 0.12em;
+  font: 500 32px/44px var(--mono);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.12em;
+  white-space: nowrap;
+  user-select: text;
+}
+.device-code > svg {
+  opacity: 0.6;
+  transition: opacity 180ms ease;
+}
+.device-code:hover {
+  border-color: var(--blue);
+  background: color-mix(in srgb, var(--blue) 7%, transparent);
+  box-shadow:
+    var(--glass-rim),
+    0 0 24px var(--glow);
+}
+.device-code:hover > svg,
+.device-code:focus-visible > svg {
+  opacity: 1;
+}
+.login-status {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  width: 100%;
-  gap: 16px;
-  min-height: 64px;
-  margin: 20px 0;
-  padding: 0 16px;
-  border: 0;
-  border-radius: 0;
-  background: color-mix(in srgb, var(--blue) 8%, var(--night));
-  color: var(--blue);
-  font: 24px/32px var(--mono);
-  letter-spacing: 2px;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin-top: 14px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 18px;
 }
 .waiting {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
+  color: var(--blue);
+}
+.login-expiry {
+  font-variant-numeric: tabular-nums;
 }
 .login-address {
-  margin-top: 12px;
+  min-width: 0;
   max-width: 100%;
-  overflow-wrap: anywhere;
-  text-align: left;
+  gap: 6px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.login-address > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.login-address > svg {
+  opacity: 0.6;
+}
+.login-address:hover {
+  color: var(--ink);
+}
+.login-footer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-top: 12px;
 }
 .task-row {
   display: flex;
@@ -3118,8 +3245,8 @@ input:read-only {
   .game-controls {
     gap: 12px;
   }
-  .instance-strip {
-    max-width: clamp(102px, calc(100vw - 690px), 372px);
+  .instance-dock {
+    max-width: calc(100% - 218px);
   }
 }
 @media (max-height: 660px) {
@@ -3211,4 +3338,34 @@ input:read-only {
 }
 .settings-save-error .text-button {
   flex-shrink: 0;
+}
+
+/* Keep the dialog and list geometry fixed; only individual rows enter. */
+.list-reveal-item {
+  /* The fade matches listMotion.ts; movement continues after the handoff. */
+  animation:
+    list-row-enter 440ms cubic-bezier(0.22, 1, 0.36, 1) backwards,
+    list-row-fade 160ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  animation-delay: var(--row-delay, 30ms);
+}
+@keyframes list-row-enter {
+  from {
+    transform: translateY(16px);
+  }
+  to {
+    transform: none;
+  }
+}
+@keyframes list-row-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .list-reveal-item {
+    animation: none;
+  }
 }

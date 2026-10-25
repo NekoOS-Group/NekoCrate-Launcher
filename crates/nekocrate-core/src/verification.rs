@@ -19,7 +19,7 @@ use tokio::sync::{Mutex as AsyncMutex, OnceCell, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct Fingerprint {
+pub(crate) struct Fingerprint {
     size: u64,
     modified: (u64, u32),
     created: Option<(u64, u32)>,
@@ -49,7 +49,7 @@ impl Fingerprint {
         })
     }
 
-    fn read_at(_path: &Path, meta: &fs::Metadata) -> Option<Self> {
+    pub(crate) fn read_at(_path: &Path, meta: &fs::Metadata) -> Option<Self> {
         if !meta.is_file() {
             return None;
         }

@@ -452,10 +452,14 @@ pub fn check_launch_files(root: &Path, game: &Path, resolved: &ResolvedVersion) 
 }
 
 pub fn describe(root: &Path, game: &Path, id: &str) -> InstanceVersion {
+    if let Ok(managed) = crate::loader::describe(game, id) {
+        return managed;
+    }
     match resolve(root, game, id) {
         Ok(resolved) => InstanceVersion {
             id: id.into(),
             name: None,
+            modpack: false,
             minecraft_version: Some(resolved.minecraft_version.clone()),
             loader: resolved.loader.clone(),
             installed: check_launch_files(root, game, &resolved).is_ok(),

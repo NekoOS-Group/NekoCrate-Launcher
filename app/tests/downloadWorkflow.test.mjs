@@ -34,6 +34,55 @@ const file = (id, status = "queued", downloaded = 0) => ({
   total: 100,
 });
 
+test("加载器的整体进度不被单个安装阶段的 100% 覆盖", async () => {
+  const { fixture, context: ui, dispose } = await settingsFixture();
+  const download = deferred();
+  fixture.handlers.install = () => download.promise;
+  const instance = fixture.state.database.instances[0];
+  instance.versions.find((v) => v.id === instance.selected_version).loader = {
+    kind: "forge",
+    version: "47.4.4",
+  };
+  const installing = ui.install(instance);
+  try {
+    fixture.event({
+      payload: {
+        ...event("progress", "loader"),
+        completed: 1,
+        total: 1,
+        overall_progress: 45,
+      },
+    });
+    assert.equal(ui.current.value.download_progress, 45);
+    fixture.event({
+      payload: { ...event("workflow", "files"), overall_progress: 45 },
+    });
+    fixture.event({
+      payload: {
+        ...event("progress", "files"),
+        completed: 1,
+        total: 2,
+        overall_progress: 67.5,
+      },
+    });
+    assert.equal(ui.current.value.progress, 67.5);
+    fixture.event({
+      payload: {
+        ...event("progress", "files"),
+        completed: 0,
+        total: 2,
+        reset_progress: true,
+        overall_progress: 60,
+      },
+    });
+    assert.equal(ui.current.value.progress, 67.5);
+  } finally {
+    download.resolve(true);
+    await installing;
+    dispose();
+  }
+});
+
 test("普通安装复用校验记录，手动校验修复明确请求完整检查", async () => {
   const { fixture, context: ui, dispose } = await settingsFixture();
   fixture.handlers.install = () => true;

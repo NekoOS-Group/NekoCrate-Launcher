@@ -1,63 +1,76 @@
-use nekocrate_core::{Launcher, auth::DeviceChallenge, model::*};
+use nekocrate_core::{Launcher, model::*};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::{path::PathBuf, sync::Arc};
 use tauri::{Emitter, Manager, State};
+use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_opener::OpenerExt;
 use tokio_util::sync::CancellationToken;
 
 mod folder_scan;
 mod import_picker;
+mod jobs;
 mod pausable;
 mod updater;
 
-struct ActiveJob {
-    cancel: CancellationToken,
-    pause: Option<tokio::sync::watch::Sender<bool>>,
-}
-
 struct AppState {
     launcher: Launcher,
-    job: Arc<Mutex<Option<ActiveJob>>>,
-    challenge: Mutex<Option<DeviceChallenge>>,
+    jobs: jobs::Jobs,
     updater: updater::UpdateManager,
     folder_scan: folder_scan::FolderScanManager,
 }
-struct JobGuard(Arc<Mutex<Option<ActiveJob>>>);
-impl Drop for JobGuard {
-    fn drop(&mut self) {
-        *self.0.lock().unwrap() = None;
-    }
-}
 impl AppState {
-    fn job(&self) -> Result<(CancellationToken, JobGuard), String> {
-        let mut slot = self.job.lock().unwrap();
-        if slot.is_some() {
-            return Err("有任务正在运行，请等待或取消当前任务".into());
-        }
-        let cancel = CancellationToken::new();
-        *slot = Some(ActiveJob {
-            cancel: cancel.clone(),
-            pause: None,
-        });
-        Ok((cancel, JobGuard(self.job.clone())))
+    async fn job(&self) -> anyhow::Result<(CancellationToken, jobs::JobGuard)> {
+        let guard = self.jobs.task().await?;
+        Ok((guard.cancel.clone(), guard))
     }
 }
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum Request {
+    CopyText {
+        text: String,
+    },
     Snapshot,
     Versions,
     FabricVersions {
         game_version: String,
     },
+    LoaderVersions {
+        game_version: String,
+        kind: String,
+    },
+    AddLoaderVersion {
+        id: String,
+        game_version: String,
+        loader: ModLoader,
+    },
     AddFabricVersion {
         id: String,
         game_version: String,
         loader_version: String,
+    },
+    PreviewModpack {
+        path: PathBuf,
+    },
+    PrepareModpack {
+        id: String,
+        path: PathBuf,
+        name: String,
+        optional: Vec<String>,
+    },
+    ModpackStatus {
+        id: String,
+        version: String,
+    },
+    SupplyModpackFiles {
+        id: String,
+        version: String,
+        paths: Vec<PathBuf>,
+    },
+    CurseforgeKeyStatus,
+    SaveCurseforgeKey {
+        key: ProxyPassword,
     },
     Java,
     MemoryOptions {
@@ -76,6 +89,8 @@ enum Request {
     },
     Create {
         name: String,
+        #[serde(default)]
+        icon: Option<u8>,
         #[serde(default)]
         version: String,
         #[serde(default)]
@@ -152,6 +167,46 @@ enum Request {
         version: String,
         kind: nekocrate_core::version_management::ContentKind,
     },
+    VersionContentIndex {
+        id: String,
+        version: String,
+    },
+    VersionContentSummaries {
+        id: String,
+        version: String,
+        files: Vec<String>,
+    },
+    VersionContentMetadata {
+        id: String,
+        version: String,
+        kind: nekocrate_core::version_management::ContentKind,
+        file: String,
+    },
+    OpenContentFolder {
+        id: String,
+        version: String,
+        kind: nekocrate_core::version_management::ContentKind,
+        file: String,
+        #[serde(default)]
+        source: Option<String>,
+    },
+    VersionContentSource {
+        id: String,
+        version: String,
+        kind: nekocrate_core::version_management::ContentKind,
+        file: String,
+        source: String,
+    },
+    VersionMetadata {
+        id: String,
+        version: String,
+    },
+    VersionStorage {
+        id: String,
+        version: String,
+        #[serde(default)]
+        relative: String,
+    },
     Install {
         id: String,
         #[serde(default)]
@@ -166,8 +221,15 @@ enum Request {
     Cancel,
     Pause,
     Resume,
-    BeginLogin,
-    WaitLogin,
+    BeginLogin {
+        session_id: String,
+    },
+    WaitLogin {
+        session_id: String,
+    },
+    CancelLogin {
+        session_id: String,
+    },
     RefreshAccount,
     AccountSkin {
         id: String,
@@ -201,8 +263,26 @@ async fn command(
         let _ = handle.emit("launcher-event", event);
     });
     let launcher = &state.launcher;
+    // Log operation names, never account/proxy/API-key request payloads.
+    let diagnostic_operation = match &request {
+        Request::Versions => Some("versions"),
+        Request::LoaderVersions { .. } | Request::FabricVersions { .. } => Some("loader_versions"),
+        Request::AddLoaderVersion { .. } | Request::AddFabricVersion { .. } => {
+            Some("add_loader_version")
+        }
+        Request::Install { .. } => Some("install"),
+        Request::Launch { .. } => Some("launch"),
+        Request::CheckUpdate => Some("check_update"),
+        Request::DownloadLauncherUpdate { .. } => Some("download_launcher_update"),
+        Request::InstallLauncherUpdate => Some("install_launcher_update"),
+        Request::BeginLogin { .. } | Request::WaitLogin { .. } | Request::RefreshAccount => {
+            Some("login")
+        }
+        _ => None,
+    };
     let result: Result<Value, anyhow::Error> = async {
         Ok(match request{
+            Request::CopyText{text}=>{app.clipboard().write_text(text)?;json!(true)},
             Request::Snapshot=>{
                 let recovery = launcher.clone();
                 let notify = sink.clone();
@@ -211,14 +291,28 @@ async fn command(
                         notify(Event::new("download_progress_recovered", ""));
                     }
                 });
-                json!({"state":launcher.snapshot(),"manifest":launcher.cached_versions(),"busy":state.job.lock().unwrap().is_some()})
+                json!({"state":launcher.snapshot(),"manifest":launcher.cached_versions(),"busy":state.jobs.busy()})
             },
-            Request::Versions=>{let (cancel,_guard)=state.job().map_err(anyhow::Error::msg)?;json!(launcher.versions(&cancel).await?)},
+            Request::Versions=>{let (cancel,_guard)=state.job().await?;json!(launcher.versions(&cancel).await?)},
             Request::FabricVersions{game_version}=>json!(launcher.fabric_versions(&game_version,&CancellationToken::new()).await?),
+            Request::LoaderVersions{game_version,kind}=>json!(launcher.loader_versions(&game_version,&kind,&CancellationToken::new()).await?),
+            Request::AddLoaderVersion{id,game_version,loader}=>{
+                let (cancel,_guard)=state.job().await?;
+                json!(launcher.add_loader_version(&id,&game_version,loader,&cancel).await?)
+            },
             Request::AddFabricVersion{id,game_version,loader_version}=>{
-                let (cancel,_guard)=state.job().map_err(anyhow::Error::msg)?;
+                let (cancel,_guard)=state.job().await?;
                 json!(launcher.add_fabric_version(&id,&game_version,&loader_version,&cancel,&sink).await?)
             },
+            Request::PreviewModpack{path}=>{
+                let launcher = launcher.clone();
+                json!(tauri::async_runtime::spawn_blocking(move || launcher.preview_modpack(&path)).await??)
+            },
+            Request::PrepareModpack{id,path,name,optional}=>{let (_cancel,_guard)=state.job().await?;json!(launcher.prepare_modpack(&id,&path,&name,&optional).await?)},
+            Request::ModpackStatus{id,version}=>json!(launcher.modpack_status(&id,&version).await?),
+            Request::SupplyModpackFiles{id,version,paths}=>{let (_cancel,_guard)=state.job().await?;json!(launcher.supply_modpack_files(&id,&version,paths).await?)},
+            Request::CurseforgeKeyStatus=>json!(launcher.curseforge_key_configured()?),
+            Request::SaveCurseforgeKey{key}=>{ launcher.save_curseforge_key(&key.0)?; json!(true) },
             Request::Java=>json!(nekocrate_core::java::discover(launcher.root()).await),
             Request::MemoryOptions{id}=>{
                 let launcher = launcher.clone();
@@ -229,24 +323,30 @@ async fn command(
             Request::DownloadLauncherUpdate{version}=>{state.updater.download(&app,launcher,&version).await?;json!(state.updater.progress())},
             Request::CancelLauncherUpdate=>{state.updater.cancel();json!(true)},
             Request::InstallLauncherUpdate=>{
-                let (_cancel,_guard)=state.job().map_err(anyhow::Error::msg)?;
+                let (_cancel,_guard)=state.job().await?;
                 if !launcher.snapshot().running.is_empty() { anyhow::bail!("请先退出正在运行的游戏，再安装启动器更新"); }
                 state.updater.install(&app,launcher).await?;
                 json!(true)
             },
             Request::ProxyPassword=>json!(launcher.proxy_password()?),
             Request::SaveSettings{settings}=>{launcher.save_settings(settings)?;json!(true)},
-            Request::Create{name,version,directory}=>{
+            Request::Create{name,version,directory,icon}=>{
+                let (_cancel,_guard)=state.job().await?;
                 let launcher = launcher.clone();
                 json!(tauri::async_runtime::spawn_blocking(move || {
-                    launcher.create_instance_at(&name,&version,directory.as_deref().map(std::path::Path::new))
+                    if icon.is_some_and(|i| i >= INSTANCE_ICON_COUNT) { anyhow::bail!("请选择有效的实例图标"); }
+                    let instance = launcher.create_instance_at(&name,&version,directory.as_deref().map(std::path::Path::new))?;
+                    if let Some(icon) = icon {
+                        launcher.update_instance_memory(&instance.id, &instance.name, nekocrate_core::memory::MemoryConfig { mode: instance.memory_mode, custom_mb: instance.memory_mb }, instance.java_path.clone(), Some(icon))?;
+                    }
+                    launcher.instance(&instance.id)
                 }).await??)
             },
             Request::Update{id,name,memory_mb,memory_mode,java_path,icon}=>{launcher.update_instance_memory(&id,&name,nekocrate_core::memory::MemoryConfig{mode:memory_mode,custom_mb:memory_mb},java_path,icon)?;json!(true)},
-            Request::Clone{id}=>{let (_cancel,_guard)=state.job().map_err(anyhow::Error::msg)?;json!(launcher.clone_instance(&id).await?)},
-            Request::Delete{id}=>{launcher.delete_instance(&id)?;json!(true)},
+            Request::Clone{id}=>{let (_cancel,_guard)=state.job().await?;json!(launcher.clone_instance(&id).await?)},
+            Request::Delete{id}=>{let (_cancel,_guard)=state.job().await?;launcher.delete_instance(&id)?;json!(true)},
             Request::MoveInstance{id,before_id}=>{launcher.move_instance(&id,before_id.as_deref())?;json!(true)},
-            Request::Import{source,name,version}=>{let (_cancel,_guard)=state.job().map_err(anyhow::Error::msg)?;json!(launcher.import_instance(PathBuf::from(source),name,version).await?)},
+            Request::Import{source,name,version}=>{let (_cancel,_guard)=state.job().await?;json!(launcher.import_instance(PathBuf::from(source),name,version).await?)},
             Request::ScanFolders{scan_id,paths}=>{
                 let guard = state.folder_scan.start(scan_id);
                 let launcher = launcher.clone();
@@ -256,7 +356,7 @@ async fn command(
             },
             Request::CancelFolderScan{scan_id}=>{state.folder_scan.cancel(Some(&scan_id));json!(true)},
             Request::ImportFolders{paths}=>{
-                let (_cancel,_guard)=state.job().map_err(anyhow::Error::msg)?;
+                let (_cancel,_guard)=state.job().await?;
                 json!(launcher.import_folders(paths.into_iter().map(PathBuf::from).collect()).await?)
             },
             Request::SuggestedInstances=>{
@@ -272,10 +372,11 @@ async fn command(
             },
             Request::PickImportDirectory{path}=>json!(import_picker::pick(&app,&path,launcher.ui_language() == "en-US",false).await?),
             Request::PickInstanceLocation{path}=>json!(import_picker::pick(&app,&path,launcher.ui_language() == "en-US",true).await?),
-            Request::AddVersion{id,version}=>json!(launcher.add_version(&id,&version)?),
-            Request::SelectVersion{id,version}=>{launcher.select_version(&id,&version)?;json!(true)},
+            Request::AddVersion{id,version}=>{let (_cancel,_guard)=state.job().await?;json!(launcher.add_version(&id,&version)?)},
+            Request::SelectVersion{id,version}=>{let (_cancel,_guard)=state.job().await?;launcher.select_version(&id,&version)?;json!(true)},
             Request::RenameVersion{id,version,name}=>{launcher.rename_version(&id,&version,&name)?;json!(true)},
             Request::DeleteVersion{id,version}=>{
+                let (_cancel,_guard)=state.job().await?;
                 let launcher = launcher.clone();
                 json!(tauri::async_runtime::spawn_blocking(move || launcher.delete_version(&id,&version)).await??)
             },
@@ -287,38 +388,86 @@ async fn command(
                 let launcher = launcher.clone();
                 json!(tauri::async_runtime::spawn_blocking(move || launcher.version_content(&id,&version,kind)).await??)
             },
+            Request::VersionContentIndex{id,version}=>{
+                let launcher = launcher.clone();
+                json!(tauri::async_runtime::spawn_blocking(move || launcher.version_content_index(&id,&version)).await??)
+            },
+            Request::VersionContentSummaries{id,version,files}=>{
+                let launcher = launcher.clone();
+                json!(tauri::async_runtime::spawn_blocking(move || launcher.version_content_summaries(&id,&version,&files)).await??)
+            },
+            Request::VersionContentMetadata{id,version,kind,file}=>{
+                let launcher = launcher.clone();
+                json!(tauri::async_runtime::spawn_blocking(move || launcher.version_content_metadata(&id,&version,kind,&file)).await??)
+            },
+            Request::OpenContentFolder{id,version,kind,file,source}=>{
+                let launcher = launcher.clone();
+                let path = tauri::async_runtime::spawn_blocking(move || launcher.version_content_path(&id,&version,kind,&file,source.as_deref())).await??;
+                app.opener().reveal_item_in_dir(path)?;
+                json!(true)
+            },
+            Request::VersionContentSource{id,version,kind,file,source}=>{
+                let launcher = launcher.clone();
+                json!(tauri::async_runtime::spawn_blocking(move || launcher.version_content_source(&id,&version,kind,&file,&source)).await??)
+            },
+            Request::VersionMetadata{id,version}=>{
+                let launcher = launcher.clone();
+                json!(tauri::async_runtime::spawn_blocking(move || launcher.version_metadata(&id,&version)).await??)
+            },
+            Request::VersionStorage{id,version,relative}=>{
+                let launcher = launcher.clone();
+                json!(tauri::async_runtime::spawn_blocking(move || launcher.version_storage(&id,&version,&relative)).await??)
+            },
             Request::Install{id,repair}=>{
-                let (cancel,_guard)=state.job().map_err(anyhow::Error::msg)?;
-                let (pause,receiver)=tokio::sync::watch::channel(false);
-                state.job.lock().unwrap().as_mut().unwrap().pause=Some(pause);
+                let (cancel,_guard)=state.job().await?;
+                let receiver=_guard.enable_pause();
                 let operation = async {
                     if repair { launcher.repair(&id,&cancel,&sink).await }
                     else { launcher.install(&id,&cancel,&sink).await }
                 };
+                let operation = nekocrate_core::loader::with_pause(receiver.clone(), operation);
                 pausable::run(operation,&cancel,receiver).await?;
                 json!(true)
             },
-            Request::Launch{id}=>{let (cancel,_guard)=state.job().map_err(anyhow::Error::msg)?;json!(launcher.launch(&id,&cancel,sink).await?)},
+            Request::Launch{id}=>{let (cancel,_guard)=state.job().await?;json!(launcher.launch(&id,&cancel,sink).await?)},
             Request::Stop{id}=>{launcher.stop_game(&id)?;json!(true)},
-            Request::Cancel=>{if let Some(job)=state.job.lock().unwrap().as_ref(){job.cancel.cancel();}json!(true)},
+            Request::Cancel=>{state.jobs.cancel_task();json!(true)},
             Request::Pause | Request::Resume=>{
-                let paused=matches!(request,Request::Pause);
-                let slot=state.job.lock().unwrap();
-                let control=slot.as_ref().and_then(|job|job.pause.as_ref()).ok_or_else(||anyhow::anyhow!("当前没有可暂停的下载任务"))?;
-                control.send(paused).map_err(|_|anyhow::anyhow!("下载任务已结束"))?;
+                state.jobs.set_paused(matches!(request,Request::Pause))?;
                 json!(true)
             },
-            Request::BeginLogin=>{let c=launcher.begin_login().await?;let value=json!(c);*state.challenge.lock().unwrap()=Some(c);value},
-            Request::WaitLogin=>{let (cancel,_guard)=state.job().map_err(anyhow::Error::msg)?;let c=state.challenge.lock().unwrap().take().ok_or_else(||anyhow::Error::msg("请先获取登录验证码"))?;json!(launcher.finish_login(c,&cancel).await?)},
-            Request::RefreshAccount=>{let (_cancel,_guard)=state.job().map_err(anyhow::Error::msg)?;json!(launcher.refresh_account().await?)},
+            Request::BeginLogin{session_id}=>{
+                let guard=state.jobs.begin_login(session_id.clone()).await?;
+                let c=guard.login(launcher.begin_login()).await?;
+                let mut value=json!(c);
+                value["session_id"]=json!(session_id);
+                guard.store_challenge(c)?;
+                value
+            },
+            Request::WaitLogin{session_id}=>{
+                let (challenge,guard)=state.jobs.wait_login(&session_id)?;
+                json!(guard.login(launcher.finish_login(challenge,&guard.cancel)).await?)
+            },
+            Request::CancelLogin{session_id}=>{state.jobs.cancel_login(&session_id).await;json!(true)},
+            Request::RefreshAccount=>{let (_cancel,_guard)=state.job().await?;json!(launcher.refresh_account().await?)},
             Request::AccountSkin{id}=>json!(launcher.account_skin(&id).await?),
-            Request::SelectAccount{id}=>{launcher.select_account(&id)?;json!(true)},
-            Request::RemoveAccount{id}=>{launcher.remove_account(&id)?;json!(true)},
+            Request::SelectAccount{id}=>{let (_cancel,_guard)=state.job().await?;launcher.select_account(&id)?;json!(true)},
+            Request::RemoveAccount{id}=>{let (_cancel,_guard)=state.job().await?;launcher.remove_account(&id)?;json!(true)},
             Request::OpenFolder{id}=>{let path=match id{Some(id)=>launcher.game_dir(&id)?,None=>launcher.root().to_owned()};app.opener().open_path(path.to_string_lossy(),None::<&str>)?;json!(true)},
             Request::InstanceDirectory{id}=>json!(launcher.game_dir(&id)?),
         })
     }.await;
-    result.map_err(|e| format!("{e:#}"))
+    result.map_err(|error| {
+        let error = nekocrate_core::network::explain_error(error);
+        if let Some(operation) = diagnostic_operation
+            && !error.to_string().contains("取消")
+            && let Err(log_error) =
+                nekocrate_core::diagnostics::record_error(launcher.root(), operation, &error)
+        {
+            eprintln!("Could not write launcher diagnostics: {log_error}");
+        }
+        nekocrate_core::diagnostics::redact(&format!("{error:#}"))
+    })
 }
 
 pub fn run() {
@@ -345,6 +494,7 @@ pub fn run() {
         return;
     }
     tauri::Builder::default()
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -352,8 +502,7 @@ pub fn run() {
             let launcher = Launcher::open(None)?;
             app.manage(AppState {
                 launcher,
-                job: Arc::new(Mutex::new(None)),
-                challenge: Mutex::new(None),
+                jobs: jobs::Jobs::default(),
                 updater: updater::UpdateManager::default(),
                 folder_scan: folder_scan::FolderScanManager::default(),
             });
@@ -367,9 +516,7 @@ pub fn run() {
                 let state = app.state::<AppState>();
                 state.launcher.stop_all();
                 state.folder_scan.cancel(None);
-                if let Some(job) = state.job.lock().unwrap().as_ref() {
-                    job.cancel.cancel();
-                }
+                state.jobs.cancel_all();
             }
         });
 }

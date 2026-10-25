@@ -50,34 +50,34 @@ test("Fabric selection ignores late responses and stops submitting unsupported v
     ui.form.loader = "fabric";
     await flush();
     const first = deferred();
-    fixture.handlers.fabric_versions = () => first.promise;
-    const pending = ui.loadFabricVersions();
+    fixture.handlers.loader_versions = () => first.promise;
+    const pending = ui.loadLoaderVersions();
     ui.form.version = "1.20.1";
     await flush();
-    fixture.handlers.fabric_versions = () => [];
-    await ui.loadFabricVersions();
+    fixture.handlers.loader_versions = () => [];
+    await ui.loadLoaderVersions();
     first.resolve([{ version: "0.99.1", stable: true }]);
     await pending;
-    assert.equal(ui.form.fabric_version, "");
+    assert.equal(ui.form.loader_version, "");
     assert.equal(ui.form.loader, "vanilla");
-    assert.equal(ui.fabricUnavailable.value, false);
-    assert.equal(ui.fabricNotice.value, "此游戏版本暂无可用的 Fabric");
+    assert.equal(ui.loaderUnavailable.value, false);
+    assert.equal(ui.loaderNotice.value, "此游戏版本暂无可用的加载器 · Fabric");
     await ui.submit();
     assert.equal(
-      fixture.calls.some((r) => r.op === "add_fabric_version"),
+      fixture.calls.some((r) => r.op === "add_loader_version"),
       false,
     );
-    fixture.handlers.fabric_versions = () => [
+    fixture.handlers.loader_versions = () => [
       { version: "0.17.0-beta.1", stable: false },
       { version: "0.16.14", stable: true },
     ];
     ui.form.loader = "fabric";
-    await ui.loadFabricVersions();
-    assert.equal(ui.form.fabric_version, "0.16.14");
-    assert.equal(ui.fabricUnavailable.value, false);
+    await ui.loadLoaderVersions(true);
+    assert.equal(ui.form.loader_version, "0.16.14");
+    assert.equal(ui.loaderUnavailable.value, false);
     ui.modal.value = null;
     await flush();
-    assert.equal(ui.form.fabric_version, "");
+    assert.equal(ui.form.loader_version, "");
   } finally {
     dispose();
   }
@@ -94,14 +94,14 @@ test("Fabric creation hands its new child version to the existing download workf
     ui.newVersion(instance);
     ui.form.loader = "fabric";
     await flush();
-    fixture.handlers.fabric_versions = () => [
+    fixture.handlers.loader_versions = () => [
       { version: "0.16.14", stable: true },
     ];
-    await ui.loadFabricVersions();
+    await ui.loadLoaderVersions();
     const child = "fabric-loader-0.16.14-1.21.1";
-    fixture.handlers.add_fabric_version = (request) => {
+    fixture.handlers.add_loader_version = (request) => {
       assert.equal(request.game_version, "1.21.1");
-      assert.equal(request.loader_version, "0.16.14");
+      assert.equal(request.loader.version, "0.16.14");
       instance.versions.push({
         id: child,
         installed: false,
@@ -122,7 +122,7 @@ test("Fabric creation hands its new child version to the existing download workf
     assert.equal(task.status, "done");
     assert.deepEqual(
       task.workflow.steps.map((step) => step.id),
-      ["metadata", "files", "natives", "java", "finalize"],
+      ["metadata", "loader", "files", "natives", "java", "finalize"],
     );
     assert.equal(
       fixture.calls.some((r) => r.op === "add_version"),
@@ -161,6 +161,66 @@ test("unexpected exits automatically show logs; normal exits and manual stops st
         .snapshot()
         .some((line) => line.message.includes("transformer failed")),
     );
+  } finally {
+    dispose();
+  }
+});
+
+test("Forge and NeoForge use the chosen kind, recommended build and common installer", async () => {
+  const { fixture, context: ui, dispose } = await settingsFixture();
+  try {
+    ui.manifest.value = {
+      latest: { release: "1.20.1" },
+      versions: [{ id: "1.20.1", type: "release", url: "", sha1: "" }],
+    };
+    const instance = fixture.state.database.instances[0];
+    ui.newVersion(instance);
+    const old = deferred();
+    fixture.handlers.loader_versions = ({ kind, game_version }) => {
+      assert.equal(game_version, "1.20.1");
+      if (kind === "forge") return old.promise;
+      assert.equal(kind, "neoforge");
+      return [{ version: "47.1.106", stable: true }];
+    };
+    ui.form.loader = "forge";
+    const loading = ui.loadLoaderVersions();
+    ui.form.loader = "neoforge";
+    assert.equal(ui.canSubmitDownload.value, false);
+    await ui.loadLoaderVersions();
+    old.resolve([{ version: "47.4.4", recommended: true }]);
+    await loading;
+    assert.equal(ui.form.loader, "neoforge");
+    assert.equal(ui.form.loader_version, "47.1.106");
+    fixture.handlers.loader_versions = ({ kind }) => {
+      assert.equal(kind, "forge");
+      return [
+        { version: "47.4.28", recommended: false },
+        { version: "47.4.4", recommended: true },
+      ];
+    };
+    ui.form.loader = "forge";
+    await ui.loadLoaderVersions();
+    assert.equal(ui.form.loader_version, "47.4.4");
+    fixture.handlers.add_loader_version = ({ id, game_version, loader }) => {
+      assert.equal(id, instance.id);
+      assert.deepEqual(loader, { kind: "forge", version: "47.4.4" });
+      const version = {
+        id: "1.20.1-forge-47.4.4",
+        minecraft_version: game_version,
+        loader,
+        installed: false,
+      };
+      instance.versions.push(version);
+      instance.selected_version = version.id;
+      return structuredClone(instance);
+    };
+    fixture.handlers.install = () => true;
+    await ui.submitDownload();
+    const task = ui.tasks.value.find(
+      (t) => t.version_id === "1.20.1-forge-47.4.4",
+    );
+    assert.equal(task.status, "done");
+    assert.ok(task.workflow.steps.some((step) => step.id === "loader"));
   } finally {
     dispose();
   }

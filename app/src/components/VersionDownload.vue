@@ -1,10 +1,9 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import { Download, LoaderCircle, X } from "lucide-vue-next";
-import DownloadTarget from "./DownloadTarget.vue";
+import DownloadDestination from "./DownloadDestination.vue";
 import VersionBrowser from "./VersionBrowser.vue";
 import VersionCube from "./VersionCube.vue";
-import InstanceLocation from "./InstanceLocation.vue";
 import GlassSelect from "./GlassSelect.vue";
 import { versionCategories, versionCategory } from "../versionCatalog";
 import { t } from "../i18n";
@@ -16,14 +15,16 @@ const props = defineProps<{
   manifest: VersionManifest | null;
   version: string;
   loader: string;
-  fabricVersion: string;
-  fabricOptions: readonly { value: string; label: string; detail?: string }[];
-  fabricLoading: boolean;
+  loaderVersion: string;
+  loaderOptions: readonly { value: string; label: string; detail?: string }[];
+  loaderLoading: boolean;
+  unavailableLoaders: readonly string[];
   versionsLoading: boolean;
   disabled: boolean;
   submitting: boolean;
   canSubmit: boolean;
   name: string;
+  icon: number;
   location: string;
   directory: string;
   root: string;
@@ -33,8 +34,11 @@ const props = defineProps<{
 defineEmits<{
   "update:version": [value: string];
   "update:loader": [value: string];
-  "update:fabricVersion": [value: string];
+  "update:loaderVersion": [value: string];
   "update:name": [value: string];
+  "update:icon": [value: number];
+  importPack: [];
+  retryLoader: [];
   "update:location": [value: string];
   target: [id: string | null];
   refresh: [];
@@ -42,15 +46,27 @@ defineEmits<{
   submit: [];
   close: [];
 }>();
+const destination = ref<InstanceType<typeof DownloadDestination>>();
+const loaderKinds = [
+  { id: "vanilla", label: "原版" },
+  { id: "fabric", label: "Fabric" },
+  { id: "forge", label: "Forge" },
+  { id: "neoforge", label: "NeoForge" },
+];
 const selected = computed(() =>
   props.manifest?.versions.find((item) => item.id === props.version),
 );
 const selectionDescription = computed(() => {
   if (!selected.value) return t("请选择版本");
   const loader =
-    props.loader === "fabric"
-      ? ["Fabric", props.fabricVersion].filter(Boolean).join(" ")
-      : t("原版");
+    props.loader === "vanilla"
+      ? t("原版")
+      : [
+          loaderKinds.find((item) => item.id === props.loader)?.label,
+          props.loaderVersion,
+        ]
+          .filter(Boolean)
+          .join(" ");
   return `${selected.value.id} · ${loader}`;
 });
 const selectionCategory = computed(() =>
@@ -70,11 +86,22 @@ const selectionColor = computed(() =>
       <h2 class="dialog-heading" tabindex="-1" autofocus>
         {{ t("下载游戏版本") }}
       </h2>
-      <DownloadTarget
+      <DownloadDestination
+        ref="destination"
         :target="target"
         :instances="instances"
-        :disabled="disabled || picking"
-        @select="$emit('target', $event)"
+        :name="name"
+        :icon="icon"
+        :location="location"
+        :directory="directory"
+        :root="root"
+        :disabled="disabled"
+        :picking="picking"
+        @target="$emit('target', $event)"
+        @update:name="$emit('update:name', $event)"
+        @update:icon="$emit('update:icon', $event)"
+        @update:location="$emit('update:location', $event)"
+        @browse="$emit('browse')"
       />
       <button
         type="button"
@@ -86,7 +113,10 @@ const selectionColor = computed(() =>
         <X :size="16" />
       </button>
     </header>
-    <form class="version-download-form" @submit.prevent="$emit('submit')">
+    <form
+      class="version-download-form"
+      @submit.prevent="destination?.finishRename() && $emit('submit')"
+    >
       <div class="version-download-body">
         <VersionBrowser
           :model-value="version"
@@ -97,75 +127,60 @@ const selectionColor = computed(() =>
           @refresh="$emit('refresh')"
         />
         <aside class="download-options" :aria-label="t('安装选项')">
-          <div class="download-loader toggle-row">
-            <span id="download-fabric-label">Fabric</span>
-            <div class="download-fabric-controls">
-              <Transition name="fabric-choice" mode="out-in">
+          <div class="download-loader">
+            <span class="loader-label">{{ t("加载器") }}</span>
+            <div class="loader-kinds" role="group" :aria-label="t('加载器')">
+              <button
+                v-for="item in loaderKinds"
+                :key="item.id"
+                type="button"
+                class="loader-kind"
+                :class="{ selected: loader === item.id }"
+                :aria-pressed="loader === item.id"
+                :disabled="
+                  disabled || !selected || unavailableLoaders.includes(item.id)
+                "
+                @click="
+                  loader === item.id && item.id !== 'vanilla'
+                    ? $emit('retryLoader')
+                    : $emit('update:loader', item.id)
+                "
+              >
+                {{ t(item.label) }}
+              </button>
+            </div>
+            <Transition name="loader-options">
+              <div v-if="loader !== 'vanilla'" class="loader-version-row">
+                <span class="loader-label">{{ t("版本") }}</span>
+                <LoaderCircle
+                  v-if="loaderLoading"
+                  :size="14"
+                  class="spin"
+                  :aria-label="t('正在获取加载器版本…')"
+                />
                 <GlassSelect
-                  v-if="loader === 'fabric' && fabricOptions.length"
-                  id="download-fabric"
-                  :model-value="fabricVersion"
-                  :options="fabricOptions"
-                  :disabled="disabled || fabricLoading"
+                  v-else-if="loaderOptions.length"
+                  id="download-loader-version"
+                  :model-value="loaderVersion"
+                  :options="loaderOptions"
+                  :disabled="disabled"
                   floating
                   compact
                   literal-labels
-                  @update:model-value="$emit('update:fabricVersion', $event)"
+                  @update:model-value="$emit('update:loaderVersion', $event)"
                 />
-                <span
-                  v-else-if="loader === 'fabric' && fabricLoading"
-                  class="download-fabric-loading"
-                  role="status"
-                  :aria-label="t('正在获取 Fabric 版本…')"
-                >
-                  <LoaderCircle :size="14" class="spin" />
-                </span>
-              </Transition>
-            </div>
-            <input
-              type="checkbox"
-              role="switch"
-              aria-labelledby="download-fabric-label"
-              :checked="loader === 'fabric'"
-              :disabled="disabled || !selected"
-              @change="
-                $emit(
-                  'update:loader',
-                  ($event.target as HTMLInputElement).checked
-                    ? 'fabric'
-                    : 'vanilla',
-                )
-              "
-            />
-          </div>
-          <Transition name="loader-options">
-            <div v-if="!target" class="download-create">
-              <label class="field">
-                {{ t("实例名称") }}
-                <input
-                  :value="name"
+                <button
+                  v-else
+                  type="button"
+                  class="text-button"
                   :disabled="disabled"
-                  required
-                  maxlength="80"
-                  @input="
-                    $emit(
-                      'update:name',
-                      ($event.target as HTMLInputElement).value,
-                    )
-                  "
-                />
-              </label>
-              <InstanceLocation
-                :model-value="location"
-                :directory="directory"
-                :root="root"
-                :disabled="disabled || picking"
-                :picking="picking"
-                @update:model-value="$emit('update:location', $event)"
-                @browse="$emit('browse')"
-              />
-            </div>
-          </Transition>
+                  @click="$emit('retryLoader')"
+                >
+                  {{ t("重试") }}
+                </button>
+              </div>
+            </Transition>
+          </div>
           <span v-if="running" class="download-detail" role="status">{{
             t("请先停止此实例的游戏")
           }}</span>
@@ -182,11 +197,11 @@ const selectionColor = computed(() =>
         </div>
         <button
           type="button"
-          class="button"
-          :disabled="submitting"
-          @click="$emit('close')"
+          class="text-button"
+          :disabled="disabled"
+          @click="$emit('importPack')"
         >
-          {{ t("取消") }}
+          {{ t("导入") }}
         </button>
         <button type="submit" class="button primary" :disabled="!canSubmit">
           <LoaderCircle v-if="submitting" :size="16" class="spin" /><Download
@@ -245,42 +260,60 @@ const selectionColor = computed(() =>
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.download-loader.toggle-row {
-  margin-bottom: 0;
-  min-height: 38px;
-  gap: 10px;
-  font-size: 13px;
-}
-.download-loader > span {
-  flex-shrink: 0;
-}
-.download-fabric-controls {
+.download-loader {
+  position: relative;
   display: flex;
-  align-items: center;
-  flex: 1;
-  min-width: 0;
-  min-height: 36px;
+  flex-direction: column;
+  gap: 14px;
 }
-.download-fabric-controls .source-select {
-  width: 100%;
-  min-width: 0;
-}
-.download-fabric-loading {
-  display: flex;
-  justify-content: flex-end;
-  width: 100%;
+.loader-label {
+  font-size: 11px;
   color: var(--muted);
 }
-.fabric-choice-enter-active,
-.fabric-choice-leave-active {
-  transition:
-    opacity 160ms var(--motion-ease),
-    transform 180ms var(--motion-ease);
+.loader-kinds {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
-.fabric-choice-enter-from,
-.fabric-choice-leave-to {
-  opacity: 0;
-  transform: translateX(4px);
+.loader-kind {
+  padding: 10px 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font: 500 12px/18px var(--mono);
+  cursor: pointer;
+  transition:
+    color 180ms,
+    text-shadow 180ms,
+    border-color 180ms;
+}
+.loader-kind:hover,
+.loader-kind.selected {
+  color: var(--ink);
+  text-shadow: 0 0 12px var(--accent);
+}
+.loader-kind.selected {
+  border-color: var(--line);
+}
+.loader-kind:disabled {
+  opacity: 0.3;
+  cursor: default;
+  text-shadow: none;
+}
+.loader-kind:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 2px;
+}
+.loader-version-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 32px;
+}
+.loader-version-row .source-select {
+  min-width: 0;
+  flex: 1;
 }
 .download-detail {
   display: block;
@@ -335,8 +368,8 @@ const selectionColor = computed(() =>
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .fabric-choice-enter-active,
-  .fabric-choice-leave-active {
+  .loader-options-enter-active,
+  .loader-options-leave-active {
     transition: none;
   }
   .loader-options-enter-active,

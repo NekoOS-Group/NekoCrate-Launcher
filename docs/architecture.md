@@ -9,6 +9,7 @@ UI 通过单个带标签的 IPC Request 枚举调用 Rust。所有文件路径�
 - `auth`：微软设备授权、Xbox/Minecraft 令牌交换、权益检查与系统凭据存储。
 - `skin`：提取 Minecraft 档案中的活动皮肤，限制官方纹理地址、文件大小与 PNG 尺寸，缓存公开纹理；请求不携带账户令牌，不跟随重定向。
 - `download`：有界并发、逐来源重试、取消、哈希验证、内容寻址缓存、临时文件提交。
+- `diagnostics`：持久化启动器操作失败，记录带时区的系统时间、版本、平台和脱敏错误链；单文件约 1 MiB，保留三份轮转文件。Minecraft 进程输出仍使用原来的游戏日志。
 - `minecraft`：官方版本元数据、OS/架构/feature 规则、资源与库安装、原生文件解压、参数展开。
 - `java`：运行时发现、主版本检查、Adoptium 下载与归档提取。
 - `storage`：数据库保存、路径约束、实例文件复制、账户配置排除。
@@ -23,6 +24,7 @@ UI 通过单个带标签的 IPC Request 枚举调用 Rust。所有文件路径�
   database.json              设置、实例、公开账户档案；无令牌
   database.json.bak          上一次元数据快照
   launcher.lock              跨进程独占锁
+  logs/launcher.log          更新、下载、启动与认证失败诊断；包含系统时间，敏感字段脱敏
   metadata/                 官方 manifest 与带校验的版本 JSON
   cache/objects/sha1|sha256/ 可验证内容缓存
   cache/verified-files.json 已验证文件的哈希、大小、时间与文件身份记录
@@ -106,11 +108,18 @@ CLI 显式复制实例时才复制整个游戏目录和版本列表到新的托�
 
 加载器应在版本解析/安装计划层加入，不在 UI 中拼启动命令。整合包更新应提供独立的文件清单、差异计划和回滚协议。外置认证应实现独立提供方，不改变微软权益验证语义。
 
-本原型未提供任意启动前 shell 命令。已有目录中的启动配置作为用户选择的本地配置读取，支持原版、Fabric、Forge、NeoForge；不执行 shell 字符串。原版安装仍通过官方目录校验元数据，Fabric 安装使用官方 Meta API，Forge / NeoForge 安装器处理步骤尚未实现。
+本原型未提供任意启动前 shell 命令。已有目录中的启动配置作为用户选择的本地配置读取，支持原版、Fabric、Forge、NeoForge；不执行 shell 字符串。原版安装仍通过官方目录校验元数据，Fabric 安装使用官方 Meta API，Forge / NeoForge 从官方仓库取得并校验安装器，解析客户端处理步骤，以独立参数启动 Java，不执行 shell 字符串。
 
 `version.rs` 递归解析 `inheritsFrom`（限制深度并拒绝循环及越界路径），合并参数、依赖、下载与日志配置，保留客户端 JAR 所属的基础版本；按 Maven 坐标补全旧版与 Fabric 依赖路径。HMCL 合并后的 JSON 直接读取，不重复应用 patches；额外识别 `primary_jar_name`、游戏版本标注和原隔离工作目录。发现版本时快速检查启动文件，启动前再次检查并解压本平台 natives；关联、扫描和解析不改写原版本 JSON。
 
 `fabric.rs` 获取游戏版本对应的加载器列表并缓存一小时，下载官方 profile；缺少 SHA-1 的依赖通过对应 Maven sidecar 获取校验值，再交给已有下载、校验和内容缓存。基础版本 JSON/JAR 保持独立，Fabric profile 保留继承关系；安装、暂停、恢复、修复沿用同一文件计划。已安装 Forge / NeoForge 直接解析本地配置，不在官方目录中搜索整合包名。
+
+`loader/installer.rs` 提供普通版本与整合包共用的安装核心；输入基础游戏版本、加载器及目标 ID，不依赖整合包对象。旧 Forge 从安装器提取通用 JAR，现代 Forge / NeoForge 执行客户端 processors 并校验声明的输出。处理器只需的原版 client JAR 单独下载；资源及完整游戏依赖在生成加载器配置后统一安装。只有全部成功才发布最终版本 JSON。
+
+`loader/mod.rs` 将普通加载器安装选择、完成状态和进度保存在目标版本的 `.nekocrate/loader.json`，扫描与关联目录时可恢复未完成版本；新建版本建立独立的 `mods/config/saves`。同名且没有匹配安装记录的目录拒绝覆盖。暂停通知通过任务局部上下文传给处理器监控任务，即使外围下载 future 暂停轮询，Java 子进程仍会被终止；恢复时仅重新执行被打断的步骤。普通网络传输仍保留原 future 和续传状态。安装输出的 `overall_progress` 与文件字节进度独立，避免单个阶段结束令整体进度提前达到 100%。
+
+`loader/catalog.rs` 使用 Forge 的 [Maven 目录](https://files.minecraftforge.net/net/minecraftforge/forge/maven-metadata.json)和 [promotions](https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json)，以及 NeoForged Maven 的公开版本接口（`/api/maven/versions/releases/net/neoforged/neoforge`，1.20.1 使用 `net/neoforged/forge`）。保留 Forge 分支后缀；NeoForge 分别处理旧编号、26.x 的补丁编号和快照后缀，安装时再核对安装器内的 Minecraft 版本。目录磁盘缓存一小时，刷新失败可复用旧目录，取消不回退为成功。前端 `loaderCatalog.ts` 按游戏版本与加载器缓存列表、合并相同请求、记住本次会话的选择；过期列表保持显示，在后台刷新。
+
 
 Java 自动匹配考虑版本、架构与模组约束：旧 macOS Intel natives 使用 x86_64 Java；现代加载器自动选择完整 JDK。精简 Temurin JRE 的 Java 类缺少局部变量表，会使 Preloading Tricks 3.5.6 的 ResolverTransformer 失败，因此不用于现代加载器自动匹配。`java_compatibility.rs` 使用版本配置的 `compatibleJavaMajors` 或明确核实的加载器范围，结合 ASM 字节码上限、Fabric/Forge/NeoForge 模组的 Java 约束以及嵌套 JAR 检查，优先复用兼容范围内最高版本的本地 Java；确实需要下载时才选择该范围的最高版本。检查在后台执行，以文件路径、大小和修改时间缓存模组结果，并限制嵌套层数及解压总量。最低版本声明本身不证明支持任意更新 JVM，模组信息不完整或依赖覆盖尚未解析时退回游戏声明版本。现有核实规则范围有限，不能保证任意整合包都能跨 Java 主版本。手动指定路径也会拒绝超过已知 ASM/LaunchWrapper 上限的 Java；旧 LaunchWrapper 保持 Java 8。
 

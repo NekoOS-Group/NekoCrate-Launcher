@@ -91,7 +91,11 @@ mod tests {
             .unwrap();
         let game = parent.join(".minecraft").canonicalize().unwrap();
         assert_eq!(instance.game_directory.as_ref(), Some(&game));
-        assert_eq!(instance.icon, Some(0));
+        assert!(
+            instance
+                .icon
+                .is_some_and(|icon| icon < crate::model::INSTANCE_ICON_COUNT)
+        );
         assert!(instance.versions.is_empty());
         assert!(
             !launcher
@@ -106,6 +110,8 @@ mod tests {
         drop(launcher);
         let launcher = Launcher::open(Some(root)).unwrap();
         assert_eq!(launcher.game_dir(&instance.id).unwrap(), game);
+        assert_eq!(launcher.instance(&instance.id).unwrap().icon, instance.icon);
+        assert_eq!(launcher.instance(&managed.id).unwrap().icon, managed.icon);
         fs::write(game.join("options.txt"), b"new game settings").unwrap();
         launcher.delete_instance(&instance.id).unwrap();
         assert_eq!(

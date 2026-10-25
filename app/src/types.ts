@@ -44,6 +44,7 @@ export interface JavaInfo {
   major: number;
   version: string;
   arch?: string;
+  jdk?: boolean;
 }
 export type MemoryMode = "auto" | "recommended" | "minimum" | "custom";
 export interface MemoryOptions {
@@ -77,21 +78,59 @@ export interface InstanceVersion {
   name?: string | null;
   minecraft_version?: string;
   loader?: { kind: string; version: string };
+  modpack?: boolean;
   installed: boolean;
   download_progress?: number;
 }
-export type ContentKind = "mods" | "datapacks" | "resourcepacks" | "saves";
-export type VersionContentCounts = Record<ContentKind, number>;
+export type ContentKind =
+  "mods" | "datapacks" | "resourcepacks" | "saves" | "unresolved";
+export type VersionContentTab = ContentKind | "libraries";
+export type VersionContentCounts = Record<VersionContentTab, number>;
 export interface LocalContentFile {
   file_name: string;
   name: string;
   version: string | null;
   enabled: boolean;
   size: number;
+  mod_ids: string[];
+  declaration?: {
+    key: string;
+    source: string;
+    project: number | null;
+    file: number | null;
+    path: string | null;
+    status:
+      "unresolved" | "pending" | "partial" | "local" | "manual" | "skipped";
+    downloaded: number;
+    total: number;
+    optional: boolean;
+  };
 }
 export interface VersionContent {
   directory: string;
   files: LocalContentFile[];
+}
+export interface ContentLoadOptions {
+  onProgress?: (content: VersionContent) => void;
+  signal?: AbortSignal;
+  fresh?: boolean;
+}
+export interface ContentMetadata {
+  path: string;
+  size: number | null;
+  sources: {
+    source: string;
+    revealable: boolean;
+    title: string | null;
+    description: string | null;
+    fields: {
+      label: string;
+      value: string;
+      format: "translate" | "timestamp" | null;
+    }[];
+    dependencies: { id: string; requirement: string; relation: string }[];
+    issue: string | null;
+  }[];
 }
 export interface FabricLoaderVersion {
   version: string;
@@ -128,6 +167,7 @@ export interface LauncherEvent {
   total: number;
   bytes: number;
   total_bytes?: number;
+  overall_progress?: number;
   reset_progress?: boolean;
   step?: string;
   files?: DownloadFile[];
@@ -156,12 +196,14 @@ export interface WorkflowState {
   fileOrder: Map<string, FileOrder>;
 }
 export interface Challenge {
+  session_id: string;
   user_code: string;
   verification_uri: string;
   expires_in: number;
   interval: number;
 }
 export interface Task {
+  modpack_status?: ModpackStatus;
   id: number;
   instance_id: string | null;
   version_id: string | null;
@@ -174,4 +216,71 @@ export interface Task {
   indeterminate: boolean;
   started: string;
   workflow: WorkflowState;
+}
+
+export interface MetadataDocument {
+  id: string;
+  name: string;
+  kind: string;
+  path: string;
+  json: string | null;
+  issue: string | null;
+  fields: { label: string; value: string }[];
+  sections: {
+    label: string;
+    target: VersionContentTab | null;
+    note: string | null;
+    entries: { name: string; detail: string | null }[];
+  }[];
+}
+export interface VersionMetadata {
+  directory: string;
+  game_directory: string;
+  working_directory: string | null;
+  minecraft_version: string;
+  loader: { kind: string; version: string } | null;
+  main_class: string | null;
+  java_major: number | null;
+  documents: MetadataDocument[];
+  libraries: { name: string; detail: string | null }[];
+  issue: string | null;
+}
+export interface VersionStorage {
+  directory: string;
+  relative: string;
+  exists: boolean;
+  files: {
+    name: string;
+    relative: string;
+    directory: boolean;
+    symlink: boolean;
+    size: number;
+  }[];
+}
+
+export interface ModpackFile {
+  key: string;
+  path: string | null;
+  optional: boolean;
+  size: number;
+  manual_url: string | null;
+  project: number | null;
+  file: number | null;
+}
+export interface ModpackPreview {
+  pack: {
+    name: string;
+    version: string;
+    format: string;
+    minecraft: string;
+    loader: { kind: string; version: string } | null;
+    files: ModpackFile[];
+  };
+  curseforge_key_configured: boolean;
+}
+export interface ModpackStatus {
+  name: string;
+  missing: ModpackFile[];
+  needs_key: boolean;
+  completed: boolean;
 }

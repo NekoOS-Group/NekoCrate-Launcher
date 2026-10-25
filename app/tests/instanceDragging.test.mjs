@@ -8,7 +8,7 @@ import {
   flush,
 } from "./helpers/appSettingsFixture.mjs";
 
-function draggingFixture(ids = ["a", "b"]) {
+function draggingFixture(ids = ["a", "b"], grid = false) {
   const previous = Object.fromEntries(
     [
       "window",
@@ -88,20 +88,55 @@ function draggingFixture(ids = ["a", "b"]) {
     clientWidth: 200,
     getBoundingClientRect: () => ({
       left: 100,
-      right: 300,
+      right: grid ? 640 : 300,
       top: 500,
       bottom: 564,
-      width: 200,
+      width: grid ? 540 : 200,
     }),
     querySelectorAll: () =>
-      instances.value.map((i, index) => ({
-        dataset: { instanceId: i.id },
-        offsetLeft: index * 60,
-        offsetTop: 0,
-        offsetWidth: 56,
-        offsetHeight: 56,
-      })),
+      (grid ? ui.displayInstances.value.slice(0, 8) : instances.value).map(
+        (i, index) => ({
+          dataset: { instanceId: i.id },
+          offsetLeft: index * 60,
+          offsetTop: 0,
+          offsetWidth: 56,
+          offsetHeight: 56,
+        }),
+      ),
   };
+  if (grid) {
+    ui.overflow.value = {
+      scrollTop: 0,
+      scrollLeft: 0,
+      clientHeight: 160,
+      getBoundingClientRect: () => ({
+        left: 100,
+        right: 640,
+        top: 300,
+        bottom: 460,
+        width: 540,
+        height: 160,
+      }),
+      querySelectorAll: () =>
+        ui.displayInstances.value.slice(8).map((item, index) => ({
+          dataset: { instanceId: item.id },
+          offsetLeft: (index % 9) * 60,
+          offsetTop: Math.floor(index / 9) * 80,
+          offsetWidth: 56,
+          offsetHeight: 56,
+        })),
+    };
+    ui.toggle.value = {
+      getBoundingClientRect: () => ({
+        left: 45,
+        right: 89,
+        top: 500,
+        bottom: 544,
+        width: 44,
+        height: 44,
+      }),
+    };
+  }
   ui.trash.value = {
     getBoundingClientRect: () => ({
       left: 800,
@@ -311,5 +346,66 @@ test("App removes by ID, selects a neighbor, and keeps the instance on IPC failu
     assert.equal(ui.selectedInstanceId.value, "");
   } finally {
     dispose();
+  }
+});
+
+test("cross-region drags keep eight visible tiles and commit or cancel without losing instances", async () => {
+  for (const source of ["b", "j"]) {
+    for (const commit of [true, false]) {
+      const f = draggingFixture("abcdefghijk".split(""), true);
+      try {
+        f.ui.expanded.value = true;
+        f.start(source);
+        const [x, y] = source === "b" ? [120, 330] : [620, 528];
+        f.track(x, y);
+        await flush();
+        const preview = f.ui.displayInstances.value.map((i) => i.id);
+        assert.equal(preview.indexOf(source), source === "b" ? 8 : 7);
+        f.track(x, y);
+        await flush();
+        assert.deepEqual(
+          f.ui.displayInstances.value.map((i) => i.id),
+          preview,
+        );
+        if (commit) f.release(x, y);
+        else f.ui.cancel();
+        await flush();
+        assert.deepEqual(
+          f.moves,
+          commit ? [[source, source === "b" ? "j" : "h"]] : [],
+        );
+        assert.equal(f.ui.draggedId.value, null);
+        assert.equal(f.instances.value.length, 11);
+        assert.equal(f.frames.size, 0);
+      } finally {
+        f.dispose();
+      }
+    }
+  }
+});
+
+test("hovering the arrow expands overflow during dragging; it collapses when only nine remain", async () => {
+  const f = draggingFixture("abcdefghij".split(""), true);
+  const previous = Date.now;
+  let now = 1000;
+  Date.now = () => now;
+  try {
+    f.start("a");
+    f.track(65, 522);
+    assert.equal(f.ui.expanded.value, false);
+    now += 279;
+    f.track(65, 522);
+    assert.equal(f.ui.expanded.value, false);
+    now++;
+    f.track(65, 522);
+    assert.equal(f.ui.expanded.value, true);
+    f.ui.cancel();
+    await flush();
+    f.instances.value = f.instances.value.slice(0, 9);
+    await flush();
+    assert.equal(f.ui.expanded.value, false);
+  } finally {
+    Date.now = previous;
+    f.dispose();
   }
 });

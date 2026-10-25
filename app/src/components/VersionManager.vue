@@ -1,12 +1,24 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onBeforeUpdate,
+  ref,
+  shallowRef,
+  watch,
+} from "vue";
 import {
   Box,
+  Play,
   Check,
   FileCode2,
+  FileQuestion,
+  Braces,
   Image,
   LoaderCircle,
-  Map,
+  LibraryBig,
+  Map as MapIcon,
   Package,
   Pencil,
   RefreshCw,
@@ -14,22 +26,60 @@ import {
   Trash2,
   X,
 } from "lucide-vue-next";
-import InstanceIcon from "./InstanceIcon.vue";
-import { resolveInstanceIcon } from "../instanceIcons";
+import VersionMetadataPanel from "./VersionMetadataPanel.vue";
+import VersionContentItem from "./VersionContentItem.vue";
+import InstanceTarget from "./InstanceTarget.vue";
+import AnimatedCount from "./AnimatedCount.vue";
+import { useHorizontalLayout } from "../useHorizontalLayout";
+import { listRevealStyle, leaveList, resetListLeave } from "../listMotion";
 import { t } from "../i18n";
-import { versionDescription, versionName } from "../versionDescription";
+import { versionName } from "../versionDescription";
 import type {
   ContentKind,
+  ContentLoadOptions,
+  LocalContentFile,
+  ContentMetadata,
   Instance,
   VersionContent,
   VersionContentCounts,
+  VersionContentTab,
+  VersionMetadata,
 } from "../types";
 
 const props = defineProps<{
   instance: Instance;
+  instances: readonly Instance[];
   locked: boolean;
-  loadContent: (version: string, kind: ContentKind) => Promise<VersionContent>;
+  downloading?: boolean;
+  downloadVersion?: string;
+  prefetchContent?: (version: string, signal: AbortSignal) => Promise<void>;
+  loadContent: (
+    version: string,
+    kind: ContentKind,
+    options?: ContentLoadOptions,
+  ) => Promise<VersionContent>;
+  loadContentMetadata: (
+    id: string,
+    version: string,
+    kind: ContentKind,
+    file: string,
+  ) => Promise<ContentMetadata>;
   loadCounts: (version: string) => Promise<VersionContentCounts>;
+  openContentFolder: (
+    id: string,
+    version: string,
+    kind: ContentKind,
+    file: string,
+    source?: string,
+  ) => Promise<void>;
+  loadContentSource: (
+    id: string,
+    version: string,
+    kind: ContentKind,
+    file: string,
+    source: string,
+  ) => Promise<string>;
+  loadMetadata: (version: string) => Promise<VersionMetadata>;
   rename: (version: string, name: string) => Promise<void>;
   remove: (version: string) => Promise<void>;
 }>();
@@ -37,15 +87,31 @@ const emit = defineEmits<{
   close: [];
   error: [error: unknown];
   busy: [busy: boolean];
+  "select-instance": [id: string];
 }>();
 const tabs = [
-  { id: "mods", label: "Mods", icon: Package },
-  { id: "datapacks", label: "数据包", icon: FileCode2 },
-  { id: "resourcepacks", label: "材质包", icon: Image },
-  { id: "saves", label: "存档", icon: Map },
+  { id: "metadata", label: "元数据", icon: Braces, color: "#98d6d9" },
+  { id: "libraries", label: "运行依赖", icon: LibraryBig, color: "#e7aa76" },
+  { id: "mods", label: "Mods", icon: Package, color: "#69dcb5" },
+  { id: "datapacks", label: "数据包", icon: FileCode2, color: "#e7bc76" },
+  { id: "resourcepacks", label: "资源包", icon: Image, color: "#b49aef" },
+  { id: "saves", label: "存档", icon: MapIcon, color: "#7dbfee" },
+  { id: "unresolved", label: "待解析", icon: FileQuestion, color: "#e7bc76" },
 ] as const;
-const tab = ref<ContentKind>("mods");
-const counts = ref<Partial<Record<ContentKind, number>>>({});
+const tab = ref<VersionContentTab | "metadata">("metadata");
+const tabBar = ref<HTMLElement | null>(null);
+const header = ref<HTMLElement>();
+useHorizontalLayout(header);
+const metadataRefresh = ref(0);
+const counts = ref<Partial<VersionContentCounts>>({});
+const visibleTabs = computed(() =>
+  tabs.filter(
+    (item) =>
+      item.id === "metadata" ||
+      (counts.value[item.id] || 0) > 0 ||
+      (tab.value === item.id && loading.value),
+  ),
+);
 const activeTab = computed(() => tabs.find((item) => item.id === tab.value)!);
 const selected = ref(
   props.instance.selected_version || props.instance.versions[0]?.id || "",
@@ -57,13 +123,73 @@ const name = ref("");
 const editingName = ref(false);
 const nameInput = ref<HTMLInputElement[]>([]);
 const query = ref("");
-const content = ref<VersionContent | null>(null);
+const content = shallowRef<VersionContent | null>(null);
+const libraries = shallowRef<VersionMetadata["libraries"]>([]);
+let contentController: AbortController | undefined;
+let prefetchController: AbortController | undefined;
+const rowMotions = new Map<string, ReturnType<typeof listRevealStyle>>();
+function contentRevealStyle(
+  file: Pick<LocalContentFile, "file_name">,
+  index: number,
+) {
+  let style = rowMotions.get(file.file_name);
+  if (!style) {
+    style = listRevealStyle(index, 0);
+    rowMotions.set(file.file_name, style);
+  }
+  return style;
+}
+const contentRows = new Map<string, { reveal: () => Promise<void> }>();
+const dependencyTargets = computed(() => {
+  const targets = new Map<string, string>();
+  const files = content.value?.files || [];
+  // Prefer an enabled provider when a disabled copy is also present.
+  for (const enabled of [true, false]) {
+    for (const file of files) {
+      if (file.enabled !== enabled) continue;
+      for (const id of file.mod_ids || []) {
+        if (!targets.has(id)) targets.set(id, file.file_name);
+      }
+    }
+  }
+  return targets;
+});
+function setContentRow(file: string, row: unknown) {
+  if (row) contentRows.set(file, row as { reveal: () => Promise<void> });
+  else contentRows.delete(file);
+}
+async function showMod(id: string, version: string, file: string) {
+  if (
+    id !== props.instance.id ||
+    version !== selected.value ||
+    tab.value !== "mods" ||
+    !content.value?.files.some((item) => item.file_name === file)
+  )
+    return;
+  const scope = request;
+  query.value = "";
+  await nextTick();
+  if (
+    scope === request &&
+    id === props.instance.id &&
+    version === selected.value &&
+    tab.value === "mods"
+  )
+    await contentRows.get(file)?.reveal();
+}
 const loading = ref(false);
 const failed = ref(false);
 const saving = ref(false);
 const confirming = ref(false);
 let request = 0;
 let countRequest = 0;
+watch(
+  () => props.instance.id,
+  () => {
+    selected.value =
+      props.instance.selected_version || props.instance.versions[0]?.id || "";
+  },
+);
 watch(
   () => props.instance.versions.map((v) => v.id),
   (ids) => {
@@ -95,22 +221,66 @@ const filteredFiles = computed(() => {
   return (
     content.value?.files.filter((file) =>
       words.every((word) =>
-        `${file.name} ${file.file_name} ${file.version || ""}`
+        `${file.name} ${file.file_name} ${file.version || ""} ${(file.mod_ids || []).join(" ")}`
           .toLocaleLowerCase()
           .includes(word),
       ),
     ) || []
   );
 });
-async function reload() {
+const filteredLibraries = computed(() => {
+  const words = query.value
+    .trim()
+    .toLocaleLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+  return libraries.value.filter((library) =>
+    words.every((word) =>
+      (library.name + " " + (library.detail || ""))
+        .toLocaleLowerCase()
+        .includes(word),
+    ),
+  );
+});
+function ensureVisibleTab() {
+  if (tab.value === "metadata" || counts.value[tab.value] !== 0) return;
+  // Keep the default metadata page available even for an empty/pending version.
+  tab.value =
+    tabs.find(
+      (item) => item.id !== "metadata" && (counts.value[item.id] || 0) > 0,
+    )?.id || "metadata";
+}
+async function reload(preserve = false) {
   const current = ++request;
+  contentController?.abort();
+  contentController = new AbortController();
   const kind = tab.value;
-  content.value = null;
+  if (!preserve) {
+    content.value = null;
+    libraries.value = [];
+    contentRows.clear();
+  }
   failed.value = false;
-  loading.value = !!selected.value;
-  if (!selected.value) return;
+  loading.value = !!selected.value && kind !== "metadata";
+  if (!selected.value || kind === "metadata") return;
   try {
-    const result = await props.loadContent(selected.value, kind);
+    if (kind === "libraries") {
+      const result = await props.loadMetadata(selected.value);
+      if (current === request) {
+        libraries.value = result.libraries || [];
+        counts.value.libraries = libraries.value.length;
+      }
+      return;
+    }
+    const result = await props.loadContent(selected.value, kind, {
+      fresh: preserve,
+      signal: contentController.signal,
+      onProgress: (result) => {
+        if (current !== request) return;
+        content.value = result;
+        counts.value[kind] = result.files.length;
+      },
+    });
     if (current === request) {
       content.value = result;
       counts.value[kind] = result.files.length;
@@ -121,7 +291,10 @@ async function reload() {
       emit("error", error);
     }
   } finally {
-    if (current === request) loading.value = false;
+    if (current === request) {
+      loading.value = false;
+      if (!failed.value) ensureVisibleTab();
+    }
   }
 }
 async function reloadCounts() {
@@ -132,40 +305,106 @@ async function reloadCounts() {
     if (current === countRequest) {
       counts.value = result;
       // An already loaded list is more recent than the initial directory scan.
-      if (content.value) counts.value[tab.value] = content.value.files.length;
+      if (
+        content.value &&
+        !loading.value &&
+        tab.value !== "metadata" &&
+        tab.value !== "libraries"
+      )
+        counts.value[tab.value] = content.value.files.length;
+      // A tab selected in the same update may still be waiting for its watcher.
+      await nextTick();
+      if (current === countRequest && !loading.value) ensureVisibleTab();
     }
   } catch (error) {
     if (current === countRequest) emit("error", error);
   }
 }
 function refresh() {
+  metadataRefresh.value++;
   void reload();
   void reloadCounts();
 }
+let pollTimer: ReturnType<typeof setTimeout> | undefined;
+let pollTicket = 0;
 watch(
-  selected,
+  [
+    () => props.downloading,
+    () => props.downloadVersion,
+    selected,
+    () => props.instance.id,
+  ],
+  (_value, previous) => {
+    clearTimeout(pollTimer);
+    const ticket = ++pollTicket;
+    const active = () =>
+      ticket === pollTicket &&
+      props.downloading &&
+      props.downloadVersion === selected.value;
+    const update = async () => {
+      await Promise.all([reload(true), reloadCounts()]);
+      if (ticket !== pollTicket) return;
+      metadataRefresh.value++;
+      if (active()) pollTimer = setTimeout(() => void update(), 1000);
+    };
+    if (active()) pollTimer = setTimeout(() => void update(), 500);
+    else if (
+      previous?.[0] &&
+      previous[1] === selected.value &&
+      previous[3] === props.instance.id
+    )
+      void update();
+  },
+  { immediate: true },
+);
+watch(
+  [selected, () => props.instance.id],
   () => {
-    counts.value = selected.value
-      ? {}
-      : { mods: 0, datapacks: 0, resourcepacks: 0, saves: 0 };
+    // Keep the previous counts until the new scan arrives, including on failure.
+    if (!selected.value)
+      counts.value = {
+        mods: 0,
+        datapacks: 0,
+        resourcepacks: 0,
+        saves: 0,
+        unresolved: 0,
+        libraries: 0,
+      };
     confirming.value = false;
     editingName.value = false;
+    prefetchController?.abort();
+    prefetchController = new AbortController();
+    if (selected.value && props.prefetchContent)
+      void props
+        .prefetchContent(selected.value, prefetchController.signal)
+        .catch(() => {
+          // The visible page reports a read error if needed; speculative work stays quiet.
+        });
     void reloadCounts();
   },
   { immediate: true },
 );
 watch(
-  [selected, tab],
+  [selected, tab, () => props.instance.id],
   () => {
     query.value = "";
+    rowMotions.clear();
     void reload();
   },
   { immediate: true },
 );
 onBeforeUnmount(() => {
+  pollTicket++;
+  clearTimeout(pollTimer);
   request++;
   countRequest++;
+  contentController?.abort();
+  prefetchController?.abort();
 });
+function chooseInstance(id: string | null) {
+  if (!saving.value && id && id !== props.instance.id)
+    emit("select-instance", id);
+}
 async function startRename() {
   if (!version.value || saving.value) return;
   name.value = versionName(version.value);
@@ -180,13 +419,65 @@ function cancelRename() {
   editingName.value = false;
   name.value = versionName(version.value);
 }
+const tabPositions = new WeakMap<
+  Element,
+  { left: number; top: number; width: number }
+>();
+onBeforeUpdate(() => {
+  const bar = tabBar.value;
+  if (!bar) return;
+  const origin = bar.getBoundingClientRect();
+  for (const button of bar.querySelectorAll<HTMLElement>('[role="tab"]')) {
+    const bounds = button.getBoundingClientRect();
+    tabPositions.set(button, {
+      left: bounds.left - origin.left,
+      top: bounds.top - origin.top,
+      width: bounds.width,
+    });
+  }
+});
+function pinLeavingTab(element: Element) {
+  const button = element as HTMLElement;
+  // Measure before the patch so multiple disappearing tabs keep their original
+  // positions, rather than inheriting intermediate flex layouts.
+  const bounds = tabPositions.get(button) || {
+    left: button.offsetLeft,
+    top: button.offsetTop,
+    width: button.offsetWidth,
+  };
+  button.style.left = bounds.left + "px";
+  button.style.top = bounds.top + "px";
+  button.style.width = bounds.width + "px";
+  const focused = document.activeElement === button;
+  button.inert = true;
+  if (focused)
+    void nextTick(() =>
+      tabBar.value
+        ?.querySelector<HTMLButtonElement>('[aria-selected="true"]')
+        ?.focus({ preventScroll: true }),
+    );
+}
+function resetLeavingTab(element: Element) {
+  const button = element as HTMLElement;
+  for (const property of ["left", "top", "width"])
+    button.style.removeProperty(property);
+  button.inert = false;
+}
 function moveTab(direction: number, event: KeyboardEvent) {
-  const index = tabs.findIndex((item) => item.id === tab.value);
-  const next = (index + direction + tabs.length) % tabs.length;
-  tab.value = tabs[next].id;
+  const items = visibleTabs.value;
+  const index = items.findIndex((item) => item.id === tab.value);
+  const next = (index + direction + items.length) % items.length;
+  tab.value = items[next].id;
   (event.currentTarget as HTMLElement).parentElement
-    ?.querySelectorAll<HTMLButtonElement>('[role="tab"]')
-    [next]?.focus();
+    ?.querySelector<HTMLButtonElement>("#version-content-tab-" + items[next].id)
+    ?.focus();
+}
+async function showContent(kind: VersionContentTab) {
+  tab.value = kind;
+  await nextTick();
+  tabBar.value
+    ?.querySelector<HTMLButtonElement>("#version-content-tab-" + kind)
+    ?.focus({ preventScroll: true });
 }
 async function change(remove = false) {
   if (
@@ -215,13 +506,27 @@ async function change(remove = false) {
 
 <template>
   <section class="modal glass-surface version-manager">
-    <header class="modal-header">
+    <header ref="header" class="modal-header">
       <h2 class="dialog-heading" tabindex="-1" autofocus>
         {{ t("管理版本") }}
       </h2>
+      <Play
+        class="version-manager-separator"
+        :size="9"
+        fill="currentColor"
+        :stroke-width="0"
+        aria-hidden="true"
+      />
       <div class="version-manager-instance">
-        <InstanceIcon :icon="resolveInstanceIcon(instance.icon, instance.id)" />
-        <span>{{ instance.name }}</span>
+        <InstanceTarget
+          context="manage"
+          :target="instance"
+          :instances="instances"
+          :disabled="saving"
+          @select="chooseInstance"
+        />
+      </div>
+      <div class="version-manager-header-actions">
         <button
           class="icon-button"
           :disabled="loading || !version"
@@ -229,22 +534,26 @@ async function change(remove = false) {
           :title="t('刷新列表')"
           @click="refresh"
         >
-          <RefreshCw :size="15" :class="{ spin: loading }" />
+          <RefreshCw :size="18" :class="{ spin: loading }" />
+        </button>
+        <button
+          class="icon-button"
+          :disabled="saving"
+          :aria-label="t('关闭对话框')"
+          :title="t('关闭对话框')"
+          @click="emit('close')"
+        >
+          <X :size="18" />
         </button>
       </div>
-      <button
-        class="icon-button"
-        :disabled="saving"
-        :aria-label="t('关闭对话框')"
-        @click="emit('close')"
-      >
-        <X :size="18" />
-      </button>
     </header>
     <div class="version-manager-body">
       <aside class="version-manager-sidebar">
         <nav class="version-manager-list" :aria-label="t('游戏版本')">
-          <template v-for="item in instance.versions" :key="item.id">
+          <template
+            v-for="(item, index) in instance.versions"
+            :key="`${instance.id}:${item.id}`"
+          >
             <form
               v-if="item.id === selected && editingName"
               class="version-manager-edit"
@@ -262,7 +571,6 @@ async function change(remove = false) {
                   :placeholder="item.id"
                 />
               </div>
-              <small>{{ versionDescription(item) }}</small>
               <div class="version-manager-edit-actions">
                 <button
                   class="icon-button"
@@ -289,7 +597,8 @@ async function change(remove = false) {
             </form>
             <button
               v-else
-              class="version-manager-choice"
+              class="version-manager-choice list-reveal-item"
+              :style="listRevealStyle(index)"
               :aria-current="item.id === selected ? 'true' : undefined"
               :disabled="saving"
               @click="selected = item.id"
@@ -299,7 +608,7 @@ async function change(remove = false) {
                 ><strong :title="versionName(item)">{{
                   versionName(item)
                 }}</strong
-                ><small>{{ versionDescription(item) }}</small></span
+                ><small v-if="!item.installed">{{ t("待下载") }}</small></span
               >
             </button>
           </template>
@@ -362,27 +671,41 @@ async function change(remove = false) {
       <div class="version-manager-detail">
         <div
           class="version-manager-tabs"
+          ref="tabBar"
           role="tablist"
           :aria-label="t('版本内容')"
         >
-          <button
-            v-for="item in tabs"
-            :id="`version-content-tab-${item.id}`"
-            :key="item.id"
-            class="settings-tab"
-            role="tab"
-            :aria-selected="tab === item.id"
-            aria-controls="version-content-panel"
-            :tabindex="tab === item.id ? 0 : -1"
-            @click="tab = item.id"
-            @keydown.right.prevent="moveTab(1, $event)"
-            @keydown.left.prevent="moveTab(-1, $event)"
+          <TransitionGroup
+            name="version-tab"
+            @before-leave="pinLeavingTab"
+            @after-leave="resetLeavingTab"
+            @leave-cancelled="resetLeavingTab"
           >
-            {{ t(item.label)
-            }}{{
-              counts[item.id] === undefined ? "(…)" : `(${counts[item.id]})`
-            }}
-          </button>
+            <button
+              v-for="item in visibleTabs"
+              :id="`version-content-tab-${item.id}`"
+              :key="item.id"
+              class="settings-tab"
+              :style="{ '--tab-color': item.color }"
+              role="tab"
+              :aria-selected="tab === item.id"
+              aria-controls="version-content-panel"
+              :tabindex="tab === item.id ? 0 : -1"
+              @click="tab = item.id"
+              @keydown.right.prevent="moveTab(1, $event)"
+              @keydown.left.prevent="moveTab(-1, $event)"
+            >
+              <span class="version-tab-content">
+                <component :is="item.icon" :size="15" aria-hidden="true" />
+                <span class="version-tab-label"
+                  >{{ t(item.label)
+                  }}<AnimatedCount
+                    v-if="item.id !== 'metadata'"
+                    :value="counts[item.id]"
+                /></span>
+              </span>
+            </button>
+          </TransitionGroup>
         </div>
         <div
           id="version-content-panel"
@@ -392,61 +715,112 @@ async function change(remove = false) {
           :aria-busy="loading"
           tabindex="0"
         >
-          <Transition name="settings-page" mode="out-in">
-            <div :key="`${selected}:${tab}`" class="version-manager-files">
-              <p v-if="!version" class="version-manager-empty">
-                {{ t("暂无游戏版本") }}
-              </p>
-              <p v-else-if="loading" class="version-manager-empty">
-                <LoaderCircle class="spin" :size="18" />{{ t("读取中") }}
-              </p>
-              <p v-else-if="failed" class="version-manager-empty">
-                {{ t("无法读取列表") }}
-              </p>
-              <p
-                v-else-if="!filteredFiles.length"
-                class="version-manager-empty"
-              >
-                {{ t(query ? "没有匹配的内容" : "暂无内容") }}
-              </p>
-              <div
-                v-for="file in filteredFiles"
-                :key="file.file_name"
-                class="version-manager-file"
-                :class="{ disabled: !file.enabled }"
-              >
-                <component :is="activeTab.icon" :size="18" />
-                <span class="version-manager-file-text">
-                  <strong :title="file.name">{{ file.name }}</strong>
-                  <small
-                    v-if="file.file_name !== file.name"
-                    :title="file.file_name"
-                    >{{ file.file_name }}</small
-                  >
-                </span>
-                <span
-                  v-if="file.version || !file.enabled"
-                  class="version-manager-file-version"
-                  >{{ file.version
-                  }}<small v-if="!file.enabled">{{ t("已禁用") }}</small></span
-                >
-              </div>
-            </div>
-          </Transition>
-          <footer v-if="version" class="version-manager-footer">
-            <small
-              class="version-manager-directory"
-              :title="content?.directory"
-              >{{ content?.directory }}</small
+          <div class="version-content-stage">
+            <Transition
+              name="version-content-fade"
+              @before-enter="resetListLeave"
+              @leave="leaveList"
+              @leave-cancelled="resetListLeave"
             >
-            <div class="version-manager-search">
-              <Search :size="12" /><input
-                v-model="query"
-                :aria-label="t('搜索当前列表')"
-                :placeholder="t('搜索')"
+              <VersionMetadataPanel
+                v-if="tab === 'metadata' && version"
+                :key="`metadata:${instance.id}:${selected}`"
+                :version="selected"
+                :refresh="metadataRefresh"
+                :load-metadata="loadMetadata"
+                @show-content="showContent"
+                @error="emit('error', $event)"
               />
-            </div>
-          </footer>
+              <div
+                v-else
+                :key="`${instance.id}:${selected}:${tab}`"
+                class="version-content-page"
+                :style="{ '--tab-color': activeTab.color }"
+              >
+                <div class="version-manager-files" data-list-viewport>
+                  <p v-if="!version" class="version-manager-empty">
+                    {{ t("暂无游戏版本") }}
+                  </p>
+                  <p
+                    v-else-if="failed && !content && !libraries.length"
+                    class="version-manager-empty"
+                  >
+                    {{ t("无法读取列表") }}
+                  </p>
+                  <p
+                    v-else-if="
+                      !loading &&
+                      !failed &&
+                      !(tab === 'libraries'
+                        ? filteredLibraries.length
+                        : filteredFiles.length)
+                    "
+                    class="version-manager-empty"
+                  >
+                    {{ t(query ? "没有匹配的内容" : "暂无内容") }}
+                  </p>
+                  <template v-if="tab === 'libraries'">
+                    <article
+                      v-for="(library, index) in filteredLibraries"
+                      :key="library.name"
+                      class="version-library-item list-reveal-item"
+                      :style="
+                        contentRevealStyle({ file_name: library.name }, index)
+                      "
+                    >
+                      <LibraryBig :size="18" aria-hidden="true" />
+                      <span>
+                        <strong :title="library.name">{{
+                          library.name
+                        }}</strong>
+                        <small v-if="library.detail" :title="library.detail">{{
+                          library.detail
+                        }}</small>
+                      </span>
+                    </article>
+                  </template>
+                  <template v-else>
+                    <VersionContentItem
+                      class="list-reveal-item"
+                      :style="contentRevealStyle(file, index)"
+                      v-for="(file, index) in filteredFiles"
+                      :key="`${instance.id}:${selected}:${tab}:${file.file_name}`"
+                      :ref="(row) => setContentRow(file.file_name, row)"
+                      :file="file"
+                      :instance-id="instance.id"
+                      :version="selected"
+                      :kind="tab as ContentKind"
+                      :icon="activeTab.icon"
+                      :load-metadata="loadContentMetadata"
+                      :open-folder="openContentFolder"
+                      :load-source="loadContentSource"
+                      :dependency-targets="dependencyTargets"
+                      @show-mod="showMod"
+                      @error="emit('error', $event)"
+                    />
+                  </template>
+                </div>
+                <footer
+                  v-if="version"
+                  class="version-manager-footer"
+                  data-list-footer
+                >
+                  <small
+                    class="version-manager-directory"
+                    :title="content?.directory"
+                    >{{ content?.directory }}</small
+                  >
+                  <div class="version-manager-search">
+                    <Search :size="12" /><input
+                      v-model="query"
+                      :aria-label="t('搜索当前列表')"
+                      :placeholder="t('搜索')"
+                    />
+                  </div>
+                </footer>
+              </div>
+            </Transition>
+          </div>
         </div>
       </div>
     </div>
@@ -455,11 +829,28 @@ async function change(remove = false) {
 
 <style scoped>
 .version-manager {
-  width: min(820px, calc(100vw - 48px));
+  width: min(940px, calc(100vw - 48px));
   max-width: none;
 }
-.version-manager-instance {
+.version-manager .modal-header {
+  justify-content: flex-start;
+  gap: 10px;
+}
+.version-manager .modal-header h2 {
+  flex: 0 0 auto;
+}
+.version-manager-header-actions {
   margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.version-manager-separator {
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.version-manager-instance {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -467,20 +858,14 @@ async function change(remove = false) {
   color: var(--muted);
   font-size: 12px;
 }
-.version-manager-instance span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 200px;
-}
-.version-manager-instance :deep(.instance-art) {
+.version-manager-instance :deep(.instance-target-trigger .instance-art) {
   width: 22px;
   height: 22px;
   flex: 0 0 22px;
 }
 .version-manager-body {
   display: grid;
-  grid-template-columns: 220px minmax(0, 1fr);
+  grid-template-columns: 200px minmax(0, 1fr);
   height: min(470px, calc(100vh - 160px));
   min-height: 220px;
 }
@@ -494,7 +879,8 @@ async function change(remove = false) {
 .version-manager-list {
   flex: 1;
   min-height: 0;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   overscroll-behavior: contain;
   padding: 6px 12px 12px 16px;
 }
@@ -520,23 +906,27 @@ async function change(remove = false) {
 }
 .version-manager-choice > span {
   display: flex;
-  flex-direction: column;
+  flex: 1;
+  align-items: center;
   min-width: 0;
-  gap: 5px;
+  gap: 8px;
 }
 .version-manager-choice strong {
+  flex: 1;
+  min-width: 0;
   font-size: 13px;
   font-weight: 500;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.version-manager-choice small,
-.version-manager-edit > small {
+.version-manager-choice small {
+  flex-shrink: 0;
+  white-space: nowrap;
+  color: var(--muted);
   font-size: 10px;
   line-height: 15px;
-  color: var(--muted);
-  overflow-wrap: anywhere;
+  text-shadow: none;
 }
 .version-manager-choice[aria-current="true"] {
   color: var(--blue);
@@ -551,10 +941,6 @@ async function change(remove = false) {
 }
 .version-manager-edit {
   padding: 9px 8px;
-}
-.version-manager-edit > small {
-  display: block;
-  margin: 5px 0 0 30px;
 }
 .version-manager-name {
   display: flex;
@@ -622,16 +1008,68 @@ async function change(remove = false) {
   overflow: hidden;
 }
 .version-manager-tabs {
+  position: relative;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
+  justify-content: space-evenly;
   gap: 12px;
   margin-bottom: 12px;
   flex-shrink: 0;
+  min-height: 36px;
+}
+.version-tab-move,
+.version-tab-enter-active,
+.version-tab-leave-active {
+  transition:
+    transform 420ms cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 220ms ease-out;
+}
+.version-tab-enter-from,
+.version-tab-leave-to {
+  opacity: 0;
+  transform: translateX(12px);
+}
+.version-tab-leave-active {
+  position: absolute;
+  pointer-events: none;
 }
 .version-manager-tabs .settings-tab {
-  font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  height: 36px;
+  padding-inline: 0;
+  font-size: 12px;
   white-space: nowrap;
+}
+.version-tab-content {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  line-height: 24px;
+  /* Keep icon and label on the same composited plane during width changes. */
+  transform: translateZ(0);
+}
+.version-manager-tabs .settings-tab svg {
+  flex-shrink: 0;
+  color: var(--tab-color);
+  opacity: 0.65;
+  transition:
+    opacity 180ms,
+    filter 180ms;
+}
+.version-manager-tabs .settings-tab:hover,
+.version-manager-tabs .settings-tab[aria-selected="true"] {
+  color: var(--tab-color);
+  text-shadow: 0 0 12px color-mix(in srgb, var(--tab-color) 50%, transparent);
+}
+.version-manager-tabs .settings-tab[aria-selected="true"] svg {
+  opacity: 1;
+  filter: drop-shadow(
+    0 0 5px color-mix(in srgb, var(--tab-color) 60%, transparent)
+  );
 }
 .version-manager-panel {
   display: flex;
@@ -640,12 +1078,68 @@ async function change(remove = false) {
   min-height: 0;
   min-width: 0;
 }
+.version-library-item {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-height: 58px;
+  padding: 9px 2px;
+}
+.version-library-item > svg {
+  flex-shrink: 0;
+  color: var(--tab-color);
+  opacity: 0.75;
+}
+.version-library-item > span {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  gap: 5px;
+}
+.version-library-item strong,
+.version-library-item small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+.version-library-item strong {
+  font: 12px/18px var(--mono);
+  color: var(--ink);
+}
+.version-library-item small {
+  font: 10px/15px var(--mono);
+  color: var(--muted);
+}
 .version-manager-footer {
   display: flex;
   align-items: center;
   gap: 16px;
   flex-shrink: 0;
   padding-top: 12px;
+}
+.version-content-stage {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+.version-content-stage > * {
+  grid-area: 1 / 1;
+  min-height: 0;
+}
+.version-content-page {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.version-content-fade-leave-active {
+  pointer-events: none;
 }
 .version-manager-search {
   display: flex;
@@ -669,56 +1163,9 @@ async function change(remove = false) {
 .version-manager-files {
   flex: 1;
   min-height: 0;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   overscroll-behavior: contain;
-}
-.version-manager-file {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  min-height: 58px;
-  padding: 9px 2px;
-}
-.version-manager-file > svg {
-  color: var(--blue);
-  flex-shrink: 0;
-  opacity: 0.75;
-}
-.version-manager-file-text {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  min-width: 0;
-  flex: 1;
-}
-.version-manager-file-text strong {
-  font-size: 13px;
-  font-weight: 500;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.version-manager-file-text small {
-  font: 10px/14px var(--mono);
-  color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.version-manager-file-version {
-  max-width: 100px;
-  overflow-wrap: anywhere;
-  font: 11px/17px var(--mono);
-  color: var(--muted);
-  text-align: right;
-}
-.version-manager-file-version small {
-  display: block;
-  font-size: 10px;
-  line-height: 16px;
-}
-.version-manager-file.disabled {
-  opacity: 0.55;
 }
 .version-manager-empty {
   display: flex;
@@ -773,9 +1220,18 @@ async function change(remove = false) {
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  .version-tab-move,
+  .version-tab-enter-active,
+  .version-tab-leave-active,
   .version-manager-confirm-enter-active,
   .version-manager-confirm-leave-active {
     transition: none;
   }
+}
+.version-tab-label {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  line-height: 24px;
 }
 </style>

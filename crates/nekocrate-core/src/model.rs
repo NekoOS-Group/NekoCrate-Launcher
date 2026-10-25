@@ -20,6 +20,7 @@ impl std::fmt::Debug for ProxyPassword {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    /// Optional developer override; empty uses NekoCrate's registered public client.
     pub microsoft_client_id: String,
     pub download_source: String,
     pub mod_download_source: String,
@@ -96,6 +97,8 @@ pub struct InstanceVersion {
     pub minecraft_version: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loader: Option<ModLoader>,
+    #[serde(default)]
+    pub modpack: bool,
     pub installed: bool,
     #[serde(default)]
     pub download_progress: f64,
@@ -324,6 +327,8 @@ pub struct Event {
     pub bytes: u64,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub total_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overall_progress: Option<f64>,
     #[serde(skip_serializing_if = "is_false")]
     pub reset_progress: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -341,6 +346,7 @@ impl Event {
             total: 0,
             bytes: 0,
             total_bytes: 0,
+            overall_progress: None,
             reset_progress: false,
             step: None,
             files: Vec::new(),
