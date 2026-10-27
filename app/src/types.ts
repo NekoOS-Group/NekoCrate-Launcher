@@ -83,7 +83,12 @@ export interface InstanceVersion {
   download_progress?: number;
 }
 export type ContentKind =
-  "mods" | "datapacks" | "resourcepacks" | "saves" | "unresolved";
+  | "mods"
+  | "datapacks"
+  | "resourcepacks"
+  | "shaderpacks"
+  | "saves"
+  | "unresolved";
 export type VersionContentTab = ContentKind | "libraries";
 export type VersionContentCounts = Record<VersionContentTab, number>;
 export interface LocalContentFile {
@@ -203,6 +208,8 @@ export interface Challenge {
   interval: number;
 }
 export interface Task {
+  resource_task?: string;
+  resource_pausable?: boolean;
   modpack_status?: ModpackStatus;
   id: number;
   instance_id: string | null;

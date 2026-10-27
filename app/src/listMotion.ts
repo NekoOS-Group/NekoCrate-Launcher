@@ -2,6 +2,60 @@
 const ROW_STAGGER_MS = 30;
 const ROW_FADE_MS = 160;
 const ROW_EASE = "cubic-bezier(.22,1,.36,1)";
+export function reducedListMotion() {
+  return (
+    typeof matchMedia !== "undefined" &&
+    matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+}
+
+/** Explicit entrances for recycled/virtual rows; never attach a looping CSS
+ * animation to rows that are remounted during ordinary scrolling. */
+export function enterListRows(
+  elements: readonly HTMLElement[],
+  initialDelay = 30,
+) {
+  if (reducedListMotion()) return () => {};
+  const rows = elements
+    .slice(0, 12)
+    .filter((element) => !!element.animate)
+    .map((element) => {
+      const style = getComputedStyle(element);
+      return { element, opacity: style.opacity, transform: style.transform };
+    });
+  const animations: Animation[] = [];
+  let stopped = false;
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    animations.forEach((animation) => animation.cancel());
+    animations.length = 0;
+  };
+  for (const [index, { element, opacity, transform }] of rows.entries()) {
+    const delay = initialDelay + index * ROW_STAGGER_MS;
+    animations.push(
+      element.animate([{ opacity: 0 }, { opacity }], {
+        duration: ROW_FADE_MS,
+        delay,
+        easing: ROW_EASE,
+        fill: "backwards",
+      }),
+      element.animate(
+        [
+          {
+            transform: `translateY(16px)${transform === "none" ? "" : ` ${transform}`}`,
+          },
+          { transform },
+        ],
+        { duration: 440, delay, easing: ROW_EASE, fill: "backwards" },
+      ),
+    );
+  }
+  void Promise.allSettled(
+    animations.map((animation) => animation.finished),
+  ).then(stop);
+  return stop;
+}
 export function listRevealStyle(index: number, initialDelay = 30) {
   return {
     "--row-delay": `${initialDelay + Math.min(index, 11) * ROW_STAGGER_MS}ms`,
@@ -21,7 +75,7 @@ export function leaveList(element: Element, done: () => void) {
   element.setAttribute("inert", "");
   element.setAttribute("aria-hidden", "true");
   const root = element as HTMLElement;
-  if (!root.animate || matchMedia("(prefers-reduced-motion: reduce)").matches) {
+  if (!root.animate || reducedListMotion()) {
     done();
     return;
   }

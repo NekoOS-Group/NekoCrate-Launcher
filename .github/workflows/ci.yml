@@ -88,4 +88,4 @@ jobs:
           cache-on-failure: true
           cache-workspace-crates: true
       - name: Check filesystem, TLS initialization and platform-specific launch regressions
-        run: cargo test -p nekocrate-core --lib --locked -- verification::tests storage::tests tests::linked_directories tests::removing_linked_instance folder_import::tests java::tests::windows modloader_tests::forge_launch_arguments modloader_tests::legacy_forge_import version_management::tests network::tests::client_initializes_tls download::tests::skewed_clock
+        run: cargo test -p nekocrate-core --lib --locked -- verification::tests storage::tests tests::linked_directories tests::removing_linked_instance tests::data_lock tests::update_restart_hands_off memory::system::tests diagnostics::tests archive_support::tests modpack::tests::sha512_pack_hash folder_import::tests java::tests::windows modloader_tests::forge_launch_arguments modloader_tests::legacy_forge_import version_management::tests network::tests::client_initializes_tls download::tests::skewed_clock

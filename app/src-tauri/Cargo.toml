@@ -24,7 +24,8 @@ tokio.workspace = true
 tokio-util.workspace = true
 tauri-plugin-updater = "~2.14.0"
 reqwest.workspace = true
-tauri-plugin-clipboard-manager = "2"
+# Text only; retain the same X11/Wayland/native clipboard backend.
+arboard = { version = "3.7", default-features = false, features = ["wayland-data-control"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

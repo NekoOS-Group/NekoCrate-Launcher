@@ -14,12 +14,15 @@ import {
   Check,
   FileCode2,
   FileQuestion,
+  FolderOpen,
   Braces,
   Image,
   LoaderCircle,
   LibraryBig,
   Map as MapIcon,
   Package,
+  Plus,
+  Sparkles,
   Pencil,
   RefreshCw,
   Search,
@@ -69,7 +72,7 @@ const props = defineProps<{
     id: string,
     version: string,
     kind: ContentKind,
-    file: string,
+    file?: string,
     source?: string,
   ) => Promise<void>;
   loadContentSource: (
@@ -88,13 +91,28 @@ const emit = defineEmits<{
   error: [error: unknown];
   busy: [busy: boolean];
   "select-instance": [id: string];
+  "add-resources": [version: string, kind: string];
 }>();
+async function openDirectory() {
+  if (
+    !content.value?.directory ||
+    tab.value === "metadata" ||
+    tab.value === "libraries"
+  )
+    return;
+  try {
+    await props.openContentFolder(props.instance.id, selected.value, tab.value);
+  } catch (error) {
+    emit("error", error);
+  }
+}
 const tabs = [
   { id: "metadata", label: "元数据", icon: Braces, color: "#98d6d9" },
   { id: "libraries", label: "运行依赖", icon: LibraryBig, color: "#e7aa76" },
   { id: "mods", label: "Mods", icon: Package, color: "#69dcb5" },
   { id: "datapacks", label: "数据包", icon: FileCode2, color: "#e7bc76" },
   { id: "resourcepacks", label: "资源包", icon: Image, color: "#b49aef" },
+  { id: "shaderpacks", label: "光影", icon: Sparkles, color: "#e6c68a" },
   { id: "saves", label: "存档", icon: MapIcon, color: "#7dbfee" },
   { id: "unresolved", label: "待解析", icon: FileQuestion, color: "#e7bc76" },
 ] as const;
@@ -502,10 +520,15 @@ async function change(remove = false) {
     emit("busy", false);
   }
 }
+defineExpose({ refresh });
 </script>
 
 <template>
-  <section class="modal glass-surface version-manager">
+  <section
+    class="modal glass-surface version-manager"
+    :data-resource-instance="instance.id"
+    :data-resource-version="selected"
+  >
     <header ref="header" class="modal-header">
       <h2 class="dialog-heading" tabindex="-1" autofocus>
         {{ t("管理版本") }}
@@ -527,6 +550,15 @@ async function change(remove = false) {
         />
       </div>
       <div class="version-manager-header-actions">
+        <button
+          class="icon-button"
+          :disabled="locked || !version"
+          :title="t('添加资源')"
+          :aria-label="t('添加资源')"
+          @click="emit('add-resources', selected, tab)"
+        >
+          <Plus :size="18" />
+        </button>
         <button
           class="icon-button"
           :disabled="loading || !version"
@@ -598,6 +630,8 @@ async function change(remove = false) {
             <button
               v-else
               class="version-manager-choice list-reveal-item"
+              :data-resource-instance="instance.id"
+              :data-resource-version="item.id"
               :style="listRevealStyle(index)"
               :aria-current="item.id === selected ? 'true' : undefined"
               :disabled="saving"
@@ -805,11 +839,18 @@ async function change(remove = false) {
                   class="version-manager-footer"
                   data-list-footer
                 >
-                  <small
+                  <button
+                    v-if="content?.directory"
+                    type="button"
                     class="version-manager-directory"
                     :title="content?.directory"
-                    >{{ content?.directory }}</small
+                    :disabled="!content?.directory"
+                    @click="openDirectory"
                   >
+                    <FolderOpen :size="12" /><span>{{
+                      content?.directory
+                    }}</span>
+                  </button>
                   <div class="version-manager-search">
                     <Search :size="12" /><input
                       v-model="query"
@@ -1177,6 +1218,13 @@ async function change(remove = false) {
   padding: 28px 12px;
 }
 .version-manager-directory {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  text-align: left;
   flex: 1;
   min-width: 0;
   white-space: nowrap;
@@ -1184,6 +1232,17 @@ async function change(remove = false) {
   text-overflow: ellipsis;
   font: 9px/16px var(--mono);
   color: var(--muted);
+}
+.version-manager-directory svg {
+  flex-shrink: 0;
+}
+.version-manager-directory span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.version-manager-directory:hover {
+  color: var(--tab-color, var(--blue));
 }
 .version-manager-confirm-enter-active,
 .version-manager-confirm-leave-active {

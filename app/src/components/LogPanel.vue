@@ -19,6 +19,8 @@ import {
 } from "../logPresentation";
 import type { LogStore } from "../logStore";
 import { LogViewport } from "../logViewport";
+import { createViewportMotion } from "../viewportMotion";
+import { listRevealStyle } from "../listMotion";
 
 const props = defineProps<{
   store: LogStore;
@@ -71,20 +73,53 @@ const levels = [
 const viewport = new LogViewport();
 const content = ref<HTMLElement>();
 const visible = shallowRef(viewport.window());
-let scrollRevision = 0;
-function publish() {
-  visible.value = viewport.window();
-  const revision = ++scrollRevision;
+const motion = createViewportMotion(".log-row, .log-empty", "log-content");
+let revealRevision = 0;
+let revealFrame: number | undefined;
+function reveal(leave = true) {
+  const revision = ++revealRevision;
+  if (revealFrame !== undefined) cancelAnimationFrame(revealFrame);
+  if (leave && content.value) motion.leave(content.value);
   void nextTick(() => {
-    if (revision === scrollRevision && content.value)
-      content.value.scrollTop = viewport.top;
+    if (
+      revision !== revealRevision ||
+      typeof requestAnimationFrame === "undefined"
+    )
+      return;
+    revealFrame = requestAnimationFrame(() => {
+      revealFrame = undefined;
+      if (revision === revealRevision && content.value)
+        motion.enter(content.value);
+    });
   });
 }
+let programmaticTop: number | undefined;
+function publish() {
+  visible.value = viewport.window();
+}
+watch(
+  visible,
+  () => {
+    if (content.value) {
+      content.value.scrollTop = viewport.top;
+      // The browser can clamp this before the first ResizeObserver callback.
+      // That is a layout adjustment, not the reader leaving follow mode.
+      programmaticTop = content.value.scrollTop;
+    }
+  },
+  // A sync filter/stream watcher can run before Vue schedules its DOM update.
+  // Apply scrolling after the spacer has its new height, never to the old one.
+  { flush: "post" },
+);
 function scroll() {
-  if (!content.value || Math.abs(content.value.scrollTop - viewport.top) < 1)
-    return;
-  scrollRevision++;
-  viewport.scroll(content.value.scrollTop);
+  if (!content.value) return;
+  const top = content.value.scrollTop;
+  const applied = programmaticTop;
+  programmaticTop = undefined;
+  if (Math.abs(top - (applied ?? viewport.top)) < 1) return;
+  motion.stop();
+  revealRevision++;
+  viewport.scroll(top);
   visible.value = viewport.window();
 }
 function latest() {
@@ -95,6 +130,7 @@ function refresh() {
   raw.value = props.store.snapshot();
 }
 function clear() {
+  reveal();
   props.store.clear(filter.scope);
   refresh();
 }
@@ -110,6 +146,17 @@ watch(
     publish();
   },
   { immediate: true, flush: "sync" },
+);
+watch(
+  [
+    () => filter.scope,
+    () => filter.level,
+    () => filter.query,
+    () => props.session,
+  ],
+  () => reveal(),
+  // Capture the old viewport before publish() applies the new scroll offset.
+  { flush: "sync" },
 );
 watch(
   () => props.session,
@@ -159,11 +206,21 @@ onMounted(() => {
     for (const row of content.value.querySelectorAll("[data-log-id]"))
       observer.observe(row);
   }
+  void nextTick(() => {
+    // GlassDialog opens after its children mount. Measure once it is visible.
+    if (!content.value) return;
+    if (content.value.clientWidth && content.value.clientHeight)
+      viewport.resize(content.value.clientWidth, content.value.clientHeight);
+    publish();
+    reveal(false);
+  });
 });
 onBeforeUnmount(() => {
+  revealRevision++;
+  if (revealFrame !== undefined) cancelAnimationFrame(revealFrame);
+  motion.dispose();
   unsubscribe?.();
   observer?.disconnect();
-  scrollRevision++;
 });
 </script>
 
@@ -204,7 +261,7 @@ onBeforeUnmount(() => {
       </div>
     </header>
     <div class="log-filters">
-      <div>
+      <div class="list-reveal-item" :style="listRevealStyle(0)">
         <label id="log-scope-label" class="sr-only">{{ t("日志来源") }}</label
         ><GlassSelect
           id="log-scope"
@@ -215,7 +272,7 @@ onBeforeUnmount(() => {
           literal-labels
         />
       </div>
-      <div>
+      <div class="list-reveal-item" :style="listRevealStyle(1)">
         <label id="log-level-label" class="sr-only">{{ t("日志级别") }}</label
         ><GlassSelect
           id="log-level"
@@ -225,7 +282,7 @@ onBeforeUnmount(() => {
           compact
         />
       </div>
-      <label class="log-search"
+      <label class="log-search list-reveal-item" :style="listRevealStyle(2)"
         ><Search :size="14" aria-hidden="true" /><input
           v-model="filter.query"
           type="search"
@@ -234,56 +291,62 @@ onBeforeUnmount(() => {
           spellcheck="false"
       /></label>
     </div>
-    <div
-      ref="content"
-      class="log-content"
-      tabindex="0"
-      role="list"
-      :aria-label="t('运行日志')"
-      @scroll.passive="scroll"
-    >
-      <p v-if="!filtered.length" class="log-empty muted">
-        {{ t(raw.length ? "没有符合筛选条件的日志。" : "暂无运行日志。") }}
-      </p>
-      <div v-else class="log-spacer" :style="{ height: `${visible.height}px` }">
+    <div class="log-stage">
+      <div
+        ref="content"
+        class="log-content"
+        tabindex="0"
+        role="list"
+        :aria-label="t('运行日志')"
+        @scroll.passive="scroll"
+      >
+        <p v-if="!filtered.length" class="log-empty muted">
+          {{ t(raw.length ? "没有符合筛选条件的日志。" : "暂无运行日志。") }}
+        </p>
         <div
-          class="log-window"
-          :style="{ transform: `translateY(${visible.offset}px)` }"
+          v-else
+          class="log-spacer"
+          :style="{ height: `${visible.height}px` }"
         >
-          <p
-            v-for="(line, index) in visible.items"
-            :key="line.id"
-            v-log-row
-            :data-log-id="line.id"
-            role="listitem"
-            :aria-posinset="visible.start + index + 1"
-            :aria-setsize="filtered.length"
-            class="log-row"
-            :class="[
-              line.level && `log-${line.level.toLowerCase()}`,
-              line.detail && `log-${line.detail}`,
-            ]"
+          <div
+            class="log-window"
+            :style="{ transform: `translateY(${visible.offset}px)` }"
           >
-            <time
-              :title="
-                line.count > 1 ? `${line.time} – ${line.lastTime}` : undefined
-              "
-              >{{ line.time }}</time
+            <p
+              v-for="(line, index) in visible.items"
+              :key="line.id"
+              v-log-row
+              :data-log-id="line.id"
+              role="listitem"
+              :aria-posinset="visible.start + index + 1"
+              :aria-setsize="filtered.length"
+              class="log-row"
+              :class="[
+                line.level && `log-${line.level.toLowerCase()}`,
+                line.detail && `log-${line.detail}`,
+              ]"
             >
-            <span class="log-level">{{ line.level }}</span>
-            <span class="log-message"
-              ><span v-if="line.source" class="log-source">{{
-                line.source
-              }}</span
-              ><span class="log-body">{{ line.message }}</span
-              ><span
-                v-if="line.count > 1"
-                class="log-repeat"
-                :title="t('重复 {count} 次', { count: line.count })"
-                >×{{ line.count }}</span
-              ></span
-            >
-          </p>
+              <time
+                :title="
+                  line.count > 1 ? `${line.time} – ${line.lastTime}` : undefined
+                "
+                >{{ line.time }}</time
+              >
+              <span class="log-level">{{ line.level }}</span>
+              <span class="log-message"
+                ><span v-if="line.source" class="log-source">{{
+                  line.source
+                }}</span
+                ><span class="log-body">{{ line.message }}</span
+                ><span
+                  v-if="line.count > 1"
+                  class="log-repeat"
+                  :title="t('重复 {count} 次', { count: line.count })"
+                  >×{{ line.count }}</span
+                ></span
+              >
+            </p>
+          </div>
         </div>
       </div>
     </div>

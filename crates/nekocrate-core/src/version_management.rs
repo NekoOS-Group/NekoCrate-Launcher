@@ -57,17 +57,19 @@ pub struct VersionContentCounts {
     pub mods: usize,
     pub datapacks: usize,
     pub resourcepacks: usize,
+    pub shaderpacks: usize,
     pub saves: usize,
     pub unresolved: usize,
     pub libraries: usize,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ContentKind {
     Mods,
     Datapacks,
     Resourcepacks,
+    Shaderpacks,
     Saves,
     Unresolved,
 }
@@ -283,6 +285,7 @@ impl Launcher {
             mods: count(ContentKind::Mods)?,
             datapacks: count(ContentKind::Datapacks)?,
             resourcepacks: count(ContentKind::Resourcepacks)?,
+            shaderpacks: count(ContentKind::Shaderpacks)?,
             saves: count(ContentKind::Saves)?,
             unresolved: count(ContentKind::Unresolved)?,
             libraries: resolved
@@ -310,7 +313,21 @@ impl Launcher {
         Ok(())
     }
 
-    fn content_location(
+    pub fn version_content_directory(
+        &self,
+        id: &str,
+        version: &str,
+        kind: ContentKind,
+    ) -> Result<PathBuf> {
+        let (working, _) = self.content_location(id, version)?;
+        let path = content_directory(&working, kind);
+        if !path.is_dir() {
+            bail!("目录尚不存在");
+        }
+        Ok(path)
+    }
+
+    pub(crate) fn content_location(
         &self,
         id: &str,
         version_id: &str,
@@ -339,19 +356,23 @@ impl Launcher {
     }
 }
 
+fn content_directory(working: &Path, kind: ContentKind) -> PathBuf {
+    match kind {
+        ContentKind::Mods => working.join("mods"),
+        ContentKind::Resourcepacks => working.join("resourcepacks"),
+        ContentKind::Shaderpacks => working.join("shaderpacks"),
+        ContentKind::Saves => working.join("saves"),
+        // Data packs may be global or installed separately in each world.
+        ContentKind::Datapacks | ContentKind::Unresolved => working.to_owned(),
+    }
+}
 fn read_content(
     working: &Path,
     resolved: Option<&version::ResolvedVersion>,
     kind: ContentKind,
     read_metadata: bool,
 ) -> Result<VersionContent> {
-    let directory = match kind {
-        ContentKind::Mods => working.join("mods"),
-        ContentKind::Resourcepacks => working.join("resourcepacks"),
-        ContentKind::Saves => working.join("saves"),
-        // Data packs may be global or installed separately in each world.
-        ContentKind::Datapacks | ContentKind::Unresolved => working.to_owned(),
-    };
+    let directory = content_directory(working, kind);
     let mut files = Vec::new();
     match kind {
         ContentKind::Unresolved => {}
@@ -370,7 +391,7 @@ fn read_content(
                 )?;
             }
         }
-        ContentKind::Resourcepacks | ContentKind::Saves => {
+        ContentKind::Resourcepacks | ContentKind::Shaderpacks | ContentKind::Saves => {
             scan_content(&directory, &directory, kind, &mut files)?;
         }
         ContentKind::Datapacks => {
@@ -431,6 +452,10 @@ fn scan_content(
         };
         let included = match kind {
             ContentKind::Saves => is_world(&path),
+            ContentKind::Shaderpacks => {
+                (path.is_dir() && path.join("shaders").is_dir())
+                    || (path.is_file() && name.to_ascii_lowercase().ends_with(".zip"))
+            }
             _ => {
                 (path.is_dir() && path.join("pack.mcmeta").is_file())
                     || (path.is_file() && name.to_ascii_lowercase().ends_with(".zip"))
@@ -509,13 +534,13 @@ fn relative_name(path: &Path, root: &Path) -> Result<String> {
 }
 
 #[derive(Clone, Default)]
-struct ModIdentity {
+pub(crate) struct ModIdentity {
     name: Option<String>,
     version: Option<String>,
-    ids: Vec<String>,
+    pub(crate) ids: Vec<String>,
 }
 
-fn mod_metadata(path: &Path) -> Option<ModIdentity> {
+pub(crate) fn mod_metadata(path: &Path) -> Option<ModIdentity> {
     let mut archive = zip::ZipArchive::new(fs::File::open(path).ok()?).ok()?;
     let mut result = ModIdentity::default();
     for descriptor in details::MOD_DESCRIPTORS {

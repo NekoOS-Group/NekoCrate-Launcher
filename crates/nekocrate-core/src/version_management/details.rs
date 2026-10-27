@@ -101,12 +101,17 @@ impl Launcher {
             ContentKind::Mods => read_mod(&path)?,
             ContentKind::Datapacks | ContentKind::Resourcepacks => read_pack(&path)?,
             ContentKind::Saves => world::read(&path),
+            ContentKind::Shaderpacks => Vec::new(),
         };
         if info.is_dir() {
             for source in &mut sources {
                 source.revealable =
                     contained(&path, &path.join(&source.source)).is_ok_and(|p| p.is_file());
             }
+        }
+        let (working, _) = self.content_location(id, version)?;
+        if let Some(source) = crate::resources::provenance_source(&working, &path)? {
+            sources.push(source);
         }
         Ok(ContentMetadata {
             path,
@@ -186,6 +191,7 @@ fn check_source(kind: ContentKind, source: &str) -> Result<()> {
         ContentKind::Mods => MOD_DESCRIPTORS.contains(&source),
         ContentKind::Datapacks | ContentKind::Resourcepacks => source == "pack.mcmeta",
         ContentKind::Saves => matches!(source, "level.dat" | "level.dat_old"),
+        ContentKind::Shaderpacks => false,
     };
     if !allowed {
         bail!("未找到元数据文件");

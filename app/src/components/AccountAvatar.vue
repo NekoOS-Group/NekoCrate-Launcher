@@ -13,8 +13,10 @@ const image = ref("");
 let generation = 0;
 async function refresh() {
   const request = ++generation;
-  image.value = props.preview || "";
-  if (props.preview) return;
+  if (props.preview) {
+    image.value = props.preview;
+    return;
+  }
   try {
     const source = props.account.skin
       ? await props.loadTexture(props.account.id)
@@ -33,12 +35,7 @@ async function refresh() {
   }
 }
 watch(
-  () => [
-    props.account.id,
-    props.account.skin?.url,
-    props.account.expires_at,
-    props.preview,
-  ],
+  () => [props.account.id, props.account.skin?.url, props.preview].join("|"),
   refresh,
   { immediate: true },
 );

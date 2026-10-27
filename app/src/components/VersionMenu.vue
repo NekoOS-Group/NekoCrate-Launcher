@@ -137,6 +137,11 @@ onMounted(() => document.addEventListener("pointerdown", outside, true));
 onBeforeUnmount(() =>
   document.removeEventListener("pointerdown", outside, true),
 );
+defineExpose({
+  revealForDrop() {
+    if (!expanded.value && !props.locked) void open();
+  },
+});
 </script>
 
 <template>
@@ -149,6 +154,7 @@ onBeforeUnmount(() =>
     <button
       ref="trigger"
       class="version-trigger"
+      data-resource-menu-trigger
       :disabled="disabled"
       :aria-label="t('选择游戏版本')"
       aria-haspopup="menu"
@@ -185,6 +191,8 @@ onBeforeUnmount(() =>
             v-for="version in versions"
             :key="version.id"
             class="version-menu-item"
+            :data-resource-instance="instance?.id"
+            :data-resource-version="version.id"
             role="menuitemradio"
             :aria-checked="version.selected"
             :aria-disabled="locked"
@@ -228,7 +236,7 @@ onBeforeUnmount(() =>
             data-menu-item
             @click="download"
           >
-            <Plus :size="16" /><span> {{ t("下载新的版本") }} </span>
+            <Plus :size="16" /><span> {{ t("添加新的版本") }} </span>
           </button>
           <button
             class="version-menu-item version-menu-manage"

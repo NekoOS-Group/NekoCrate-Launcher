@@ -234,7 +234,17 @@ onBeforeUnmount(() => {
       :title="selected.detail ? t(selected.detail) : label(selected.label)"
       @click="expanded ? close() : open()"
     >
-      <span :id="`${id}-value`">{{ label(selected.label) }}</span>
+      <span :id="`${id}-value`" class="selection-label">
+        <Transition
+          name="selection-text"
+          @before-leave="
+            (element) => element.setAttribute('aria-hidden', 'true')
+          "
+          @leave-cancelled="(element) => element.removeAttribute('aria-hidden')"
+        >
+          <span :key="selected.value">{{ label(selected.label) }}</span>
+        </Transition>
+      </span>
       <ChevronDown :size="16" />
     </button>
     <Teleport

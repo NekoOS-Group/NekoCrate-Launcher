@@ -27,16 +27,28 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
         .with_context(|| format!("JSON 损坏：{}，请保留原文件后恢复备份", path.display()))
 }
 pub(crate) fn same_file_contents(a: &Path, b: &Path) -> Result<bool> {
-    use sha2::{Digest, Sha256};
+    use ring::digest::{Context, SHA256};
+    use std::io::Read;
     if !a.is_file() || !b.is_file() || fs::metadata(a)?.len() != fs::metadata(b)?.len() {
         return Ok(false);
     }
     let hash = |path: &Path| -> Result<_> {
-        let mut hash = Sha256::new();
-        std::io::copy(&mut fs::File::open(path)?, &mut hash)?;
-        Ok(hash.finalize())
+        let mut hash = Context::new(&SHA256);
+        let mut file = fs::File::open(path)?;
+        let mut buffer = vec![0_u8; 64 * 1024];
+        loop {
+            let count = match file.read(&mut buffer) {
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                result => result?,
+            };
+            if count == 0 {
+                break;
+            }
+            hash.update(&buffer[..count]);
+        }
+        Ok(hash.finish())
     };
-    Ok(hash(a)? == hash(b)?)
+    Ok(hash(a)?.as_ref() == hash(b)?.as_ref())
 }
 pub fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
     atomic_write(path, &serde_json::to_vec_pretty(value)?)

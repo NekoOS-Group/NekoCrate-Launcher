@@ -14,32 +14,37 @@ tokio-util.workspace = true
 uuid.workspace = true
 reqwest.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["std", "ring"] }
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
-sha1 = "0.10"
-sha2 = "0.10"
+# Keep the faster SHA-1 backend; reuse TLS's SHA-256/SHA-512 implementation.
+sha1 = { version = "0.10", default-features = false }
+ring = "0.17.14"
 hex = "0.4"
-futures-util = "0.3"
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 directories = "6"
-zip = { version = "2", default-features = false, features = ["deflate"] }
-flate2 = "1"
+# ZIP and gzip share the pure-Rust DEFLATE backend. No Zopfli encoder is needed.
+zip = { version = "4.6.1", default-features = false, features = ["deflate-flate2"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 fastnbt = "2.6.3"
 tar = "0.4"
 walkdir = "2"
 regex = "1"
-fs2 = "0.4"
 semver = "1"
-toml = "0.8"
+toml = { version = "1.1", default-features = false, features = ["std", "serde", "parse"] }
 sys-locale = "0.3"
-sysinfo = { version = "0.38.4", default-features = false, features = ["system"] }
 
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+time = { version = "0.3.55", features = ["local-offset", "formatting"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
+libc = "0.2"
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Globalization", "Win32_System_Console"] }
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Globalization", "Win32_System_Console", "Win32_System_SystemInformation"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 keyring = { version = "3", features = ["sync-secret-service", "crypto-rust", "vendored"] }
+# Preserve live /etc/localtime changes without unsafe tzset in a multithreaded process.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
 tempfile = "3"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+time = { version = "0.3.55", features = ["local-offset", "parsing"] }

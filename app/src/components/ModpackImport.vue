@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
-import { Archive, X, Download, LoaderCircle } from "lucide-vue-next";
+import { ArrowLeft, Archive, X, Download, LoaderCircle } from "lucide-vue-next";
 import DownloadDestination from "./DownloadDestination.vue";
 import { t } from "../i18n";
+import { listRevealStyle } from "../listMotion";
 import type { Instance, ModpackPreview } from "../types";
 const props = defineProps<{
   preview: ModpackPreview;
+  online?: boolean;
   target: Instance | null;
   instances: readonly Instance[];
   name: string;
@@ -27,6 +29,7 @@ const emit = defineEmits<{
   choose: [];
   close: [];
   settings: [];
+  back: [];
 }>();
 const destination = ref<InstanceType<typeof DownloadDestination>>();
 const packName = ref("");
@@ -47,10 +50,13 @@ function submit() {
 }
 </script>
 <template>
-  <section class="modal glass-surface pack-import">
+  <section
+    class="modal glass-surface pack-import"
+    :class="{ 'online-pack': online }"
+  >
     <header class="modal-header">
       <h2 class="dialog-heading" tabindex="-1" autofocus>
-        {{ t("导入整合包") }}
+        {{ t(online ? "安装整合包" : "导入整合包") }}
       </h2>
       <DownloadDestination
         ref="destination"
@@ -80,7 +86,7 @@ function submit() {
     </header>
     <form @submit.prevent="submit">
       <div class="pack-body">
-        <div class="pack-summary">
+        <div class="pack-summary list-reveal-item" :style="listRevealStyle(0)">
           <Archive :size="30" />
           <div>
             <input
@@ -99,6 +105,7 @@ function submit() {
             >
           </div>
           <button
+            v-if="!online"
             type="button"
             class="text-button"
             :disabled="disabled"
@@ -107,7 +114,10 @@ function submit() {
             {{ t("更换文件") }}
           </button>
         </div>
-        <p class="pack-description">
+        <p
+          class="pack-description list-reveal-item"
+          :style="listRevealStyle(1)"
+        >
           {{ preview.pack.format === "modrinth" ? "Modrinth" : "CurseForge" }} ·
           {{ preview.pack.version }} ·
           {{ t("{count} 个文件", { count: preview.pack.files.length }) }}
@@ -145,9 +155,11 @@ function submit() {
           type="button"
           class="button"
           :disabled="disabled"
-          @click="$emit('close')"
+          @click="online ? $emit('back') : $emit('close')"
         >
-          {{ t("取消") }}</button
+          <ArrowLeft v-if="online" :size="15" />{{
+            t(online ? "返回" : "取消")
+          }}</button
         ><button
           class="button primary"
           :disabled="!canSubmit || !packName.trim()"
@@ -158,7 +170,9 @@ function submit() {
           />{{
             t(
               preview.curseforge_key_configured
-                ? "导入并安装"
+                ? online
+                  ? "下载并安装"
+                  : "导入并安装"
                 : "添加并稍后安装",
             )
           }}
@@ -170,6 +184,19 @@ function submit() {
 <style scoped>
 .pack-import {
   width: min(760px, calc(100vw - 40px));
+}
+.online-pack {
+  width: min(840px, calc(100vw - 64px));
+  height: min(590px, calc(100dvh - 64px));
+}
+.online-pack form {
+  flex: 1;
+}
+.online-pack .pack-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overflow-x: hidden;
 }
 .pack-body {
   padding: 0 var(--panel-inset) 16px;

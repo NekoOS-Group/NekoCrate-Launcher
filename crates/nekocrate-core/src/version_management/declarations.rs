@@ -17,6 +17,7 @@ pub(super) fn merge(
     let category = match kind {
         ContentKind::Mods => "mods",
         ContentKind::Resourcepacks => "resourcepacks",
+        ContentKind::Shaderpacks => "shaderpacks",
         ContentKind::Datapacks => "datapacks",
         ContentKind::Unresolved => "unresolved",
         ContentKind::Saves => return,
@@ -29,7 +30,7 @@ pub(super) fn merge(
         .collect();
     for declared in declarations.iter().filter(|file| file.kind == category) {
         let relative = match kind {
-            ContentKind::Mods | ContentKind::Resourcepacks => declared
+            ContentKind::Mods | ContentKind::Resourcepacks | ContentKind::Shaderpacks => declared
                 .path
                 .as_deref()
                 .and_then(|path| path.split_once('/').map(|(_, tail)| tail.to_owned()))

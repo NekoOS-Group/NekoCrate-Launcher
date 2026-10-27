@@ -10,6 +10,6 @@ path = "src/main.rs"
 nekocrate-core = { path = "../nekocrate-core" }
 anyhow.workspace = true
 serde_json.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["signal"] }
 tokio-util.workspace = true
 clap = { version = "4", features = ["derive"] }

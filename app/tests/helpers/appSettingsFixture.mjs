@@ -127,6 +127,14 @@ export async function settingsFixture() {
         return true;
       }
       if (request.op === "snapshot") return this.snapshot();
+      if (request.op === "inspect_resources")
+        return request.paths.map((path) => ({
+          path,
+          name: path.split("/").pop(),
+          kinds: [],
+          format: /\.(mrpack|zip)$/i.test(path) ? "modpack" : "directory",
+          issue: null,
+        }));
       if (request.op === "proxy_password") return this.proxyPassword;
       if (request.op === "memory_options")
         return {

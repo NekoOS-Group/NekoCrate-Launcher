@@ -186,3 +186,30 @@ test("复制过程中授权已取消时不再弹出浏览器或报告迟到的�
   clipboard.reject(new Error("late clipboard failure"));
   await new Promise(setImmediate);
 });
+
+test("授权成功立即返回账户，不等待系统打开浏览器的迟到回调", async () => {
+  const browser = deferred(),
+    authorization = deferred(),
+    opened = deferred();
+  const account = { id: "player", username: "Neko" };
+  let result;
+  const login = signInWithMicrosoft(
+    operations({
+      openBrowser: () => {
+        opened.resolve();
+        return browser.promise;
+      },
+      waitForLogin: () => authorization.promise,
+      browserFailed: () => assert.fail("授权成功后不应显示迟到的浏览器错误"),
+    }),
+  ).then((value) => {
+    result = value;
+  });
+  await opened.promise;
+  authorization.resolve(account);
+  await new Promise(setImmediate);
+  assert.equal(result, account);
+  browser.reject(new Error("late callback"));
+  await login;
+  await new Promise(setImmediate);
+});

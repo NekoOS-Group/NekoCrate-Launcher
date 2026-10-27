@@ -252,8 +252,8 @@ async fn exchange_at(
 }
 
 pub fn secret_entry(root: &std::path::Path, id: &str) -> Result<keyring::Entry> {
-    use sha2::{Digest, Sha256};
-    let namespace = hex::encode(Sha256::digest(root.to_string_lossy().as_bytes()));
+    use ring::digest::{SHA256, digest};
+    let namespace = hex::encode(digest(&SHA256, root.to_string_lossy().as_bytes()));
     keyring::Entry::new("NekoCrate Launcher", &format!("{}-{id}", &namespace[..16]))
         .context("系统凭据存储不可用")
 }

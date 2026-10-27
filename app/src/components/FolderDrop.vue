@@ -5,9 +5,14 @@ import { activeDialog } from "../dialogSurface";
 import { prepareDialogLeave, finishDialogLeave } from "../dialogMotion";
 import { t, translateMessage } from "../i18n";
 import type { FolderDropController } from "../useFolderDrop";
-const { controller, pack = false } = defineProps<{
+const {
+  controller,
+  pack = false,
+  resource = false,
+} = defineProps<{
   controller: FolderDropController;
   pack?: boolean;
+  resource?: boolean;
 }>();
 const { state, available, selected, blocked, previewVisible, cornerBusy } =
   controller;
@@ -153,7 +158,13 @@ const { state, available, selected, blocked, previewVisible, cornerBusy } =
       <div v-if="state.dragging" class="folder-drop-overlay" aria-hidden="true">
         <div>
           <FolderInput :size="30" /><span>{{
-            t(pack ? "拖拽导入整合包" : "拖拽导入实例")
+            t(
+              resource
+                ? "拖拽导入资源"
+                : pack
+                  ? "拖拽导入整合包"
+                  : "拖拽导入实例",
+            )
           }}</span>
         </div>
       </div>

@@ -8,6 +8,7 @@ use anyhow::{Result, bail};
 use serde::Serialize;
 use serde_json::Value;
 use std::{fs, io::Read, path::Path};
+mod system;
 
 #[derive(Clone, Copy, Debug)]
 pub struct MemoryConfig {
@@ -21,12 +22,7 @@ pub struct SystemMemory {
 }
 impl SystemMemory {
     pub fn read() -> Self {
-        let mut system = sysinfo::System::new();
-        system.refresh_memory_specifics(sysinfo::MemoryRefreshKind::nothing().with_ram());
-        Self {
-            total_mb: system.total_memory() / 1024 / 1024,
-            available_mb: system.available_memory() / 1024 / 1024,
-        }
+        system::read().unwrap_or_default()
     }
 }
 #[derive(Clone, Copy, Debug, Serialize)]

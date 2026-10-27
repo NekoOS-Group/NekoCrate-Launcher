@@ -170,6 +170,28 @@ test("real log panel browses all session entries with bounded DOM, filters/copie
   const find = (predicate) => all(root).find(predicate);
   const rows = () => all(root).filter((n) => n.props.role === "listitem");
   const content = find((n) => n.props.class === "log-content");
+  // Native scrollTop is clamped to the real viewport before ResizeObserver
+  // reports its first size. This must not cancel entry or disable follow mode.
+  let actualTop = 0;
+  Object.defineProperty(content, "scrollTop", {
+    configurable: true,
+    get: () => actualTop,
+    set: (value) => {
+      actualTop = Math.min(value, 10000 * 28 - 344);
+    },
+  });
+  await settle();
+  content.props.onScrollPassive();
+  await settle();
+  assert.equal(
+    find((n) => n.props.class === "log-latest text-button"),
+    undefined,
+  );
+  Object.defineProperty(content, "scrollTop", {
+    configurable: true,
+    writable: true,
+    value: actualTop,
+  });
   observer.callback([
     { target: content, contentRect: { width: 700, height: 280 } },
   ]);

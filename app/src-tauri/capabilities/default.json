@@ -38,6 +38,9 @@
         },
         {
           "url": "https://www.curseforge.com/minecraft/*"
+        },
+        {
+          "url": "https://modrinth.com/project/*"
         }
       ]
     }

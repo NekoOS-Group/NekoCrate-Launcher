@@ -22,7 +22,7 @@ impl Launcher {
         }
         Ok(())
     }
-    pub(super) fn curseforge_key(&self) -> Result<Option<String>> {
+    pub(crate) fn curseforge_key(&self) -> Result<Option<String>> {
         match crate::auth::secret_entry(self.root(), "curseforge-api-key")?.get_password() {
             Ok(key) => Ok(Some(key)),
             Err(keyring::Error::NoEntry) => Ok(None),

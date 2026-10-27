@@ -188,7 +188,7 @@ function nodes(vnode) {
   return [vnode, ...(typeof children === "object" ? nodes(children) : [])];
 }
 
-test("filename clicks open the captured folder without reading or toggling details", async () => {
+test("filenames are plain text; expanding a row does not open a file manager", async () => {
   for (const name of ["Example", "example.jar"]) {
     const folders = [],
       reads = [];
@@ -218,21 +218,16 @@ test("filename clicks open the captured folder without reading or toggling detai
           stopped = true;
         },
       };
-      await find("content-file-link").props.onClick(event);
-      assert.equal(
-        stopped,
-        true,
-        "file click must not bubble to row expansion",
-      );
-      assert.deepEqual(folders, [
-        ["a", "pack", "mods", "example.jar", undefined],
-      ]);
+      const filename = find("content-file-name");
+      assert.equal(filename.type, "span");
+      assert.equal(filename.props.onClick, undefined);
+      assert.deepEqual(folders, []);
       assert.deepEqual(reads, []);
       assert.equal(find("content-item-expand").props["aria-expanded"], false);
       await find("content-item-expand").props.onClick(event);
       assert.equal(find("content-item-expand").props["aria-expanded"], true);
       assert.equal(reads.length, 1);
-      assert.equal(folders.length, 1);
+      assert.equal(folders.length, 0);
       assert.ok(
         nodes(h.render()).some(
           (n) => n.type === "small" && n.children === "123 B",
@@ -298,7 +293,7 @@ const source = (options = {}) => ({
   ...options,
 });
 
-test("resource pack titles expand while only the smaller filename locates the file", async () => {
+test("resource pack filenames remain small plain text while titles expand metadata", async () => {
   const calls = [],
     reads = [];
   const h = item(
@@ -331,10 +326,9 @@ test("resource pack titles expand while only the smaller filename locates the fi
     await button("content-item-toggle").props.onClick({ stopPropagation() {} });
     assert.equal(reads.length, 1);
     assert.equal(calls.length, 0);
-    await button("content-file-link").props.onClick({ stopPropagation() {} });
-    assert.deepEqual(calls, [
-      ["a", "pack", "resourcepacks", "Cat Pack.zip", undefined],
-    ]);
+    assert.equal(button("content-file-name").type, "span");
+    assert.equal(button("content-file-name").props.onClick, undefined);
+    assert.deepEqual(calls, []);
   } finally {
     h.dispose();
   }

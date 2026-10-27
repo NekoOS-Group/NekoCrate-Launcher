@@ -10,6 +10,8 @@ import {
 } from "vue";
 import { Box, LoaderCircle, RefreshCw, Search, X } from "lucide-vue-next";
 import VersionCube from "./VersionCube.vue";
+import { listRevealStyle } from "../listMotion";
+import { createViewportMotion } from "../viewportMotion";
 import {
   filterVersions,
   versionCategories,
@@ -56,6 +58,10 @@ const activeId = computed(() =>
     : undefined,
 );
 let observer: ResizeObserver | undefined;
+const motion = createViewportMotion(".catalog-version");
+let motionRevision = 0;
+let motionFrame: number | undefined;
+let programmaticTop: number | undefined;
 
 function reveal(index: number) {
   const element = viewport.value;
@@ -65,18 +71,47 @@ function reveal(index: number) {
   else if (top + rowHeight > element.scrollTop + element.clientHeight)
     element.scrollTop = top + rowHeight - element.clientHeight;
   scrollTop.value = element.scrollTop;
+  programmaticTop = element.scrollTop;
+}
+function scroll() {
+  const top = viewport.value?.scrollTop || 0;
+  const applied = programmaticTop;
+  programmaticTop = undefined;
+  if (Math.abs(top - (applied ?? scrollTop.value)) >= 1) {
+    motion.stop();
+    motionRevision++;
+  }
+  scrollTop.value = top;
 }
 watch(
   filtered,
   async (entries) => {
+    const revision = ++motionRevision;
+    if (motionFrame !== undefined) cancelAnimationFrame(motionFrame);
+    if (viewport.value) motion.leave(viewport.value);
     active.value = Math.max(
       0,
       entries.findIndex((entry) => entry.id === props.modelValue),
     );
     scrollTop.value = 0;
-    if (viewport.value) viewport.value.scrollTop = 0;
+    if (viewport.value) {
+      viewport.value.scrollTop = 0;
+      programmaticTop = 0;
+    }
     await nextTick();
+    if (revision !== motionRevision) return;
     reveal(active.value);
+    await nextTick();
+    if (
+      revision !== motionRevision ||
+      typeof requestAnimationFrame === "undefined"
+    )
+      return;
+    motionFrame = requestAnimationFrame(() => {
+      motionFrame = undefined;
+      if (revision === motionRevision && viewport.value)
+        motion.enter(viewport.value);
+    });
   },
   { immediate: true },
 );
@@ -133,18 +168,24 @@ onMounted(() => {
   });
   observer.observe(viewport.value);
 });
-onBeforeUnmount(() => observer?.disconnect());
+onBeforeUnmount(() => {
+  observer?.disconnect();
+  motionRevision++;
+  if (motionFrame !== undefined) cancelAnimationFrame(motionFrame);
+  motion.dispose();
+});
 </script>
 
 <template>
   <div class="version-browser">
     <div class="catalog-filter" role="group" :aria-label="t('版本分类')">
       <button
-        v-for="item in versionCategories"
+        v-for="(item, index) in versionCategories"
         :key="item.id"
         type="button"
+        class="list-reveal-item"
         :class="{ active: category === item.id }"
-        :style="{ '--category-accent': item.color }"
+        :style="{ '--category-accent': item.color, ...listRevealStyle(index) }"
         :aria-label="t(item.label)"
         :aria-pressed="category === item.id"
         @click="category = item.id"
@@ -153,7 +194,7 @@ onBeforeUnmount(() => observer?.disconnect());
         <span>{{ t(item.label) }}</span>
       </button>
     </div>
-    <div class="catalog-toolbar">
+    <div class="catalog-toolbar list-reveal-item" :style="listRevealStyle(1)">
       <div class="catalog-search">
         <Search :size="15" aria-hidden="true" />
         <input
@@ -195,7 +236,7 @@ onBeforeUnmount(() => observer?.disconnect());
         :aria-disabled="disabled"
         :aria-activedescendant="activeId"
         tabindex="0"
-        @scroll="scrollTop = ($event.target as HTMLElement).scrollTop"
+        @scroll="scroll"
         @keydown="navigate"
       >
         <div class="catalog-spacer" :style="{ height: `${totalHeight}px` }">
@@ -376,6 +417,7 @@ onBeforeUnmount(() => observer?.disconnect());
   position: relative;
   flex: 1;
   min-height: 0;
+  overflow: hidden;
 }
 .catalog-viewport {
   height: 100%;
@@ -393,6 +435,7 @@ onBeforeUnmount(() => observer?.disconnect());
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   column-gap: 16px;
+  overflow: clip;
 }
 .catalog-version {
   display: flex;

@@ -1,15 +1,25 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { Download, LoaderCircle, X } from "lucide-vue-next";
+import {
+  Archive,
+  Box,
+  Package,
+  Download,
+  LoaderCircle,
+  X,
+} from "lucide-vue-next";
 import DownloadDestination from "./DownloadDestination.vue";
 import VersionBrowser from "./VersionBrowser.vue";
 import VersionCube from "./VersionCube.vue";
 import GlassSelect from "./GlassSelect.vue";
+import ContentSwitch from "./ContentSwitch.vue";
+import { listRevealStyle } from "../listMotion";
 import { versionCategories, versionCategory } from "../versionCatalog";
 import { t } from "../i18n";
 import type { Instance, VersionManifest } from "../types";
 
 const props = defineProps<{
+  section?: "game" | "modpacks" | "resources";
   target: Instance | null;
   instances: readonly Instance[];
   manifest: VersionManifest | null;
@@ -32,6 +42,7 @@ const props = defineProps<{
   running: boolean;
 }>();
 defineEmits<{
+  "update:section": [value: "game" | "modpacks" | "resources"];
   "update:version": [value: string];
   "update:loader": [value: string];
   "update:loaderVersion": [value: string];
@@ -47,6 +58,11 @@ defineEmits<{
   close: [];
 }>();
 const destination = ref<InstanceType<typeof DownloadDestination>>();
+const sections = [
+  { id: "game", label: "游戏版本", icon: Box },
+  { id: "modpacks", label: "整合包", icon: Archive },
+  { id: "resources", label: "资源", icon: Package },
+] as const;
 const loaderKinds = [
   { id: "vanilla", label: "原版" },
   { id: "fabric", label: "Fabric" },
@@ -84,7 +100,7 @@ const selectionColor = computed(() =>
   <section class="modal glass-surface version-download">
     <header class="modal-header">
       <h2 class="dialog-heading" tabindex="-1" autofocus>
-        {{ t("下载游戏版本") }}
+        {{ t("添加新的版本") }}
       </h2>
       <DownloadDestination
         ref="destination"
@@ -113,111 +129,173 @@ const selectionColor = computed(() =>
         <X :size="16" />
       </button>
     </header>
-    <form
-      class="version-download-form"
-      @submit.prevent="destination?.finishRename() && $emit('submit')"
-    >
-      <div class="version-download-body">
-        <VersionBrowser
-          :model-value="version"
-          :manifest="manifest"
-          :loading="versionsLoading"
-          :disabled="disabled"
-          @update:model-value="$emit('update:version', $event)"
-          @refresh="$emit('refresh')"
-        />
-        <aside class="download-options" :aria-label="t('安装选项')">
-          <div class="download-loader">
-            <span class="loader-label">{{ t("加载器") }}</span>
-            <div class="loader-kinds" role="group" :aria-label="t('加载器')">
-              <button
-                v-for="item in loaderKinds"
-                :key="item.id"
-                type="button"
-                class="loader-kind"
-                :class="{ selected: loader === item.id }"
-                :aria-pressed="loader === item.id"
-                :disabled="
-                  disabled || !selected || unavailableLoaders.includes(item.id)
-                "
-                @click="
-                  loader === item.id && item.id !== 'vanilla'
-                    ? $emit('retryLoader')
-                    : $emit('update:loader', item.id)
-                "
-              >
-                {{ t(item.label) }}
-              </button>
-            </div>
-            <Transition name="loader-options">
-              <div v-if="loader !== 'vanilla'" class="loader-version-row">
-                <span class="loader-label">{{ t("版本") }}</span>
-                <LoaderCircle
-                  v-if="loaderLoading"
-                  :size="14"
-                  class="spin"
-                  :aria-label="t('正在获取加载器版本…')"
-                />
-                <GlassSelect
-                  v-else-if="loaderOptions.length"
-                  id="download-loader-version"
-                  :model-value="loaderVersion"
-                  :options="loaderOptions"
-                  :disabled="disabled"
-                  floating
-                  compact
-                  literal-labels
-                  @update:model-value="$emit('update:loaderVersion', $event)"
-                />
+    <nav class="addition-sections" :aria-label="t('添加内容')">
+      <button
+        v-for="(item, index) in sections"
+        :key="item.id"
+        type="button"
+        class="list-reveal-item"
+        :style="listRevealStyle(index)"
+        :class="{ active: (section || 'game') === item.id }"
+        :aria-pressed="(section || 'game') === item.id"
+        :disabled="disabled"
+        @click="$emit('update:section', item.id)"
+      >
+        <component :is="item.icon" :size="16" />{{ t(item.label) }}
+      </button>
+    </nav>
+    <ContentSwitch :content-key="section || 'game'">
+      <form
+        v-if="!section || section === 'game'"
+        class="version-download-form"
+        @submit.prevent="destination?.finishRename() && $emit('submit')"
+      >
+        <div class="version-download-body">
+          <VersionBrowser
+            :model-value="version"
+            :manifest="manifest"
+            :loading="versionsLoading"
+            :disabled="disabled"
+            @update:model-value="$emit('update:version', $event)"
+            @refresh="$emit('refresh')"
+          />
+          <aside class="download-options" :aria-label="t('安装选项')">
+            <div
+              class="download-loader list-reveal-item"
+              :style="listRevealStyle(2)"
+            >
+              <span class="loader-label">{{ t("加载器") }}</span>
+              <div class="loader-kinds" role="group" :aria-label="t('加载器')">
                 <button
-                  v-else
+                  v-for="item in loaderKinds"
+                  :key="item.id"
                   type="button"
-                  class="text-button"
-                  :disabled="disabled"
-                  @click="$emit('retryLoader')"
+                  class="loader-kind"
+                  :class="{ selected: loader === item.id }"
+                  :aria-pressed="loader === item.id"
+                  :disabled="
+                    disabled ||
+                    !selected ||
+                    unavailableLoaders.includes(item.id)
+                  "
+                  @click="
+                    loader === item.id && item.id !== 'vanilla'
+                      ? $emit('retryLoader')
+                      : $emit('update:loader', item.id)
+                  "
                 >
-                  {{ t("重试") }}
+                  {{ t(item.label) }}
                 </button>
               </div>
-            </Transition>
-          </div>
-          <span v-if="running" class="download-detail" role="status">{{
-            t("请先停止此实例的游戏")
-          }}</span>
-        </aside>
-      </div>
-      <footer class="modal-actions">
-        <div class="download-selection" :title="selectionDescription">
-          <VersionCube
-            :variant="selectionCategory"
-            :size="28"
-            :style="{ color: selectionColor }"
-          />
-          <span>{{ selectionDescription }}</span>
+              <Transition name="loader-options">
+                <div v-if="loader !== 'vanilla'" class="loader-version-row">
+                  <span class="loader-label">{{ t("版本") }}</span>
+                  <LoaderCircle
+                    v-if="loaderLoading"
+                    :size="14"
+                    class="spin"
+                    :aria-label="t('正在获取加载器版本…')"
+                  />
+                  <GlassSelect
+                    v-else-if="loaderOptions.length"
+                    id="download-loader-version"
+                    :model-value="loaderVersion"
+                    :options="loaderOptions"
+                    :disabled="disabled"
+                    floating
+                    compact
+                    literal-labels
+                    @update:model-value="$emit('update:loaderVersion', $event)"
+                  />
+                  <button
+                    v-else
+                    type="button"
+                    class="text-button"
+                    :disabled="disabled"
+                    @click="$emit('retryLoader')"
+                  >
+                    {{ t("重试") }}
+                  </button>
+                </div>
+              </Transition>
+            </div>
+            <span v-if="running" class="download-detail" role="status">{{
+              t("请先停止此实例的游戏")
+            }}</span>
+          </aside>
         </div>
-        <button
-          type="button"
-          class="text-button"
-          :disabled="disabled"
-          @click="$emit('importPack')"
+        <footer
+          class="modal-actions list-reveal-item"
+          :style="listRevealStyle(3)"
+          data-list-footer
         >
-          {{ t("导入") }}
-        </button>
-        <button type="submit" class="button primary" :disabled="!canSubmit">
-          <LoaderCircle v-if="submitting" :size="16" class="spin" /><Download
-            v-else
-            :size="16"
-          />{{ t("下载并安装") }}
-        </button>
-      </footer>
-    </form>
+          <div class="download-selection" :title="selectionDescription">
+            <VersionCube
+              :variant="selectionCategory"
+              :size="28"
+              :style="{ color: selectionColor }"
+            />
+            <span>{{ selectionDescription }}</span>
+          </div>
+          <button
+            type="button"
+            class="text-button"
+            :disabled="disabled"
+            @click="$emit('importPack')"
+          >
+            {{ t("导入") }}
+          </button>
+          <button type="submit" class="button primary" :disabled="!canSubmit">
+            <LoaderCircle v-if="submitting" :size="16" class="spin" /><Download
+              v-else
+              :size="16"
+            />{{ t("下载并安装") }}
+          </button>
+        </footer>
+      </form>
+      <div v-else class="addition-content"><slot name="content" /></div>
+    </ContentSwitch>
   </section>
 </template>
 
 <style scoped>
 .version-download {
-  width: 840px;
+  width: min(840px, calc(100vw - 64px));
   height: min(590px, calc(100dvh - 64px));
+}
+.addition-sections {
+  display: flex;
+  justify-content: space-evenly;
+  gap: 16px;
+  padding: 8px 24px 12px;
+  flex-shrink: 0;
+}
+.addition-sections button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  padding: 10px 20px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+}
+.addition-sections button.active,
+.addition-sections button:hover {
+  color: var(--blue);
+  text-shadow: 0 0 12px var(--glow);
+}
+.addition-sections button.active svg {
+  filter: drop-shadow(0 0 5px var(--glow));
+}
+.addition-content {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
 }
 .version-download .modal-header {
   margin-bottom: 0;
@@ -227,6 +305,9 @@ const selectionColor = computed(() =>
   font-size: 16px;
 }
 .version-download .version-download-form {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
   flex: 1;
   overflow: hidden;
 }
@@ -368,10 +449,6 @@ const selectionColor = computed(() =>
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .loader-options-enter-active,
-  .loader-options-leave-active {
-    transition: none;
-  }
   .loader-options-enter-active,
   .loader-options-leave-active {
     transition: none;

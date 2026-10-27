@@ -66,6 +66,7 @@ pub struct Downloader {
     verification: Arc<crate::verification::VerificationCache>,
     full_verification: bool,
     mirrors: Arc<std::collections::HashMap<PathBuf, Vec<String>>>,
+    curseforge: Option<(reqwest::Client, reqwest::header::HeaderValue)>,
 }
 #[derive(Default)]
 struct TransferMetrics {
@@ -210,6 +211,7 @@ impl Downloader {
             verification: crate::verification::VerificationCache::shared(root),
             full_verification: false,
             mirrors: Arc::default(),
+            curseforge: None,
         })
     }
     pub(crate) fn with_mirrors(
@@ -224,6 +226,64 @@ impl Downloader {
     pub(crate) fn with_cache(mut self, directory: PathBuf) -> Self {
         self.cache = directory;
         self
+    }
+
+    pub(crate) fn with_curseforge_key(
+        mut self,
+        root: &Path,
+        settings: &Settings,
+        key: &str,
+    ) -> Result<Self> {
+        let mut header = reqwest::header::HeaderValue::from_str(key)?;
+        header.set_sensitive(true);
+        self.curseforge = Some((
+            crate::network::client_builder(root, settings)?
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(Duration::from_secs(15))
+                .read_timeout(Duration::from_secs(45))
+                .build()?,
+            header,
+        ));
+        Ok(self)
+    }
+    async fn file_response(&self, url: &str, offset: u64) -> Result<reqwest::Response> {
+        let mut url = reqwest::Url::parse(url)?;
+        for _ in 0..6 {
+            let mut request = self
+                .curseforge
+                .as_ref()
+                .map_or(&self.client, |(client, _)| client)
+                .get(url.clone())
+                .header(reqwest::header::ACCEPT_ENCODING, "identity");
+            if offset > 0 {
+                request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
+            }
+            if let Some((_, header)) = &self.curseforge
+                && url.scheme() == "https"
+                && matches!(
+                    url.host_str(),
+                    Some("edge.forgecdn.net" | "mediafilez.forgecdn.net")
+                )
+            {
+                request = request.header("x-api-key", header);
+            }
+            let response = request.send().await?;
+            if self.curseforge.is_none() || !response.status().is_redirection() {
+                return Ok(response);
+            }
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .context("下载跳转缺少地址")?
+                .to_str()?;
+            let next = url.join(location)?;
+            if next.scheme() != "https" || !next.username().is_empty() || next.password().is_some()
+            {
+                bail!("拒绝不安全的下载跳转");
+            }
+            url = next;
+        }
+        bail!("下载跳转次数过多")
     }
 
     pub(crate) async fn import_cached_files(
@@ -535,15 +595,7 @@ impl Downloader {
                             tokio::fs::remove_file(&part).await?;
                             offset = 0;
                         }
-                        let mut request = self
-                            .client
-                            .get(&url)
-                            .header(reqwest::header::ACCEPT_ENCODING, "identity");
-                        if offset > 0 {
-                            request =
-                                request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
-                        }
-                        let mut response = request.send().await?;
+                        let mut response = self.file_response(&url, offset).await?;
                         // A stale partial or a server without range support can
                         // safely restart, never append a whole response to it.
                         if response.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE
@@ -558,12 +610,7 @@ impl Downloader {
                             ));
                             tokio::fs::remove_file(&part).await?;
                             offset = 0;
-                            response = self
-                                .client
-                                .get(&url)
-                                .header(reqwest::header::ACCEPT_ENCODING, "identity")
-                                .send()
-                                .await?;
+                            response = self.file_response(&url, offset).await?;
                         }
                         let response = response.error_for_status()?;
                         let length = if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
@@ -888,6 +935,33 @@ mod tests {
     use super::*;
     use sha1::{Digest, Sha1};
     use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn curseforge_download_auth_is_not_sent_to_unrelated_hosts_and_keeps_ranges() {
+        let temp = tempfile::tempdir().unwrap();
+        let settings = Settings {
+            proxy_mode: "none".into(),
+            ..Settings::default()
+        };
+        let downloader = Downloader::new(temp.path(), settings.clone())
+            .unwrap()
+            .with_curseforge_key(temp.path(), &settings, "private-test-key")
+            .unwrap();
+        let (url, server) = crate::test_http::serve(vec![(200, "bytes".into())]).await;
+        let response = downloader
+            .file_response(&format!("{url}/payload"), 123)
+            .await
+            .unwrap();
+        assert_eq!(response.text().await.unwrap(), "bytes");
+        let requests = server.await.unwrap();
+        assert!(!requests[0].contains("private-test-key"));
+        assert!(!requests[0].to_ascii_lowercase().contains("x-api-key"));
+        assert!(
+            requests[0]
+                .to_ascii_lowercase()
+                .contains("range: bytes=123-")
+        );
+    }
 
     #[tokio::test]
     async fn skewed_clock_reports_tls_failure_once_and_recovers_after_clock_sync() {

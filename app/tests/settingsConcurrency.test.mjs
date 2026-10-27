@@ -378,7 +378,14 @@ test("旧配置的 Client ID 为空时直接开始登录，授权期间仍能自
     assert.equal(fixture.state.database.settings.microsoft_client_id, "");
     assert.equal(ui.busy.value, false);
     assert.equal(ui.loginBusy.value, true);
-    signIn.resolve(true);
+    signIn.resolve({
+      id: "player",
+      username: "Neko",
+      expires_at: 9999999999,
+      client_id: "client",
+      owned: true,
+      skin: null,
+    });
     await signingIn;
     assert.equal(ui.challenge.value, null);
     assert.equal(ui.loginBusy.value, false);

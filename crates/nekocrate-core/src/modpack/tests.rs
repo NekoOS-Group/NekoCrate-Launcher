@@ -1,11 +1,31 @@
 use super::*;
+use ring::digest::{SHA512, digest};
 use serde_json::json;
 use sha1::{Digest, Sha1};
-use sha2::Sha512;
 use std::{fs, io::Write};
 mod content;
+
+#[tokio::test]
+async fn sha512_pack_hash_matches_known_vector_and_rejects_corruption() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("mod.jar");
+    let cancel = CancellationToken::new();
+    let expected = "e718483d0ce769644e2e42c7bc15b4638e1f98b13b2044285632a803afa973ebde0ff244877ea60a4cb0432ce577c31beb009c5c2c49aa2e4eadb217ad8cc09b";
+    fs::write(&path, vec![b'a'; 1_000_000]).unwrap();
+    verify_sha512(&path, expected, &cancel).await.unwrap();
+    fs::write(&path, vec![b'b'; 1_000_000]).unwrap();
+    assert!(verify_sha512(&path, expected, &cancel).await.is_err());
+    cancel.cancel();
+    assert!(
+        verify_sha512(&path, expected, &cancel)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("取消")
+    );
+}
 fn pack_file(path: &str, env: &str) -> Value {
-    json!({"path":path,"hashes":{"sha1":hex::encode(Sha1::digest(b"mod")),"sha512":hex::encode(Sha512::digest(b"mod"))},"downloads":["https://cdn.modrinth.com/data/test/mod.jar"],"fileSize":3,"env":{"client":env}})
+    json!({"path":path,"hashes":{"sha1":hex::encode(Sha1::digest(b"mod")),"sha512":hex::encode(digest(&SHA512, b"mod"))},"downloads":["https://cdn.modrinth.com/data/test/mod.jar"],"fileSize":3,"env":{"client":env}})
 }
 fn mr(files: Vec<Value>) -> Value {
     json!({"formatVersion":1,"game":"minecraft","name":"测试包","versionId":"1.0","dependencies":{"minecraft":"1.20.1","fabric-loader":"0.16.10"},"files":files})

@@ -6,6 +6,15 @@ import {
   flush,
 } from "./helpers/appSettingsFixture.mjs";
 
+const account = {
+  id: "player",
+  username: "Neko",
+  expires_at: 9999999999,
+  client_id: "client",
+  owned: true,
+  skin: null,
+};
+
 function challenge(session_id) {
   return {
     session_id,
@@ -38,7 +47,7 @@ test("关闭授权弹窗结束当前登录，随后可以重新添加账户", as
     assert.equal(ui.challenge.value, null);
     assert.equal(ui.loginBusy.value, false);
     assert.equal(ui.error.value, "");
-    fixture.handlers.wait_login = () => true;
+    fixture.handlers.wait_login = () => account;
     ui.toggleUtility("accounts");
     await ui.login();
     assert.equal(
@@ -73,12 +82,99 @@ test("重新登录使用独立会话，旧授权迟到的错误不清空新验�
     assert.equal(ui.challenge.value, newChallenge);
     assert.equal(ui.loginBusy.value, true);
     assert.equal(ui.error.value, "");
-    second.resolve(true);
+    second.resolve(account);
     await newLogin;
     assert.equal(ui.challenge.value, null);
     assert.equal(ui.loginBusy.value, false);
   } finally {
     dispose();
+  }
+});
+
+test("登录成功同步展示新账户且不请求全量快照，迟到的旧快照不能覆盖它", async () => {
+  const f = await settingsFixture();
+  try {
+    const stale = deferred(),
+      oldState = f.fixture.snapshot();
+    oldState.state.running = ["instance-a"];
+    f.handlers.snapshot = () => stale.promise;
+    const syncing = f.context.sync();
+    f.handlers.begin_login = ({ session_id }) => challenge(session_id);
+    f.handlers.wait_login = () => account;
+    const before = f.calls.filter((c) => c.op === "snapshot").length;
+    await f.context.login();
+    assert.equal(
+      f.context.snapshot.value.database.selected_account,
+      account.id,
+    );
+    assert.deepEqual(f.context.snapshot.value.database.accounts, [account]);
+    assert.equal(f.context.challenge.value, null);
+    assert.equal(f.context.loginBusy.value, false);
+    assert.equal(f.calls.filter((c) => c.op === "snapshot").length, before);
+    stale.resolve(oldState);
+    await syncing;
+    assert.deepEqual(f.context.snapshot.value.running, ["instance-a"]);
+    assert.equal(
+      f.context.snapshot.value.database.selected_account,
+      account.id,
+    );
+  } finally {
+    f.dispose();
+  }
+});
+
+test("头像与皮肤预览共用请求，凭据刷新不重置已显示的皮肤", async () => {
+  const f = await settingsFixture();
+  try {
+    const skin = deferred();
+    f.handlers.account_skin = () => skin.promise;
+    f.state.database.accounts = [
+      { ...account, skin: { url: "texture-a", slim: false } },
+    ];
+    f.state.database.selected_account = account.id;
+    await f.context.sync();
+    await flush();
+    const avatar = f.context.fetchAccountSkin(account.id);
+    assert.equal(f.calls.filter((c) => c.op === "account_skin").length, 1);
+    skin.resolve([1, 2, 3]);
+    await avatar;
+    await flush();
+    const texture = f.context.skinTexture.value;
+    assert.ok(texture?.startsWith("data:image/png;base64,"));
+    f.state.database.accounts[0].expires_at++;
+    await f.context.sync();
+    await flush();
+    assert.equal(f.context.skinTexture.value, texture);
+    assert.equal(f.context.skinLoading.value, false);
+    assert.equal(f.calls.filter((c) => c.op === "account_skin").length, 1);
+  } finally {
+    f.dispose();
+  }
+});
+
+test("切换账户只等待选择写入，失败时保留原选择与面板", async () => {
+  const f = await settingsFixture();
+  try {
+    f.state.database.accounts = [account];
+    await f.context.sync();
+    f.context.utility.value = "accounts";
+    f.handlers.select_account = () => {
+      throw new Error("cannot save");
+    };
+    await f.context.chooseAccount(account);
+    assert.equal(f.context.snapshot.value.database.selected_account, null);
+    assert.equal(f.context.utility.value, "accounts");
+    const before = f.calls.filter((c) => c.op === "snapshot").length;
+    f.handlers.select_account = () => true;
+    await f.context.chooseAccount(account);
+    assert.equal(
+      f.context.snapshot.value.database.selected_account,
+      account.id,
+    );
+    assert.equal(f.context.utility.value, null);
+    assert.equal(f.calls.filter((c) => c.op === "snapshot").length, before);
+  } finally {
+    f.dispose();
   }
 });
 

@@ -385,12 +385,16 @@ impl Launcher {
             downloader
         };
         sink(Event::workflow("pack_resolve", "解析整合包依赖"));
-        let key =
-            if job.pack.format == "curseforge" && job.pack.files.iter().any(|f| f.path.is_none()) {
-                self.curseforge_key()?
-            } else {
-                None
-            };
+        let key = if job.pack.format == "curseforge" {
+            self.curseforge_key()?
+        } else {
+            None
+        };
+        let downloader = if let Some(key) = &key {
+            downloader.with_curseforge_key(self.root(), &settings, key)?
+        } else {
+            downloader
+        };
         if job.pack.format == "curseforge" {
             // Never forward a provider credential to a redirected host.
             let api = crate::network::client_builder(self.root(), &settings)?
@@ -555,10 +559,10 @@ impl Launcher {
     }
 }
 async fn verify_sha512(path: &Path, expected: &str, cancel: &CancellationToken) -> Result<()> {
-    use sha2::{Digest, Sha512};
+    use ring::digest::{Context, SHA512};
     use tokio::io::AsyncReadExt;
     let mut file = tokio::fs::File::open(path).await?;
-    let mut hasher = Sha512::new();
+    let mut hasher = Context::new(&SHA512);
     let mut buffer = vec![0_u8; 128 * 1024];
     loop {
         crate::download::check_cancel(cancel)?;
@@ -568,7 +572,7 @@ async fn verify_sha512(path: &Path, expected: &str, cancel: &CancellationToken) 
         }
         hasher.update(&buffer[..n]);
     }
-    if hex::encode(hasher.finalize()) != expected {
+    if hex::encode(hasher.finish()) != expected {
         bail!(
             "整合包文件 SHA-512 校验失败：{}",
             path.file_name().unwrap_or_default().to_string_lossy()

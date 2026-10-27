@@ -3,10 +3,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{path::PathBuf, sync::Arc};
 use tauri::{Emitter, Manager, State};
-use tauri_plugin_clipboard_manager::ClipboardExt;
 use tauri_plugin_opener::OpenerExt;
 use tokio_util::sync::CancellationToken;
 
+mod clipboard;
 mod folder_scan;
 mod import_picker;
 mod jobs;
@@ -29,6 +29,58 @@ impl AppState {
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum Request {
+    SearchModpacks {
+        platform: nekocrate_core::resources::Platform,
+        query: String,
+        offset: usize,
+    },
+    ModpackVersions {
+        platform: nekocrate_core::resources::Platform,
+        project: String,
+        offset: usize,
+    },
+    DownloadModpack {
+        platform: nekocrate_core::resources::Platform,
+        project: String,
+        version: String,
+    },
+    ResourceTarget {
+        id: String,
+        version: String,
+    },
+    SearchResources {
+        scope: nekocrate_core::resources::ResourceScope,
+        query: String,
+        offset: usize,
+    },
+    ResourceVersions {
+        scope: nekocrate_core::resources::ResourceScope,
+        project: String,
+    },
+    PrepareResource {
+        scope: nekocrate_core::resources::ResourceScope,
+        project: String,
+        version: String,
+        world: Option<String>,
+    },
+    InspectResources {
+        paths: Vec<PathBuf>,
+    },
+    PrepareLocalResources {
+        id: String,
+        version: String,
+        inputs: Vec<nekocrate_core::resources::LocalImport>,
+        world: Option<String>,
+    },
+    ResourcePlans {
+        id: String,
+        version: String,
+    },
+    InstallResources {
+        id: String,
+        version: String,
+        task: String,
+    },
     CopyText {
         text: String,
     },
@@ -187,7 +239,7 @@ enum Request {
         id: String,
         version: String,
         kind: nekocrate_core::version_management::ContentKind,
-        file: String,
+        file: Option<String>,
         #[serde(default)]
         source: Option<String>,
     },
@@ -299,7 +351,7 @@ fn dispatch<'a>(
         };
         let result: Result<Value, anyhow::Error> = async {
         Ok(match request{
-            Request::CopyText{text}=>{app.clipboard().write_text(text)?;json!(true)},
+            Request::CopyText{text}=>{clipboard::write_text(&app, text)?;json!(true)},
             Request::Snapshot=>{
                 let recovery = launcher.clone();
                 let notify = sink.clone();
@@ -309,6 +361,44 @@ fn dispatch<'a>(
                     }
                 });
                 json!({"state":launcher.snapshot(),"manifest":launcher.cached_versions(),"busy":state.jobs.busy()})
+            },
+            Request::ResourceTarget{id,version}=>{
+                let launcher=launcher.clone();
+                json!(tauri::async_runtime::spawn_blocking(move || launcher.resource_target(&id,&version)).await??)
+            },
+            Request::SearchModpacks{platform,query,offset}=>json!(launcher.search_modpacks(platform,&query,offset,&CancellationToken::new()).await?),
+            Request::ModpackVersions{platform,project,offset}=>json!(launcher.modpack_versions(platform,&project,offset,&CancellationToken::new()).await?),
+            Request::DownloadModpack{platform,project,version}=>{
+                let (cancel,guard)=state.job().await?;
+                let receiver=guard.enable_pause();
+                let operation=launcher.download_modpack(platform,&project,&version,&cancel,&sink);
+                json!(pausable::run(operation,&cancel,receiver).await?)
+            },
+            Request::SearchResources{scope,query,offset}=>json!(launcher.search_resources(&scope,&query,offset,&CancellationToken::new()).await?),
+            Request::ResourceVersions{scope,project}=>json!(launcher.resource_versions(&scope,&project,&CancellationToken::new()).await?),
+            Request::PrepareResource{scope,project,version,world}=>{
+                let (cancel,_guard)=state.job().await?;
+                json!(launcher.prepare_resource(&scope,&project,&version,world.as_deref(),&cancel).await?)
+            },
+            Request::InspectResources{paths}=>{
+                let launcher=launcher.clone();
+                json!(tauri::async_runtime::spawn_blocking(move || launcher.inspect_resources(&paths)).await??)
+            },
+            Request::PrepareLocalResources{id,version,inputs,world}=>{
+                let (cancel,_guard)=state.job().await?;
+                let launcher=launcher.clone();
+                json!(tauri::async_runtime::spawn_blocking(move || launcher.prepare_local_resources(&id,&version,&inputs,world.as_deref(),&cancel)).await??)
+            },
+            Request::ResourcePlans{id,version}=>{
+                let launcher=launcher.clone();
+                json!(tauri::async_runtime::spawn_blocking(move || launcher.resource_plans(&id,&version)).await??)
+            },
+            Request::InstallResources{id,version,task}=>{
+                let (cancel,guard)=state.job().await?;
+                let receiver=guard.enable_pause();
+                let operation=launcher.install_resources(&id,&version,&task,&cancel,&sink);
+                pausable::run(operation,&cancel,receiver).await?;
+                json!(true)
             },
             Request::Versions=>{let (cancel,_guard)=state.job().await?;json!(launcher.versions(&cancel).await?)},
             Request::FabricVersions{game_version}=>json!(launcher.fabric_versions(&game_version,&CancellationToken::new()).await?),
@@ -419,8 +509,13 @@ fn dispatch<'a>(
             },
             Request::OpenContentFolder{id,version,kind,file,source}=>{
                 let launcher = launcher.clone();
-                let path = tauri::async_runtime::spawn_blocking(move || launcher.version_content_path(&id,&version,kind,&file,source.as_deref())).await??;
-                app.opener().reveal_item_in_dir(path)?;
+                let reveal = file.is_some();
+                let path = tauri::async_runtime::spawn_blocking(move || match file {
+                    Some(file) => launcher.version_content_path(&id,&version,kind,&file,source.as_deref()),
+                    None => launcher.version_content_directory(&id,&version,kind),
+                }).await??;
+                if reveal { app.opener().reveal_item_in_dir(path)?; }
+                else { app.opener().open_path(path.to_string_lossy(),None::<&str>)?; }
                 json!(true)
             },
             Request::VersionContentSource{id,version,kind,file,source}=>{
@@ -539,7 +634,7 @@ pub fn run() {
     }
     startup::phase("initializing_tauri");
     let app = tauri::Builder::default()
-        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(clipboard::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())

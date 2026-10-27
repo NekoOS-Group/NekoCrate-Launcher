@@ -14,6 +14,7 @@ import { t } from "../i18n";
 import DownloadFiles from "./DownloadFiles.vue";
 import type { Task } from "../types";
 import { createFileOrder } from "../fileOrder";
+import { listRevealStyle } from "../listMotion";
 const emptyFiles = createFileOrder();
 const props = defineProps<{
   task: Task;
@@ -59,7 +60,7 @@ const labels = {
           v-if="['running', 'paused'].includes(task.status) && task.cancellable"
         >
           <button
-            v-if="task.version_id"
+            v-if="task.version_id || task.resource_pausable"
             type="button"
             class="text-button"
             :disabled="controlPending"
@@ -92,9 +93,10 @@ const labels = {
     </header>
     <ol class="workflow-steps">
       <li
-        v-for="step in task.workflow.steps"
+        v-for="(step, index) in task.workflow.steps"
         :key="step.id"
-        class="workflow-step"
+        class="workflow-step list-reveal-item"
+        :style="listRevealStyle(index)"
         :data-status="step.status"
       >
         <span class="workflow-node" aria-hidden="true"

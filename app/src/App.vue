@@ -28,7 +28,6 @@ import {
   ChevronUp,
   Terminal,
   X,
-  Check,
   Copy,
   Trash2,
   ExternalLink,
@@ -43,7 +42,12 @@ import {
   instanceVisibleLimit,
 } from "./instanceOrder";
 import { useInstanceSorting } from "./useInstanceSorting";
-import { prepareDialogLeave, finishDialogLeave } from "./dialogMotion";
+import {
+  prepareDialogLeave,
+  finishDialogLeave,
+  pinPanelLeave,
+  resetPanelLeave,
+} from "./dialogMotion";
 import { version as launcherVersion } from "../package.json";
 import { prepareAndLaunch } from "./launch";
 import {
@@ -51,6 +55,7 @@ import {
   type LoaderVersion as LoaderChoice,
 } from "./loaderCatalog";
 import { signInWithMicrosoft } from "./login";
+import { createAccountSkinLoader } from "./accountSkins";
 import type { LogLine } from "./logPresentation";
 import { createLogStore } from "./logStore";
 import LogPanel from "./components/LogPanel.vue";
@@ -84,6 +89,19 @@ import ModpackMissing from "./components/ModpackMissing.vue";
 import CurseForgeKey from "./components/CurseForgeKey.vue";
 import type { ModpackPreview, ModpackStatus } from "./types";
 import VersionManager from "./components/VersionManager.vue";
+import ResourceBrowser from "./components/ResourceBrowser.vue";
+import ContentSwitch from "./components/ContentSwitch.vue";
+import { listRevealStyle } from "./listMotion";
+import ModpackBrowser from "./components/ModpackBrowser.vue";
+import {
+  resourceDropTarget,
+  routeResourceDrop,
+  type ResourceSession,
+  type ResourcePlan,
+  type DetectedResource,
+  type ResourceKind,
+  type ResourcePlatform,
+} from "./resources";
 import { versionName } from "./versionDescription";
 import { createVersionContentLoader } from "./versionContentLoader";
 import AccountAvatar from "./components/AccountAvatar.vue";
@@ -506,7 +524,7 @@ const modalTitles = {
   create: "新建实例",
   edit: "实例设置",
   delete: "移除实例",
-  version: "下载游戏版本",
+  version: "添加新的版本",
   manage: "管理版本",
 };
 const suggestedInstances = ref<SuggestedInstance[]>([]);
@@ -607,6 +625,50 @@ const loaderUnavailable = computed(
     (loaderLoading.value || !form.loader_version),
 );
 const packPreview = ref<ModpackPreview | null>(null);
+const additionSection = ref<"game" | "modpacks" | "resources">("game");
+const onlinePack = ref(false);
+const additionVersion = ref("");
+const additionVersions = computed(() =>
+  (editing.value?.versions || []).map((version) => ({
+    value: version.id,
+    label: versionName(version),
+  })),
+);
+const additionResourceSession = computed<ResourceSession | undefined>(() => {
+  const instance =
+    editing.value && instances.value.find((i) => i.id === editing.value!.id);
+  if (!instance) return;
+  const version =
+    instance.versions.find((v) => v.id === additionVersion.value)?.id ||
+    instance.versions.find((v) => v.id === instance.selected_version)?.id ||
+    instance.versions[0]?.id;
+  if (!version) return;
+  return {
+    instance,
+    version,
+    kind: "mods",
+    platform:
+      snapshot.value.database.settings.mod_download_source === "curseforge"
+        ? "curseforge"
+        : "modrinth",
+  };
+});
+watch(
+  () => editing.value?.id,
+  () => {
+    additionVersion.value = "";
+  },
+);
+const additionResourceTask = computed(() =>
+  tasks.value.find(
+    (task) => task.resource_task && task.instance_id === editing.value?.id,
+  ),
+);
+const modpackDownloadTask = computed(() =>
+  tasks.value.find(
+    (task) => task.workflow.steps[0]?.id === "pack_archive_resolve",
+  ),
+);
 const packPath = ref("");
 let packPreviewRequest = 0;
 const canSubmitPack = computed(
@@ -906,19 +968,32 @@ const selectedAccount = computed(() =>
     (a) => a.id === snapshot.value.database.selected_account,
   ),
 );
-async function fetchAccountSkin(id: string): Promise<string | null> {
+const loadAccountTexture = createAccountSkinLoader(async (id) => {
   const bytes = await rpc<number[] | null>("account_skin", { id });
   if (!bytes) return null;
   let binary = "";
   for (let i = 0; i < bytes.length; i += 8192)
     binary += String.fromCharCode(...bytes.slice(i, i + 8192));
   return `data:image/png;base64,${btoa(binary)}`;
+});
+function fetchAccountSkin(id: string): Promise<string | null> {
+  const account = snapshot.value.database.accounts.find((a) => a.id === id);
+  return account ? loadAccountTexture(account) : Promise.resolve(null);
 }
+const avatarTexture = ref<string | null>(null);
+function updateAvatar(url: string) {
+  avatar.value = url;
+  avatarTexture.value = skinTexture.value;
+}
+let skinAccountId: string | undefined;
 async function loadAccountSkin() {
   const generation = ++skinGeneration;
   const account = selectedAccount.value;
-  if (skinTexture.value) avatar.value = "";
-  skinTexture.value = null;
+  if (skinAccountId !== account?.id || !account?.skin) {
+    if (skinTexture.value) avatar.value = "";
+    skinTexture.value = null;
+  }
+  skinAccountId = account?.id;
   skinError.value = "";
   skinLoading.value = false;
   if (!account?.skin) return;
@@ -929,7 +1004,10 @@ async function loadAccountSkin() {
     if (!texture) throw new Error("账户暂无皮肤资料，请刷新账户。");
     skinTexture.value = texture;
   } catch (e) {
-    if (generation === skinGeneration) skinError.value = message(e);
+    if (generation === skinGeneration) {
+      skinTexture.value = null;
+      skinError.value = message(e);
+    }
   } finally {
     if (generation === skinGeneration) skinLoading.value = false;
   }
@@ -940,7 +1018,6 @@ watch(
       selectedAccount.value?.id,
       selectedAccount.value?.skin?.url,
       selectedAccount.value?.skin?.slim,
-      selectedAccount.value?.expires_at,
     ].join("|"),
   loadAccountSkin,
 );
@@ -1106,36 +1183,148 @@ const folderDrop = useFolderDrop({
   },
 });
 const packDragging = ref(false);
+const resourceDragging = ref(false);
+const dropVersionMenu = ref<{ revealForDrop: () => void }>();
+const resourceSession = ref<ResourceSession>();
+const versionManager = ref<{ refresh: () => Promise<void> }>();
+const resourceTask = computed(() =>
+  tasks.value.find(
+    (task) =>
+      task.resource_task &&
+      task.instance_id === resourceSession.value?.instance.id,
+  ),
+);
+function openResources(
+  instance: Instance,
+  version: string,
+  kind = "mods",
+  files?: DetectedResource[],
+) {
+  if (busy.value || snapshot.value.running.includes(instance.id)) {
+    notify("请先结束游戏或当前任务");
+    return;
+  }
+  resourceSession.value = {
+    instance,
+    version,
+    platform:
+      snapshot.value.database.settings.mod_download_source === "curseforge"
+        ? "curseforge"
+        : "modrinth",
+    kind: ([
+      "mods",
+      "resourcepacks",
+      "datapacks",
+      "shaderpacks",
+      "saves",
+    ].includes(kind)
+      ? kind
+      : "mods") as ResourceKind,
+    files,
+  };
+}
+async function prepareResources(op: string, data: Record<string, unknown>) {
+  return action<ResourcePlan>("解析资源依赖", op, data);
+}
+async function installResources(plan: ResourcePlan) {
+  const result = await action<boolean>(
+    "添加资源",
+    "install_resources",
+    { id: plan.target.instance, version: plan.target.version, task: plan.id },
+    true,
+    plan.entries.some((entry) => entry.origin.platform !== "local"),
+  );
+  return result === true;
+}
+function resourcesInstalled() {
+  void versionManager.value?.refresh();
+}
+async function handleResourceDrop(
+  paths: string[],
+  target: ReturnType<typeof resourceDropTarget>,
+) {
+  folderDrop.handle({ type: "leave" });
+  if (busy.value) {
+    notify("请等待当前任务完成。");
+    return;
+  }
+  try {
+    const files = await rpc<DetectedResource[]>("inspect_resources", { paths });
+    const route = routeResourceDrop(files);
+    if (route === "folders") {
+      if (modal.value === "add") modal.value = null;
+      folderDrop.handle({ type: "drop", paths });
+      return;
+    }
+    if (route === "modpack") {
+      await openModpack(paths[0]);
+      return;
+    }
+    if (route === "mixed")
+      throw new Error(
+        files.find((f) => f.issue)?.issue || "请分别导入资源、整合包或游戏目录",
+      );
+    if (!target)
+      throw new Error("请先选择目标游戏版本，或将资源拖到版本列表中的指定版本");
+    const kind = files[0]?.kinds[0] || "mods";
+    openResources(target.instance, target.version, kind, files);
+  } catch (e) {
+    error.value = message(e);
+  }
+}
 let unlistenDrop: UnlistenFn | undefined;
 let dropDisposed = false;
 async function listenForFolders() {
   try {
     const stop = await getCurrentWindow().onDragDropEvent((e) => {
+      const payload = e.payload;
+      if (
+        (payload.type === "enter" || payload.type === "over") &&
+        payload.position
+      ) {
+        const element = document.elementFromPoint(
+          payload.position.x / window.devicePixelRatio,
+          payload.position.y / window.devicePixelRatio,
+        );
+        if (element?.closest("[data-resource-menu-trigger]"))
+          dropVersionMenu.value?.revealForDrop();
+      }
+      if (payload.type === "drop") {
+        packDragging.value = false;
+        resourceDragging.value = false;
+        const position = payload.position;
+        const element = position
+          ? document.elementFromPoint(
+              position.x / window.devicePixelRatio,
+              position.y / window.devicePixelRatio,
+            )
+          : null;
+        const fallback = resourceSession.value
+          ? {
+              instance: resourceSession.value.instance.id,
+              version: resourceSession.value.version,
+            }
+          : selectedInstance.value?.selected_version
+            ? {
+                instance: selectedInstance.value.id,
+                version: selectedInstance.value.selected_version,
+              }
+            : undefined;
+        const target = resourceDropTarget(element, instances.value, fallback);
+        void handleResourceDrop(payload.paths, target);
+        return;
+      }
+      if (payload.type === "enter")
+        resourceDragging.value =
+          payload.paths.some((path) => /\.(jar|zip)$/i.test(path)) ||
+          modal.value === "manage" ||
+          !!resourceSession.value;
+      if (payload.type === "leave") resourceDragging.value = false;
       if (e.payload.type === "enter")
         packDragging.value = e.payload.paths.some((path) =>
           /\.(mrpack|zip)$/i.test(path),
         );
-      if (e.payload.type === "drop" || e.payload.type === "leave")
-        packDragging.value = false;
-      if (
-        e.payload.type === "drop" &&
-        e.payload.paths.length &&
-        modal.value === "add" &&
-        !busy.value
-      )
-        modal.value = null;
-      if (
-        e.payload.type === "drop" &&
-        e.payload.paths.some((path) => /\.(mrpack|zip)$/i.test(path))
-      ) {
-        folderDrop.handle({ type: "leave" });
-        if (e.payload.paths.length !== 1) {
-          notify("请一次选择一个整合包");
-          return;
-        }
-        void openModpack(e.payload.paths[0]);
-        return;
-      }
+      if (e.payload.type === "leave") packDragging.value = false;
       folderDrop.handle(e.payload);
     });
     if (dropDisposed) stop();
@@ -1145,14 +1334,23 @@ async function listenForFolders() {
   }
 }
 let snapshotRequest = 0;
+let accountRevision = 0;
 async function sync() {
   const request = ++snapshotRequest;
+  const accountsAtStart = accountRevision;
   const response = await rpc<{
     state: Snapshot;
     manifest: VersionManifest | null;
     busy: boolean;
   }>("snapshot");
   if (request !== snapshotRequest) return;
+  // A state read begun before sign-in/selection may still contain the old
+  // account. Preserve the newer identity without dropping other game updates.
+  if (accountsAtStart !== accountRevision) {
+    response.state.database.accounts = snapshot.value.database.accounts;
+    response.state.database.selected_account =
+      snapshot.value.database.selected_account;
+  }
   // Keep edits made while this snapshot was in flight; still accept game state.
   for (const key of pendingSettings.keys()) {
     Object.assign(response.state.database.settings, {
@@ -1179,6 +1377,7 @@ async function action<T>(
   op: string,
   data: Record<string, unknown> = {},
   task = false,
+  resourcePausable = false,
 ): Promise<T | undefined> {
   if (busy.value) {
     notify("请等待当前任务完成。");
@@ -1214,12 +1413,16 @@ async function action<T>(
       id: Date.now(),
       instance_id: typeof data.id === "string" ? data.id : null,
       version_id: version?.id ?? null,
+      resource_task: op === "install_resources" ? String(data.task) : undefined,
+      resource_pausable: resourcePausable,
       download_progress: Math.min(99, savedProgress),
       cancellable: [
         "versions",
         "add_loader_version",
         "install",
         "launch",
+        "install_resources",
+        "download_modpack",
       ].includes(op),
       title,
       status: "running",
@@ -1653,12 +1856,40 @@ async function openModpack(source?: string) {
       downloadDraftInitialized = true;
     }
     packPath.value = path;
+    onlinePack.value = false;
     packPreview.value = preview;
     utility.value = null;
     modal.value = "version";
   } catch (e) {
     if (request === packPreviewRequest) error.value = message(e);
   }
+}
+async function downloadOnlineModpack(
+  platform: ResourcePlatform,
+  project: string,
+  version: string,
+) {
+  const session = modalSession;
+  const request = ++packPreviewRequest;
+  const result = await action<{ path: string; preview: ModpackPreview }>(
+    "下载整合包",
+    "download_modpack",
+    { platform, project, version },
+    true,
+    true,
+  );
+  if (!result) return false;
+  // Closing the window while fetching must not reopen it or replace another draft.
+  if (
+    request !== packPreviewRequest ||
+    session !== modalSession ||
+    modal.value !== "version"
+  )
+    return false;
+  onlinePack.value = true;
+  packPath.value = result.path;
+  packPreview.value = result.preview;
+  return true;
 }
 async function submitModpack(name: string, optional: string[]) {
   if (!canSubmitPack.value || !packPreview.value) return;
@@ -1737,6 +1968,12 @@ async function resumePack() {
 }
 function newVersion(instance: Instance) {
   packPreview.value = null;
+  additionSection.value =
+    current.value?.workflow.steps[0]?.id === "pack_archive_resolve"
+      ? "modpacks"
+      : "game";
+  additionVersion.value = "";
+  onlinePack.value = false;
   error.value = "";
   utility.value = null;
   editing.value = instance;
@@ -1802,7 +2039,7 @@ async function openContentFolder(
   id: string,
   version: string,
   kind: ContentKind,
-  file: string,
+  file?: string,
   source?: string,
 ) {
   await rpc("open_content_folder", { id, version, kind, file, source });
@@ -1874,7 +2111,7 @@ async function launch(i: Instance) {
 async function setDownloadPaused(paused: boolean) {
   const task = current.value;
   if (
-    !task?.version_id ||
+    (!task?.version_id && !task?.resource_pausable) ||
     downloadControlBusy.value ||
     task.status !== (paused ? "running" : "paused")
   )
@@ -1933,7 +2170,7 @@ async function login() {
   const isCurrent = () => loginSession === session;
   error.value = "";
   try {
-    await signInWithMicrosoft({
+    const account = await signInWithMicrosoft({
       begin: () => rpc<Challenge>("begin_login", { session_id: session }),
       isCurrent,
       showChallenge: (value) => {
@@ -1948,12 +2185,19 @@ async function login() {
         error.value = "未能自动打开浏览器。请点击下方登录链接重试。";
       },
       waitForLogin: (value) =>
-        rpc("wait_login", { session_id: value.session_id }),
+        rpc<Account>("wait_login", { session_id: value.session_id }),
     });
-    if (!isCurrent()) return;
+    if (!isCurrent() || !account) return;
+    // wait_login already persisted this account. Render it in the same update
+    // as dismissing the code, without an intervening stale list/full snapshot.
+    accountRevision++;
+    snapshot.value.database.accounts = [
+      ...snapshot.value.database.accounts.filter((a) => a.id !== account.id),
+      account,
+    ];
+    snapshot.value.database.selected_account = account.id;
     challenge.value = null;
     error.value = "";
-    await sync();
   } catch (e) {
     if (!isCurrent()) return;
     error.value = message(e);
@@ -1966,12 +2210,22 @@ async function login() {
   }
 }
 async function chooseAccount(account: Account) {
-  if (busy.value) return;
-  if (
-    account.id === snapshot.value.database.selected_account ||
-    (await action<boolean>("切换账户", "select_account", { id: account.id }))
-  ) {
+  if (busy.value || loginBusy.value) return;
+  if (account.id === snapshot.value.database.selected_account) {
     utility.value = null;
+    return;
+  }
+  busy.value = true;
+  error.value = "";
+  try {
+    await rpc("select_account", { id: account.id });
+    accountRevision++;
+    snapshot.value.database.selected_account = account.id;
+    utility.value = null;
+  } catch (e) {
+    error.value = message(e);
+  } finally {
+    busy.value = false;
   }
 }
 function persistSettings(): Promise<void> {
@@ -2189,11 +2443,16 @@ onUnmounted(() => {
       @dismiss="visibleError ? dismissError() : clearLoaderNotice()"
       @retry="persistSettings"
     />
-    <FolderDrop :controller="folderDrop" :pack="packDragging" />
+    <FolderDrop
+      :controller="folderDrop"
+      :pack="packDragging"
+      :resource="resourceDragging"
+    />
     <WorldBackdrop :key="theme" :theme="theme" :paused="windowHidden" />
     <header class="topbar">
       <button
-        class="account-card glass-surface"
+        class="account-card glass-surface ui-reveal-item"
+        :style="listRevealStyle(0)"
         :aria-label="t('账户管理')"
         @click="toggleUtility('accounts')"
       >
@@ -2220,7 +2479,8 @@ onUnmounted(() => {
       </button>
       <div class="global-tools">
         <button
-          class="icon-button"
+          class="icon-button ui-reveal-item"
+          :style="listRevealStyle(1)"
           :title="t('全局设置')"
           :aria-label="t('全局设置')"
           @click="toggleUtility('settings')"
@@ -2228,7 +2488,8 @@ onUnmounted(() => {
           <Settings2 :size="20" />
         </button>
         <button
-          class="icon-button"
+          class="icon-button ui-reveal-item"
+          :style="listRevealStyle(2)"
           :title="t('运行日志')"
           :aria-label="t('运行日志')"
           @click="openLogs()"
@@ -2246,23 +2507,29 @@ onUnmounted(() => {
         :paused="!!modal || !!utility || showLogs"
         :caption="t(skinCaption)"
         :issue="translateMessage(skinError)"
-        @avatar="avatar = $event"
+        @avatar="updateAvatar"
         @failed="skinError = $event"
         @retry="loadAccountSkin"
       />
     </main>
 
     <footer class="bottom-bar">
-      <ThemePicker :model-value="theme" @update:model-value="setTheme" />
+      <ThemePicker
+        class="ui-reveal-item"
+        :style="listRevealStyle(3)"
+        :model-value="theme"
+        @update:model-value="setTheme"
+      />
       <div class="game-controls">
         <nav
-          class="instance-dock"
+          class="instance-dock ui-reveal-item"
           :class="{
             empty: !instances.length,
             sorting: !!draggedInstanceId,
             overflowing: hiddenInstanceCount > 0,
           }"
           :style="{
+            ...listRevealStyle(4),
             '--overflow-columns': Math.min(
               VISIBLE_INSTANCES,
               hiddenInstanceCount + 1,
@@ -2354,6 +2621,10 @@ onUnmounted(() => {
                   :key="instance.id"
                   class="instance-item"
                   :data-instance-id="instance.id"
+                  :data-resource-instance="instance.id"
+                  :data-resource-version="
+                    instance.selected_version || undefined
+                  "
                   :class="{
                     dragging: draggedInstanceId === instance.id,
                   }"
@@ -2428,7 +2699,8 @@ onUnmounted(() => {
           </Transition>
         </nav>
         <div
-          class="launch-control glass-surface"
+          class="launch-control glass-surface ui-reveal-item"
+          :style="listRevealStyle(5)"
           :class="{ running: selectedRunning, download: !selectedVersion }"
         >
           <button
@@ -2518,6 +2790,7 @@ onUnmounted(() => {
           </button>
           <Transition name="version-control">
             <VersionMenu
+              ref="dropVersionMenu"
               v-if="selectedVersion"
               :instance="selectedInstance"
               :tasks="tasks"
@@ -2625,8 +2898,15 @@ onUnmounted(() => {
                 {{ t(tab.label) }}
               </button>
             </div>
-            <h2 v-else class="dialog-heading" tabindex="-1" autofocus>
-              {{ utilityTitle }}
+            <h2
+              v-else
+              class="dialog-heading selection-label"
+              tabindex="-1"
+              autofocus
+            >
+              <Transition name="selection-text"
+                ><span :key="utilityTitle">{{ utilityTitle }}</span></Transition
+              >
             </h2>
             <div class="inline-actions">
               <button
@@ -2649,11 +2929,18 @@ onUnmounted(() => {
             </div>
           </header>
           <div class="utility-panel-content">
-            <div v-if="utility === 'accounts'" class="page-inner">
+            <ContentSwitch
+              v-if="utility === 'accounts'"
+              class="page-inner account-pages"
+              :content-key="
+                challenge ? `login:${challenge.session_id}` : 'accounts'
+              "
+            >
               <div v-if="challenge" class="login-panel">
                 <button
                   type="button"
-                  class="device-code"
+                  class="device-code list-reveal-item"
+                  :style="listRevealStyle(0)"
                   :title="t('复制验证码')"
                   :aria-label="
                     t('复制验证码 {code}', { code: challenge.user_code })
@@ -2665,7 +2952,10 @@ onUnmounted(() => {
                   }}</span>
                   <Copy :size="16" aria-hidden="true" />
                 </button>
-                <div class="login-status">
+                <div
+                  class="login-status list-reveal-item"
+                  :style="listRevealStyle(1)"
+                >
                   <span class="waiting" role="status">
                     <LoaderCircle :size="12" class="spin" aria-hidden="true" />
                     {{ t("等待授权…") }}
@@ -2678,7 +2968,10 @@ onUnmounted(() => {
                     }}
                   </span>
                 </div>
-                <div class="login-footer">
+                <div
+                  class="login-footer list-reveal-item"
+                  :style="listRevealStyle(2)"
+                >
                   <a
                     class="text-button login-address"
                     :href="challenge.verification_uri"
@@ -2692,15 +2985,21 @@ onUnmounted(() => {
                 </div>
               </div>
               <template v-else>
-                <div
+                <TransitionGroup
+                  name="account-choice"
+                  tag="div"
+                  @before-leave="pinPanelLeave"
+                  @after-leave="resetPanelLeave"
+                  @leave-cancelled="resetPanelLeave"
                   class="account-picker"
                   role="group"
                   :aria-label="t('选择启动账户')"
                 >
                   <div
-                    v-for="account in snapshot.database.accounts"
+                    v-for="(account, index) in snapshot.database.accounts"
                     :key="account.id"
-                    class="account-choice"
+                    class="account-choice list-reveal-item"
+                    :style="listRevealStyle(index)"
                   >
                     <button
                       class="account-select"
@@ -2715,27 +3014,20 @@ onUnmounted(() => {
                       :aria-label="
                         t('使用 {name} 启动游戏', { name: account.username })
                       "
-                      :title="account.username"
                       @click="chooseAccount(account)"
                     >
                       <span class="account-avatar-frame">
                         <AccountAvatar
                           :account="account"
                           :preview="
-                            account.id === selectedAccount?.id
+                            account.id === selectedAccount?.id &&
+                            !skinLoading &&
+                            avatarTexture === skinTexture
                               ? avatar
                               : undefined
                           "
                           :load-texture="fetchAccountSkin"
                         />
-                        <span
-                          v-if="
-                            account.id === snapshot.database.selected_account
-                          "
-                          class="account-selected-mark"
-                          :aria-label="t('当前账户')"
-                          ><Check :size="12"
-                        /></span>
                       </span>
                       <span class="account-name">{{ account.username }}</span>
                     </button>
@@ -2754,17 +3046,25 @@ onUnmounted(() => {
                     </button>
                   </div>
                   <button
-                    class="account-add"
+                    key="add-account"
+                    class="account-add list-reveal-item"
+                    :style="listRevealStyle(snapshot.database.accounts.length)"
                     :disabled="busy || loginBusy"
+                    :aria-busy="loginBusy"
                     :aria-label="t('添加微软账户')"
                     :title="t('添加微软账户')"
                     @click="login"
                   >
-                    <span class="account-add-icon"><Plus :size="24" /></span>
+                    <span class="account-add-icon"
+                      ><LoaderCircle
+                        v-if="loginBusy"
+                        :size="20"
+                        class="spin" /><Plus v-else :size="24"
+                    /></span>
                   </button>
-                </div>
+                </TransitionGroup>
               </template>
-            </div>
+            </ContentSwitch>
 
             <template v-if="utility === 'downloads'">
               <DownloadWorkflow
@@ -2825,7 +3125,7 @@ onUnmounted(() => {
               @submit.prevent
             >
               <div class="settings-pages">
-                <Transition name="settings-page" mode="out-in">
+                <ContentSwitch :content-key="settingsTab">
                   <div
                     v-if="settingsTab === 'general'"
                     key="general"
@@ -2834,7 +3134,10 @@ onUnmounted(() => {
                     role="tabpanel"
                     aria-labelledby="settings-tab-general"
                   >
-                    <div class="settings-language">
+                    <div
+                      class="settings-language list-reveal-item"
+                      :style="listRevealStyle(0)"
+                    >
                       <div class="field">
                         <label id="language-label" for="language-trigger">{{
                           t("语言")
@@ -2858,7 +3161,10 @@ onUnmounted(() => {
                         />
                       </div>
                     </div>
-                    <div class="settings-preference settings-update">
+                    <div
+                      class="settings-preference settings-update list-reveal-item"
+                      :style="listRevealStyle(1)"
+                    >
                       <div class="field settings-version">
                         <span>{{ t("启动器版本") }}</span>
                         <strong>v{{ launcherVersion }}</strong>
@@ -2960,7 +3266,8 @@ onUnmounted(() => {
                     </div>
                     <button
                       type="button"
-                      class="settings-directory"
+                      class="settings-directory list-reveal-item"
+                      :style="listRevealStyle(2)"
                       :disabled="!snapshot.root"
                       :title="snapshot.root"
                       :aria-label="t('打开启动器数据目录')"
@@ -2984,7 +3291,10 @@ onUnmounted(() => {
                     role="tabpanel"
                     aria-labelledby="settings-tab-network"
                   >
-                    <div class="field settings-source-field">
+                    <div
+                      class="field settings-source-field list-reveal-item"
+                      :style="listRevealStyle(0)"
+                    >
                       <label
                         id="game-download-source-label"
                         for="game-download-source-trigger"
@@ -2996,7 +3306,10 @@ onUnmounted(() => {
                         v-model="settings.download_source"
                       />
                     </div>
-                    <div class="field settings-source-field">
+                    <div
+                      class="field settings-source-field list-reveal-item"
+                      :style="listRevealStyle(1)"
+                    >
                       <label
                         id="mod-download-source-label"
                         for="mod-download-source-trigger"
@@ -3008,11 +3321,16 @@ onUnmounted(() => {
                       />
                     </div>
                     <CurseForgeKey
+                      class="list-reveal-item"
+                      :style="listRevealStyle(2)"
                       :load="() => rpc<boolean>('curseforge_key_status')"
                       :save="saveCurseforgeKey"
                       @error="error = message($event)"
                     />
-                    <div class="network-concurrency network-control-heading">
+                    <div
+                      class="network-concurrency network-control-heading list-reveal-item"
+                      :style="listRevealStyle(3)"
+                    >
                       <label for="settings-concurrency">{{
                         t("并发数")
                       }}</label>
@@ -3061,7 +3379,10 @@ onUnmounted(() => {
                         />
                       </div>
                     </div>
-                    <div class="network-proxy">
+                    <div
+                      class="network-proxy list-reveal-item"
+                      :style="listRevealStyle(4)"
+                    >
                       <div class="field network-proxy-toggle">
                         <span id="proxy-enabled-label">{{ t("代理") }}</span>
                         <div class="toggle-row">
@@ -3154,7 +3475,7 @@ onUnmounted(() => {
                     :version="launcherVersion"
                     @open-link="openLink"
                   />
-                </Transition>
+                </ContentSwitch>
               </div>
             </form>
           </div>
@@ -3209,6 +3530,7 @@ onUnmounted(() => {
         @close="modal = null"
       >
         <VersionManager
+          ref="versionManager"
           v-if="modal === 'manage' && managedInstance"
           :instance="managedInstance"
           :instances="instances"
@@ -3226,6 +3548,10 @@ onUnmounted(() => {
           :load-content-source="readContentSource"
           :load-counts="readVersionContentCounts"
           @select-instance="switchManagedInstance"
+          @add-resources="
+            (version, kind) =>
+              managedInstance && openResources(managedInstance, version, kind)
+          "
           :load-metadata="readVersionMetadata"
           :rename="renameVersion"
           :remove="deleteVersion"
@@ -3236,6 +3562,11 @@ onUnmounted(() => {
         <ModpackImport
           v-else-if="modal === 'version' && packPreview"
           :preview="packPreview"
+          :online="onlinePack"
+          @back="
+            packPreview = null;
+            additionSection = 'modpacks';
+          "
           :target="editing"
           :instances="instances"
           v-model:name="form.name"
@@ -3255,6 +3586,7 @@ onUnmounted(() => {
         />
         <VersionDownload
           v-else-if="modal === 'version'"
+          v-model:section="additionSection"
           v-model:version="form.version"
           v-model:loader="form.loader"
           v-model:icon="form.icon"
@@ -3282,9 +3614,82 @@ onUnmounted(() => {
           @import-pack="openModpack()"
           @submit="submitDownload"
           @close="modal = null"
-        />
+        >
+          <template #content>
+            <ModpackBrowser
+              v-if="additionSection === 'modpacks'"
+              :busy="busy"
+              :rpc="rpc"
+              :download="downloadOnlineModpack"
+              @close="modal = null"
+              :task="modpackDownloadTask"
+              :control-pending="downloadControlBusy"
+              @error="error = message($event)"
+              @link="openLink"
+              @import="openModpack()"
+              @settings="packNetworkSettings"
+              @pause="setDownloadPaused(true)"
+              @resume="setDownloadPaused(false)"
+              @cancel="cancel"
+            />
+            <template v-else-if="additionSection === 'resources'">
+              <div
+                v-if="additionResourceSession"
+                class="addition-version-target"
+              >
+                <span>{{ t("版本") }}</span>
+                <GlassSelect
+                  id="addition-resource-version"
+                  :model-value="additionResourceSession.version"
+                  :options="additionVersions"
+                  :disabled="busy || downloadTargetRunning"
+                  literal-labels
+                  floating
+                  compact
+                  @update:model-value="additionVersion = $event"
+                />
+              </div>
+              <ResourceBrowser
+                v-if="additionResourceSession && !downloadTargetRunning"
+                embedded
+                :key="`${additionResourceSession.instance.id}/${additionResourceSession.version}`"
+                :session="additionResourceSession"
+                :busy="busy"
+                :rpc="rpc"
+                :prepare="prepareResources"
+                :install="installResources"
+                :task="additionResourceTask"
+                :control-pending="downloadControlBusy"
+                @error="error = message($event)"
+                @link="openLink"
+                @installed="resourcesInstalled"
+                @pause="setDownloadPaused(true)"
+                @resume="setDownloadPaused(false)"
+                @cancel="cancel"
+                @close="modal = null"
+              />
+              <div v-else class="addition-empty">
+                <span>{{
+                  t(
+                    downloadTargetRunning
+                      ? "请先停止此实例的游戏"
+                      : "选择已有游戏版本后添加资源",
+                  )
+                }}</span>
+                <button
+                  v-if="!downloadTargetRunning"
+                  class="text-button"
+                  @click="additionSection = 'game'"
+                >
+                  {{ t("添加游戏版本") }}
+                </button>
+              </div>
+            </template>
+          </template>
+        </VersionDownload>
         <section
           v-else
+          :key="`${modal}:${editing?.id || ''}`"
           class="modal glass-surface"
           :class="{ 'instance-settings': modal === 'edit' }"
         >
@@ -3323,7 +3728,10 @@ onUnmounted(() => {
             @create="newInstance"
           />
           <template v-else-if="modal === 'delete'"
-            ><p class="delete-message">
+            ><p
+              class="delete-message list-reveal-item"
+              :style="listRevealStyle(0)"
+            >
               {{
                 editing?.game_directory
                   ? t("仅从列表移除「{name}」，原目录和游戏文件保留在原处。", {
@@ -3334,7 +3742,10 @@ onUnmounted(() => {
                     })
               }}
             </p>
-            <div class="modal-actions">
+            <div
+              class="modal-actions list-reveal-item"
+              :style="listRevealStyle(1)"
+            >
               <button class="button" @click="modal = 'edit'">
                 {{ t("取消") }}</button
               ><button
@@ -3354,7 +3765,11 @@ onUnmounted(() => {
           >
           <form v-else @submit.prevent="submit">
             <div class="modal-fields">
-              <label v-if="modal === 'create'" class="field">
+              <label
+                v-if="modal === 'create'"
+                class="field list-reveal-item"
+                :style="listRevealStyle(0)"
+              >
                 {{ t("实例名称") }}
                 <input
                   v-model="form.name"
@@ -3365,6 +3780,8 @@ onUnmounted(() => {
               /></label>
               <InstanceLocation
                 v-if="modal === 'create'"
+                class="list-reveal-item"
+                :style="listRevealStyle(1)"
                 v-model="form.location"
                 :directory="form.external_directory"
                 :root="snapshot.root"
@@ -3373,7 +3790,10 @@ onUnmounted(() => {
                 @browse="chooseCreationDirectory"
               />
               <template v-if="modal === 'edit'">
-                <div class="field instance-memory">
+                <div
+                  class="field instance-memory list-reveal-item"
+                  :style="listRevealStyle(0)"
+                >
                   <label
                     id="instance-memory-label"
                     for="instance-memory-trigger"
@@ -3397,7 +3817,10 @@ onUnmounted(() => {
                     <span>MB</span>
                   </div>
                 </div>
-                <div class="field instance-java">
+                <div
+                  class="field instance-java list-reveal-item"
+                  :style="listRevealStyle(1)"
+                >
                   <label id="instance-java-label" for="instance-java-trigger">{{
                     t("Java 可执行文件")
                   }}</label>
@@ -3418,7 +3841,10 @@ onUnmounted(() => {
                 </div>
               </template>
             </div>
-            <div class="modal-actions">
+            <div
+              class="modal-actions list-reveal-item"
+              :style="listRevealStyle(2)"
+            >
               <div v-if="modal === 'edit'" class="instance-maintenance-actions">
                 <button
                   type="button"
@@ -3476,6 +3902,37 @@ onUnmounted(() => {
             </div>
           </form>
         </section>
+      </GlassDialog>
+    </Transition>
+    <Transition
+      name="dialog"
+      appear
+      @before-leave="prepareDialogLeave"
+      @after-leave="finishDialogLeave"
+    >
+      <GlassDialog
+        v-if="resourceSession"
+        :label="t('添加资源')"
+        :locked="busy && !current?.resource_task"
+        @close="resourceSession = undefined"
+      >
+        <ResourceBrowser
+          :key="`${resourceSession.instance.id}:${resourceSession.version}`"
+          :session="resourceSession"
+          :busy="busy"
+          :task="resourceTask"
+          :control-pending="downloadControlBusy"
+          :rpc="rpc"
+          :prepare="prepareResources"
+          :install="installResources"
+          @close="resourceSession = undefined"
+          @error="error = message($event)"
+          @link="openLink"
+          @installed="resourcesInstalled"
+          @pause="setDownloadPaused(true)"
+          @resume="setDownloadPaused(false)"
+          @cancel="cancel"
+        />
       </GlassDialog>
     </Transition>
   </div>

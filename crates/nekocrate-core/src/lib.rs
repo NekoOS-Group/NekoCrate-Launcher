@@ -22,6 +22,7 @@ pub mod modpack;
 pub mod network;
 mod pack_content;
 mod proxy_credentials;
+pub mod resources;
 mod runtime_compatibility;
 pub mod skin;
 pub mod storage;
@@ -34,7 +35,6 @@ pub mod version_management;
 pub mod version_metadata;
 
 use anyhow::{Context, Result, bail};
-use fs2::FileExt;
 use model::*;
 use serde::Serialize;
 use std::{
@@ -60,7 +60,7 @@ impl Drop for Shared {
     fn drop(&mut self) {
         // A concurrent fork can retain the open file description until exec.
         // Release ownership with the last Launcher, not the last inherited fd.
-        let _ = FileExt::unlock(&self._lock);
+        let _ = self._lock.unlock();
     }
 }
 #[derive(Clone)]
@@ -76,7 +76,7 @@ impl Launcher {
     /// Only call after the host has stopped accepting work and is about to exit.
     /// Relaunch may spawn the replacement before this process has fully exited.
     pub fn release_data_lock_for_restart(&self) -> Result<()> {
-        FileExt::unlock(&self.0._lock).context("无法释放启动器数据目录锁")
+        self.0._lock.unlock().context("无法释放启动器数据目录锁")
     }
 
     pub fn open(root: Option<PathBuf>) -> Result<Self> {
@@ -89,7 +89,7 @@ impl Launcher {
             .read(true)
             .write(true)
             .open(root.join("launcher.lock"))?;
-        lock.try_lock_exclusive()
+        lock.try_lock()
             .context("该数据目录已被另一个 NekoCrate 进程占用，请先关闭它")?;
         let dbpath = root.join("database.json");
         let db = migration::load_database(&root, &dbpath)?;
@@ -2079,6 +2079,44 @@ printf '%s\n' 'offline session 0 started'
             reopened.instance(&instance.id).unwrap().game_directory,
             Some(game)
         );
+    }
+
+    #[test]
+    fn data_lock_excludes_other_processes_and_releases_after_owner_drops() {
+        const ROOT: &str = "NEKOCRATE_TEST_LOCK_ROOT";
+        const EXPECT_OPEN: &str = "NEKOCRATE_TEST_LOCK_EXPECT_OPEN";
+        if let Some(root) = std::env::var_os(ROOT) {
+            let result = Launcher::open(Some(root.into()));
+            let expected = std::env::var(EXPECT_OPEN).unwrap() == "true";
+            assert_eq!(result.is_ok(), expected);
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let attempt = |expected: bool| {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::data_lock_excludes_other_processes_and_releases_after_owner_drops",
+                    "--nocapture",
+                ])
+                .env(ROOT, directory.path())
+                .env(EXPECT_OPEN, expected.to_string())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "child lock check failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        let owner = Launcher::open(Some(directory.path().into())).unwrap();
+        let shared = owner.clone();
+        attempt(false);
+        drop(owner);
+        attempt(false); // A clone still owns the same database.
+        drop(shared);
+        attempt(true);
     }
 
     #[test]

@@ -129,6 +129,9 @@ input::placeholder {
   --panel-inset: 28px;
   --edge: 32px;
   --motion-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --motion-fade: 160ms;
+  --motion-panel: 260ms;
+  --motion-row: 440ms;
   position: relative;
   display: grid;
   grid-template-rows: 64px minmax(0, 1fr) 64px;
@@ -1093,15 +1096,15 @@ input::placeholder {
 }
 .dialog-enter-active,
 .dialog-leave-active {
-  transition: opacity 220ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition: opacity var(--motion-panel) var(--motion-ease);
 }
 .dialog-enter-active::backdrop,
 .dialog-leave-active::backdrop {
-  transition: opacity 220ms ease-out;
+  transition: opacity var(--motion-fade) var(--motion-ease);
 }
 .dialog-enter-active > section,
 .dialog-leave-active > section {
-  transition: transform 260ms cubic-bezier(0.22, 1, 0.36, 1);
+  transition: transform var(--motion-panel) var(--motion-ease);
 }
 .dialog-enter-from,
 .dialog-leave-to,
@@ -1111,13 +1114,55 @@ input::placeholder {
 }
 .dialog-enter-from > section,
 .dialog-leave-to > section {
-  transform: translateY(8px) scale(0.985);
+  transform: translateY(8px);
 }
 .dialog-leave-active {
   pointer-events: none;
 }
 .dialog-heading:focus {
   outline: none;
+}
+.dialog-panel-enter-active,
+.dialog-panel-leave-active {
+  transition: opacity var(--motion-fade) var(--motion-ease);
+}
+.dialog-panel-enter-from,
+.dialog-panel-leave-to {
+  opacity: 0;
+}
+.dialog-panel-leave-active {
+  pointer-events: none;
+}
+.selection-label {
+  position: relative;
+  display: grid;
+  min-width: 0;
+}
+.selection-label > span {
+  grid-area: 1 / 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.selection-text-enter-active,
+.selection-text-leave-active {
+  transition:
+    opacity var(--motion-fade) var(--motion-ease),
+    transform var(--motion-panel) var(--motion-ease);
+}
+.selection-text-enter-from {
+  opacity: 0;
+  transform: translateX(6px);
+}
+.selection-text-leave-to {
+  opacity: 0;
+  transform: translateX(-4px);
+}
+.selection-text-leave-active {
+  position: absolute;
+  width: 100%;
+  pointer-events: none;
 }
 .utility-panel,
 .modal,
@@ -1496,6 +1541,20 @@ input:read-only {
   position: relative;
   min-width: 0;
 }
+.account-choice-move {
+  transition: transform var(--motion-row) var(--motion-ease);
+}
+.account-choice-leave-active {
+  animation: none;
+  transition:
+    opacity var(--motion-fade) var(--motion-ease),
+    transform var(--motion-panel) var(--motion-ease);
+  pointer-events: none;
+}
+.account-choice-leave-to {
+  opacity: 0;
+  transform: translateY(-8px);
+}
 .account-select,
 .account-add {
   display: flex;
@@ -1511,13 +1570,27 @@ input:read-only {
   color: var(--ink);
 }
 .account-select:hover:not(:disabled) {
-  border-color: var(--glass-stroke);
-  background: color-mix(in srgb, var(--blue) 6%, transparent);
+  border-color: transparent;
+  background: transparent;
 }
-.account-select.current {
-  border-color: color-mix(in srgb, var(--blue) 50%, transparent);
-  background: color-mix(in srgb, var(--blue) 6%, transparent);
-  box-shadow: var(--glass-rim);
+.account-select:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+.account-avatar-frame {
+  transition: filter var(--motion-fade) var(--motion-ease);
+}
+.account-select:not(.current):hover:not(:disabled) .account-avatar-frame,
+.account-select:not(.current):focus-visible .account-avatar-frame {
+  filter: brightness(1.08) drop-shadow(0 0 6px #ffffff66);
+}
+.account-select.current .account-avatar-frame {
+  filter: brightness(1.12) drop-shadow(0 0 3px #ffffffbb)
+    drop-shadow(0 0 12px #ffffff55);
+}
+.account-select.current:focus-visible .account-avatar-frame {
+  filter: brightness(1.18) drop-shadow(0 0 3px #ffffffdd)
+    drop-shadow(0 0 14px #ffffff88);
 }
 .account-add {
   border: 0;
@@ -1555,25 +1628,26 @@ input:read-only {
   image-rendering: pixelated;
 }
 .account-name {
+  position: absolute;
+  top: 80px;
+  left: 0;
   width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 12px;
   line-height: 20px;
+  opacity: 0;
+  transform: translateY(-3px);
+  pointer-events: none;
+  transition:
+    opacity var(--motion-fade) var(--motion-ease),
+    transform var(--motion-panel) var(--motion-ease);
 }
-.account-selected-mark {
-  position: absolute;
-  bottom: -4px;
-  right: -4px;
-  display: grid;
-  place-items: center;
-  width: 18px;
-  height: 18px;
-  border-radius: 0;
-  background: var(--blue);
-  color: var(--night);
-  box-shadow: 0 0 0 2px var(--surface);
+.account-choice:hover .account-name,
+.account-choice:focus-within .account-name {
+  opacity: 1;
+  transform: none;
 }
 .account-choice .account-remove {
   position: absolute;
@@ -3078,6 +3152,22 @@ input:read-only {
   overflow-anchor: none;
   font: 12px/22px var(--mono);
 }
+.log-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.log-stage > .log-content {
+  height: 100%;
+}
+.viewport-exit-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  user-select: none;
+}
 .log-spacer {
   position: relative;
 }
@@ -3087,6 +3177,7 @@ input:read-only {
   left: 0;
   right: 0;
   padding: 0 var(--panel-inset);
+  overflow: clip;
 }
 .log-empty {
   padding: 8px var(--panel-inset);
@@ -3344,9 +3435,25 @@ input:read-only {
 .list-reveal-item {
   /* The fade matches listMotion.ts; movement continues after the handoff. */
   animation:
-    list-row-enter 440ms cubic-bezier(0.22, 1, 0.36, 1) backwards,
-    list-row-fade 160ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+    list-row-enter var(--motion-row) var(--motion-ease) backwards,
+    list-row-fade var(--motion-fade) var(--motion-ease) backwards;
   animation-delay: var(--row-delay, 30ms);
+}
+/* Startup-only entrances. Individual translate preserves the theme control's
+   resting transform and never touches the skin/background rendering layers. */
+.ui-reveal-item {
+  animation:
+    ui-layer-enter var(--motion-row) var(--motion-ease) backwards,
+    list-row-fade var(--motion-fade) var(--motion-ease) backwards;
+  animation-delay: var(--row-delay, 30ms);
+}
+@keyframes ui-layer-enter {
+  from {
+    translate: 0 16px;
+  }
+  to {
+    translate: 0 0;
+  }
 }
 @keyframes list-row-enter {
   from {
@@ -3365,7 +3472,33 @@ input:read-only {
   }
 }
 @media (prefers-reduced-motion: reduce) {
-  .list-reveal-item {
+  .list-reveal-item,
+  .ui-reveal-item {
     animation: none;
   }
+}
+
+.addition-version-target {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 4px 24px 0;
+  font-size: 12px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.addition-version-target .glass-select {
+  flex: 1;
+  min-width: 0;
+}
+.addition-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 18px;
+  flex: 1;
+  padding: 24px;
+  color: var(--muted);
+  font-size: 13px;
 }

@@ -1,9 +1,9 @@
 //! Reuse successful hashes only while the file's identity and metadata match.
 //! Explicit repair bypasses receipts; new/unrecorded files always get hashed.
 use anyhow::Result;
+use ring::digest::{Context as HashContext, SHA256};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
-use sha2::Sha256;
 use std::{
     collections::HashMap,
     fs,
@@ -323,7 +323,7 @@ fn inspect(
         store.hashes.fetch_add(1, Ordering::Relaxed);
     }
     let mut a = Sha1::new();
-    let mut b = Sha256::new();
+    let mut b = HashContext::new(&SHA256);
     let mut buffer = vec![0u8; 256 * 1024];
     loop {
         crate::download::check_cancel(cancel)?;
@@ -338,7 +338,7 @@ fn inspect(
         }
     }
     let matched = (if sha256 {
-        hex::encode(b.finalize())
+        hex::encode(b.finish())
     } else {
         hex::encode(a.finalize())
     })
@@ -372,6 +372,36 @@ fn inspect(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ring::digest::digest;
+
+    #[tokio::test]
+    async fn sha256_file_hashes_match_known_vectors_across_read_boundaries() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("payload");
+        for (bytes, expected) in [
+            (
+                b"abc".to_vec(),
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            ),
+            (
+                vec![b'a'; 1_000_000],
+                "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0",
+            ),
+        ] {
+            fs::write(&path, &bytes).unwrap();
+            assert!(
+                verify_full(&path, &expected.to_uppercase(), true, bytes.len() as u64)
+                    .await
+                    .unwrap()
+            );
+            fs::write(&path, vec![b'b'; bytes.len()]).unwrap();
+            assert!(
+                !verify_full(&path, expected, true, bytes.len() as u64)
+                    .await
+                    .unwrap()
+            );
+        }
+    }
 
     #[cfg(windows)]
     #[tokio::test]
@@ -511,7 +541,7 @@ mod tests {
         fs::write(&path, b"runtime").unwrap();
         let store = VerificationCache::shared(temp.path());
         let cancel = CancellationToken::new();
-        let hash = hex::encode(Sha256::digest(b"runtime"));
+        let hash = hex::encode(digest(&SHA256, b"runtime"));
         assert!(
             store
                 .verify(&path, &hash, true, 7, false, &cancel)

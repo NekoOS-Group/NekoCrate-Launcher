@@ -1,5 +1,74 @@
 /** Launcher-owned messages only. Game output and user-supplied values are never translated. */
 export const backendEnglish: Readonly<Record<string, string>> = {
+  目录尚不存在: "The directory does not exist yet",
+  此项目不是整合包: "This project is not a modpack",
+  "作者未允许通过第三方启动器下载，请在项目主页下载后导入":
+    "The author has not allowed third-party downloads. Download from the project page, then import the file",
+  此版本没有唯一的整合包文件:
+    "This version does not identify a unique modpack archive",
+  "此文件未提供下载地址，请在项目主页下载后导入":
+    "No download URL is available. Download from the project page, then import the file",
+  整合包下载地址无效: "Invalid modpack download URL",
+  整合包文件大小或校验信息无效: "Invalid modpack size or checksum",
+  整合包版本不属于所选项目:
+    "The modpack version does not belong to the selected project",
+  整合包内容与下载平台不符:
+    "The archive format does not match the selected platform",
+  资源搜索结果格式无效: "Invalid resource search response",
+
+  "请分别导入资源、整合包或游戏目录":
+    "Import resources, modpacks and game directories separately",
+  "请先选择目标游戏版本，或将资源拖到版本列表中的指定版本":
+    "Select a game version first, or drop resources onto a specific version in the list",
+  "需要配置 CurseForge API Key，请前往网络设置":
+    "Configure a CurseForge API key in Network settings",
+  "CurseForge API Key 无效或没有访问权限":
+    "The CurseForge API key is invalid or lacks permission",
+  "资源平台请求过于频繁，请稍后重试":
+    "Too many requests to the resource platform. Try again later",
+  "此版本尚未安装 Mod 加载器":
+    "This version does not have a mod loader installed",
+  请先选择要安装数据包的存档: "Choose a world for the data pack first",
+  目标存档不存在: "The target world no longer exists",
+  "资源在安装期间发生变化：{path}":
+    "The resource changed during installation: {path}",
+  "源文件在预览后发生变化，请重新导入":
+    "The source changed after the preview. Import it again",
+  "源文件在导入时发生变化，请重新导入":
+    "The source changed during import. Import it again",
+  "目标已存在且内容不同：{path}":
+    "The destination already exists with different content: {path}",
+  "文件名大小写冲突：{name}": "File names differ only in letter case: {name}",
+  "多个资源使用相同文件名：{name}":
+    "Multiple resources use the same file name: {name}",
+  "已安装此项目的其他文件：{path}":
+    "Another file from this project is already installed: {path}",
+  "Mod ID 冲突：{details}": "Duplicate mod ID: {details}",
+  "本地 Mod 的游戏版本与前置依赖请确认：{name}":
+    "Check the game version and dependencies of this local mod: {name}",
+  "Mod 加载器不匹配：{details}": "Incompatible mod loader: {details}",
+  "光影需要游戏中已有兼容的 Iris 或 OptiFine":
+    "Shaders require a compatible Iris or OptiFine installation",
+  "资源与游戏或加载器版本不兼容：{name}":
+    "The resource is incompatible with the game or loader version: {name}",
+  "依赖要求不同版本：{details}":
+    "Dependencies require conflicting versions: {details}",
+  "存在声明不兼容的资源：{name}":
+    "A declared incompatible resource is present: {name}",
+  "必要依赖没有兼容版本：{project}":
+    "No compatible version for required dependency: {project}",
+  "作者未允许通过第三方启动器下载：{name}":
+    "The author has not allowed downloads through third-party launchers: {name}",
+  "作者未提供可用下载地址，请从项目页面下载后拖入":
+    "No download URL is available. Download from the project page and drop the file here",
+  "目标版本已变化，请重新生成资源安装计划":
+    "The target profile changed. Generate a new installation preview",
+  请先解决安装预览中的冲突并重新生成计划:
+    "Resolve the conflicts and generate a new installation preview",
+  "无法判断资源类型，请选择资源包或数据包":
+    "Choose whether to import this as a resource pack or a data pack",
+  "不能导入符号链接，请选择实际文件或目录":
+    "Choose the actual file or directory instead of a symbolic link",
   "HTTPS 证书不在有效期内，请检查系统日期、时间和时区并开启自动同步；若时间正确，可能是服务器证书异常":
     "The HTTPS certificate is outside its validity period. Check your system date, time and time zone and enable automatic time sync. If your clock is correct, the server certificate may be at fault",
   "HTTPS 证书验证失败，请检查代理或网络的证书配置":

@@ -267,17 +267,13 @@ onBeforeUnmount(() => {
           class="content-item-file"
           :class="{ 'is-primary': !hasDisplayName }"
         >
-          <button
+          <span
             v-if="available"
-            type="button"
-            class="content-file-link"
-            :title="t('在文件管理器中显示')"
-            :aria-label="`${t('在文件管理器中显示')} · ${file.file_name}`"
-            :aria-busy="openingFolder"
-            @click.stop="openFileFolder()"
+            class="content-file-name"
+            :title="file.file_name"
           >
             {{ file.file_name }}
-          </button>
+          </span>
           <span v-else class="content-planned-file">{{
             file.declaration?.path ||
             (file.declaration?.file
@@ -386,7 +382,9 @@ onBeforeUnmount(() => {
               >
                 <header>
                   <strong v-if="source.title && source.title !== file.name">{{
-                    source.title
+                    source.source === ".nekocrate/resources.json"
+                      ? t("安装来源")
+                      : source.title
                   }}</strong>
                   <component
                     :is="source.revealable ? 'button' : 'span'"
@@ -398,7 +396,11 @@ onBeforeUnmount(() => {
                     "
                     @click="source.revealable && openFileFolder(source.source)"
                     ><Braces :size="14" /><span
-                      >{{ archivePrefix }}{{ source.source }}</span
+                      >{{
+                        source.source === ".nekocrate/resources.json"
+                          ? ""
+                          : archivePrefix
+                      }}{{ source.source }}</span
                     ></component
                   >
                 </header>
@@ -447,6 +449,7 @@ onBeforeUnmount(() => {
                   {{ translateMessage(source.issue) }}
                 </p>
                 <details
+                  v-if="source.source !== '.nekocrate/resources.json'"
                   class="content-raw"
                   @toggle="toggleSource(source.source, $event)"
                 >
@@ -541,7 +544,6 @@ onBeforeUnmount(() => {
   opacity: 0.75;
 }
 .content-item-toggle,
-.content-file-link,
 .content-item-expand {
   min-width: 0;
   padding: 0;
@@ -611,7 +613,6 @@ onBeforeUnmount(() => {
   tab-size: 2;
 }
 .content-item-toggle:focus-visible,
-.content-file-link:focus-visible,
 .content-item-expand:focus-visible {
   outline: 1px solid var(--tab-color);
   outline-offset: -1px;
@@ -650,7 +651,7 @@ onBeforeUnmount(() => {
   font: 10px/14px var(--mono);
   color: var(--muted);
 }
-.content-file-link {
+.content-file-name {
   font: inherit;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -659,23 +660,14 @@ onBeforeUnmount(() => {
     color 180ms,
     text-shadow 180ms;
 }
-.content-file-link:hover,
-.content-file-link:focus-visible {
-  color: var(--tab-color);
-  text-shadow: 0 0 10px color-mix(in srgb, var(--tab-color) 25%, transparent);
-}
 .content-item-file.is-primary {
   font-family: inherit;
 }
-.content-item-file.is-primary .content-file-link {
+.content-item-file.is-primary .content-file-name {
   color: var(--ink);
   font-size: 13px;
   font-weight: 500;
   line-height: 18px;
-}
-.content-item-file.is-primary .content-file-link:hover,
-.content-item-file.is-primary .content-file-link:focus-visible {
-  color: var(--tab-color);
 }
 .content-item-file small {
   flex-shrink: 0;
@@ -817,7 +809,6 @@ onBeforeUnmount(() => {
 @media (prefers-reduced-motion: reduce) {
   .content-item-expanded,
   .content-item-chevron,
-  .content-file-link,
   .content-item-label strong {
     transition: none;
   }

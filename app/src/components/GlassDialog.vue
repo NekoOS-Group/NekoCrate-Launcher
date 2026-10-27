@@ -1,7 +1,11 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from "vue";
 import { CheckCircle2 } from "lucide-vue-next";
-import { rememberDialogFocus } from "../dialogMotion";
+import {
+  rememberDialogFocus,
+  pinPanelLeave,
+  resetPanelLeave,
+} from "../dialogMotion";
 import { registerDialog } from "../dialogSurface";
 const props = defineProps<{
   label: string;
@@ -35,7 +39,13 @@ onMounted(() => {
     @cancel.prevent="close"
     @click.self="close"
   >
-    <slot />
+    <Transition
+      name="dialog-panel"
+      @before-leave="pinPanelLeave"
+      @after-leave="resetPanelLeave"
+      @leave-cancelled="resetPanelLeave"
+      ><slot
+    /></Transition>
     <div v-if="notice" class="dialog-notice glass-surface" role="status">
       <CheckCircle2 :size="15" />{{ notice }}
     </div>

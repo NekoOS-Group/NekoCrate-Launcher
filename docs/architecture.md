@@ -65,7 +65,7 @@ CLI 显式复制实例时才复制整个游戏目录和版本列表到新的托�
 
 皮肤场景使用按需绘制：纹理、尺寸、视角改变时合并到下一显示帧，OrbitControls 惯性未结束时继续更新，静止后停止 WebGL 重绘。隐藏、弹窗与 WebGL 上下文丢失时取消待绘制帧，恢复后补绘；像素比、抗锯齿、灯光、模型与拖动参数保持不变。背景动画独立运行。皮肤画布的键盘焦点使用沿透明角色轮廓的白色硬边描边，替代矩形焦点框；只在 `:focus-visible` 时通过 CSS 合成，不增加 WebGL 绘制循环。`rendering.test.mjs` 覆盖静止、合并请求、惯性、暂停恢复与销毁。
 
-主界面使用左上账户卡片、底部主题与实例图标、分体启动按钮。账户卡片打开头像选择弹窗，点击头像选择当前账户，「+」进入添加流程；非当前账户头像独立加载官方皮肤，并忽略已卸载组件的异步结果。登录应用配置归入添加账户流程，保存全局设置时保留最新应用编号。`GlassDialog` 基于原生 `dialog.showModal()` 实现焦点约束和背景隔离，初始焦点放在静态标题上，账户、设置、日志、下载与实例管理复用该弹窗。`VersionMenu` 在启动按钮旁向上展开当前实例版本，尾项进入下载弹窗；菜单独立处理键盘导航、Esc、焦点离开和外部点击收起，切换实例会收起旧菜单，保留版本按钮节点以避免闪烁。五套主题由统一 CSS 变量驱动，主题与当前实例选择在本地持久化。主题图形的可见大小与间距不变，真实透明按钮连续覆盖 36 × 64px（当前主题为 44 × 64px）；命中区不随展开动画移动，按下时捕获指针，松手后提交选择，避免 Safari 失焦收起菜单。主题区域高于实例列，防止选项被后绘制的实例按钮遮挡。默认与最小窗口均为 900 × 600。
+主界面使用左上账户卡片、底部主题与实例图标、分体启动按钮。账户卡片打开头像选择弹窗，点击头像选择当前账户，「+」进入添加流程；非当前账户头像独立加载官方皮肤，并忽略已卸载组件的异步结果。登录应用配置归入添加账户流程，保存全局设置时保留最新应用编号。`GlassDialog` 基于原生 `dialog.showModal()` 实现焦点约束和背景隔离，初始焦点放在静态标题上，账户、设置、日志、下载与实例管理复用该弹窗。`VersionMenu` 在启动按钮旁向上展开当前实例版本，尾项「添加新的版本」进入统一添加弹窗；菜单独立处理键盘导航、Esc、焦点离开和外部点击收起，切换实例会收起旧菜单，保留版本按钮节点以避免闪烁。五套主题由统一 CSS 变量驱动，主题与当前实例选择在本地持久化。主题图形的可见大小与间距不变，真实透明按钮连续覆盖 36 × 64px（当前主题为 44 × 64px）；命中区不随展开动画移动，按下时捕获指针，松手后提交选择，避免 Safari 失焦收起菜单。主题区域高于实例列，防止选项被后绘制的实例按钮遮挡。默认与最小窗口均为 900 × 600。
 
 `flowGraph.ts` 在整数周期格点上构造蜂巢、大小方块、菱形、三角和八边形／小菱形五种平面铺砌，共享边只保存一次状态。`hexFlow.ts` 保留既有模拟 API，统一使用图中的邻边数量计算转移概率；封闭面识别、容量及染料交换适用于所有图形。`WorldBackdrop` 用常驻 GPU 的有序几何批量绘制，不逐帧触发组件重渲染；整张图的状态始终推进，呈现时由 GPU 裁切不可见区域。切换主题时通过组件 key 清理旧动画帧、尺寸监听和可见性监听，再构造新图形。弹窗和菜单不暂停背景；隐藏页面、减少动态效果和高对比模式分别停帧或隐藏装饰。
 
@@ -123,7 +123,7 @@ CLI 显式复制实例时才复制整个游戏目录和版本列表到新的托�
 
 Java 自动匹配考虑版本、架构与模组约束：旧 macOS Intel natives 使用 x86_64 Java；现代加载器自动选择完整 JDK。精简 Temurin JRE 的 Java 类缺少局部变量表，会使 Preloading Tricks 3.5.6 的 ResolverTransformer 失败，因此不用于现代加载器自动匹配。`java_compatibility.rs` 使用版本配置的 `compatibleJavaMajors` 或明确核实的加载器范围，结合 ASM 字节码上限、Fabric/Forge/NeoForge 模组的 Java 约束以及嵌套 JAR 检查，优先复用兼容范围内最高版本的本地 Java；确实需要下载时才选择该范围的最高版本。检查在后台执行，以文件路径、大小和修改时间缓存模组结果，并限制嵌套层数及解压总量。最低版本声明本身不证明支持任意更新 JVM，模组信息不完整或依赖覆盖尚未解析时退回游戏声明版本。现有核实规则范围有限，不能保证任意整合包都能跨 Java 主版本。手动指定路径也会拒绝超过已知 ASM/LaunchWrapper 上限的 Java；旧 LaunchWrapper 保持 Java 8。
 
-`memory.rs` 集中计算内存，实例持久化 `memory_mode=auto/recommended/minimum/custom`，`memory_mb` 只保存自定义值。新建、导入及缺失模式字段的旧实例默认 Auto，复制保留原模式；切换模式不覆盖自定义数值。Auto 在启动前通过 sysinfo 仅采集 RAM，参考 [HMCL 的可用内存曲线](https://github.com/HMCL-dev/HMCL/blob/main/HMCL/src/main/java/org/jackhuang/hmcl/game/HMCLGameRepository.java#L465-L480)：预留 512 MiB、前 8 GiB 取 80%、剩余部分取 20%，限制为 512–16384 MiB；系统读数不可用时使用不超过 4096 MiB 的推荐值。32 位 Java 自动值最多 768 MiB；其他模式超过 1536 MiB 时提示切换 64 位 Java，避免静默降低手动或整合包配置。
+`memory.rs` 集中计算内存，实例持久化 `memory_mode=auto/recommended/minimum/custom`，`memory_mb` 只保存自定义值。新建、导入及缺失模式字段的旧实例默认 Auto，复制保留原模式；切换模式不覆盖自定义数值。Auto 在启动前通过原生系统接口仅采集 RAM（Windows `GlobalMemoryStatusEx`、macOS `sysctl` / Mach VM、Linux `/proc/meminfo`），保留原 sysinfo 的可用内存统计口径，参考 [HMCL 的可用内存曲线](https://github.com/HMCL-dev/HMCL/blob/main/HMCL/src/main/java/org/jackhuang/hmcl/game/HMCLGameRepository.java#L465-L480)：预留 512 MiB、前 8 GiB 取 80%、剩余部分取 20%，限制为 512–16384 MiB；系统读数不可用时使用不超过 4096 MiB 的推荐值。32 位 Java 自动值最多 768 MiB；其他模式超过 1536 MiB 时提示切换 64 位 Java，避免静默降低手动或整合包配置。
 
 推荐／最小是本启动器的经验预设，不代表官方硬件要求或运行保证：原版 1.12 及之前为 2048／1024 MiB，其余为 4096／2048 MiB；有加载器的旧版为 4096／2048 MiB，现代版为 6144／3072 MiB。实际工作目录中有效 Mod JAR 数量达到 100、200、400 时分别采用 6144／4096、8192／6144、12288／8192 MiB；仅枚举该目录，不解压 Mod。读取 `mcbbs.packmeta` 和 HMCL `modpack.cfg` 内 `launchInfo.minMemory` 声明作为预设下限，不把其他启动器的个人 JVM 设置误当作整合包要求。预览只在打开实例设置时计算，启动前再计算，CLI 和桌面复用同一核心。最终生成唯一的 `-Xmx` 与 `-Xms256M`，清除导入参数中冲突的堆大小参数但不改写原 JSON。设置中最小／推荐显示估算数字，自动仅显示文字，自定义直接编辑数字，`MB` 显示在控件外；数值沿用 JVM 的 MiB 单位。
 
@@ -138,7 +138,27 @@ Java 自动匹配考虑版本、架构与模组约束：旧 macOS Intel natives 
 
 游戏源保留 `download_source` 字段以兼容旧配置，新增配置默认 `auto`；显式 `official` 或 `bmclapi` 只使用选定来源。自动模式在每个下载任务中按源域名并行探测响应头，采用最先成功的来源，探测限时 3 秒；同域名并发文件复用探测结果，失败时仍有重试与另一来源回退。只改写已知公共 Minecraft 域名，不改写登录、带凭据／查询参数或未知域名的 URL。
 
-`mod_download_source` 独立保存为 `auto`、`modrinth`、`curseforge` 或 `bbsmc`；旧 `official` 选项显示为自动选择，并在下次保存时归一为 `auto`。这是资源平台选择，不会把 Modrinth 文件 URL 直接改写成 CurseForge 或 BBSMC 地址，也不受游戏本体镜像设置影响。本原型尚无 Mod 浏览／安装流程，目前完成平台选项、校验和持久化，尚未实现自动跨平台搜索和文件安装。
+`mod_download_source` 独立保存为 `auto`、`modrinth`、`curseforge` 或 `bbsmc`；旧 `official` 选项显示为自动选择，并在下次保存时归一为 `auto`。这是资源平台选择，不会把 Modrinth 文件 URL 直接改写成 CurseForge 或 BBSMC 地址，也不受游戏本体镜像设置影响。资源浏览器支持 Modrinth 和 CurseForge，默认使用所选平台；自动和未接入浏览器的 BBSMC 选项目前从 Modrinth 开始，不做跨平台项目 ID 猜测或自动替换。
+
+### 子实例资源浏览与导入
+
+「添加新的版本」共用目标目录标题栏，分为游戏版本、整合包、资源三个页签。资源页额外选择已有子实例，不改变主界面的启动版本；新建空目录时先添加游戏版本。在线整合包通过 Modrinth `project_type:modpack` / CurseForge Minecraft modpacks 分类搜索，版本目录不套用当前子实例的 Minecraft 或加载器过滤条件。版本列表分页，沿用十分钟元数据缓存。只接受属于所选项目、带有效 SHA-1 和大小的 HTTPS 整合包归档，尊重 CurseForge 分发限制；归档复用下载器的缓存、校验、重试、暂停和取消。
+
+在线归档先下载到 `cache/modpacks/<sha1>.mrpack|zip` 并解析，再进入现有安装预览。此时不创建或修改游戏目录；用户确认名称、目标目录、可选文件后，仍由 `prepare_modpack` 在目标游戏目录的 `versions/<整合包名>` 创建独立版本，同名报错。关闭添加窗口不会被迟到的下载响应重新打开。公开接口联调：`cargo test -p nekocrate-core live_online_modpack_search_download_and_preview -- --ignored`，只写临时目录。
+
+弹窗开合由 `GlassDialog` / `dialogMotion` 统一处理；内部面板替换时把退场面板固定在原位置并设为 inert，避免挤动新面板或误触。`ContentSwitch` 复用版本管理的 `listMotion`：重叠交接、可见行错峰纵向渐现与退出，不旋转或移动整个窗口；标题布局沿用 `useHorizontalLayout`，选择框仅为选中值做横向交接，不给下拉选项逐项动效。所有动效遵循减少动态效果设置，长列表屏外行不播放入场动画。
+
+版本管理标题栏的加号打开「添加资源」；资源也可以直接拖到版本管理左侧的某个版本、启动版本菜单中的版本，或实例图标（使用其当前启动版本）。拖入时悬停启动版本箭头会展开菜单。空白区域使用当前选中的版本；仍将普通游戏目录交给原有的关联流程。识别依据是包内标记，不把所有 ZIP 当作整合包。仅当 CurseForge 清单的 `manifestType` 为 `minecraftModpack` 或存在 Modrinth 清单时走整合包入口。
+
+`resources` 根据 `version_management::content_location` 使用真正的运行目录，兼容共享目录、HMCL 配置及隔离版本；界面提示共享关系。Mods、资源包、光影分别进入 `mods`、`resourcepacks`、`shaderpacks`。数据包必须选择当前运行目录中的现有存档，写入 `saves/<world>/datapacks`，不误放到不会自动加载的全局 datapacks。地图目录或 ZIP 写入 `saves/<name>`；单一外层包装目录会去掉。兼具 assets/data 的包要求选择类型。本地 Mod 检查加载器和重复 ID，但不声称能完整推断任意本地 JAR 的游戏兼容性、复杂版本范围或平台项目 ID。
+
+在线浏览按目标 Minecraft 版本和加载器过滤，提供平台、资源类型、文字搜索、分页和版本选择。Modrinth/CurseForge 返回统一项目、版本、文件和依赖结构。必要依赖递归展开、去重并限制规模；固定版本冲突、声明不兼容关系、已安装的其他版本和文件冲突会阻止安装。可选依赖只记录，不自动安装；已有受管理且兼容的必要前置优先复用。接口元数据按请求 URL 缓存十分钟，查询错误不缓存。CurseForge 需要网络设置中的 API Key；尊重作者的分发许可和缺失的下载地址。Key 只放敏感请求头，元数据接口禁止重定向；CDN 下载仅向明确允许的官方 HTTPS 主机发送，跳转时重新检查，不写入计划、来源记录或 URL。
+
+预览清单保存在实际运行目录的 `.nekocrate/resource-tasks/<uuid>/plan.json`。点击安装后才计入未完成任务；失败、取消和重启后可以继续。远程文件复用下载器的并发、重试、暂停、断点、校验与对象缓存，本地复制支持取消和进度事件。全部内容先在同卷任务目录暂存，通过校验和 Mod ID 冲突检查后再发布；不会覆盖已有不同文件。发布前持久化内容哈希，进程中断后已发布且一致的文件可识别为复用；普通提交错误回退本次新建文件，保留下载缓存。ZIP 和目录拒绝越界路径、符号链接、大小写冲突及超限内容。源文件保持原位。
+
+`.nekocrate/resources.json` 按相对路径保存平台、项目 ID、版本 ID、依赖、SHA-256、可用的 SHA-1 与安装时间。记录随游戏目录移动，版本管理展开内容时显示安装来源。内容行文件名只展示，不打开文件管理器；底部实际内容目录带文件夹图标，点击按实例、版本和分类重新解析并打开目录，不创建缺失目录。该记录是后续更新和卸载的基础，本次没有自动升级、卸载或替换已有 Mod；本地导入不伪造在线来源。
+
+回归：`cargo test -p nekocrate-core resources:: --lib` 使用临时游戏目录与离线 API 缓存；公开接口联调单独运行 `cargo test -p nekocrate-core live_modrinth_search_versions_and_dependency_preview -- --ignored`。CurseForge 的解析与凭据隔离有离线覆盖，完整在线安装须在应用 Key 获批后验证。
 
 来源调研（2026-10-23）：[Modrinth](https://docs.modrinth.com/api/) 提供公开搜索、版本与文件信息；[CurseForge](https://docs.curseforge.com/rest-api/) 提供 Mod 和文件接口，需应用 API Key，且[官方公告](https://blog.curseforge.com/introducing-api-key-authentication-for-curseforge-file-downloads/)要求 CDN 下载也使用有效 Key；[BBSMC](https://bbsmc.net/) 是中文资源社区，其[官方仓库](https://github.com/bbsmc/app/tree/main/apps/docs)提供开发者文档与 API 规范。MC 百科更适合中文资料检索；GitHub Releases 属于按项目发布的来源，暂不作为统一 Mod 平台选项。MCIM 的[现行仓库](https://github.com/mcmod-info-mirror/mcim-rust-api)标注服务暂停及文件下载不可用，未列入选项。
 

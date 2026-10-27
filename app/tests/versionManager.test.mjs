@@ -855,6 +855,40 @@ test("opening a content folder preserves the row context when another instance i
   }
 });
 
+test("the footer opens the selected content directory without a filename and reports opener errors", async () => {
+  const calls = [];
+  const h = manager({
+    loadCounts: async () => ({
+      mods: 1,
+      datapacks: 0,
+      resourcepacks: 0,
+      saves: 0,
+    }),
+    loadContent: async () => ({
+      directory: "/Games/versions/first/mods",
+      files: [{ name: "Cat", file_name: "cat.jar" }],
+    }),
+    openContentFolder: async (...args) => {
+      calls.push(args);
+    },
+  });
+  try {
+    await flush();
+    await h.ui.showContent("mods");
+    await flush();
+    await h.ui.openDirectory();
+    assert.deepEqual(calls, [["instance-a", "first", "mods"]]);
+    h.props.openContentFolder = async () => {
+      throw new Error("missing directory");
+    };
+    await h.ui.openDirectory();
+    assert.equal(h.events.at(-1)[0], "error");
+    assert.equal(h.events.at(-1)[1].message, "missing directory");
+  } finally {
+    h.dispose();
+  }
+});
+
 test("Mod ID navigation clears filters, prefers enabled providers and stays within the selected instance", async () => {
   const files = [
     { name: "Cat", file_name: "cat.jar", mod_ids: ["cat"], enabled: true },
