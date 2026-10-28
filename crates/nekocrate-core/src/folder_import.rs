@@ -419,7 +419,9 @@ mod tests {
             Some(result.added[0].id.as_str())
         );
         assert!(scan.candidates[0].blocked.is_none());
-        launcher.delete_instance(&result.added[0].id).unwrap();
+        launcher
+            .delete_instance_with_recycle(&result.added[0].id, crate::recycle::discard_test_fixture)
+            .unwrap();
         assert_eq!(
             tree(&first),
             original,

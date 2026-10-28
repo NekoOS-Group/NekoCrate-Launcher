@@ -3,6 +3,8 @@ use anyhow::{Context, Result, ensure};
 use reqwest::Url;
 use std::{path::Path, time::Duration};
 
+mod upload;
+
 const MAX_BYTES: usize = 2 * 1024 * 1024;
 
 pub(crate) fn profile_skin(profile: &serde_json::Value) -> Option<AccountSkin> {
@@ -42,7 +44,7 @@ fn texture_url(value: &str) -> Result<(Url, String)> {
     Ok((url, hash))
 }
 
-fn validate_png(bytes: &[u8]) -> Result<()> {
+pub(crate) fn validate_png(bytes: &[u8]) -> Result<()> {
     ensure!(
         bytes.len() >= 33
             && bytes.len() <= MAX_BYTES

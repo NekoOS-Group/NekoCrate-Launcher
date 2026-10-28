@@ -30,11 +30,14 @@ regex = "1"
 semver = "1"
 toml = { version = "1.1", default-features = false, features = ["std", "serde", "parse"] }
 sys-locale = "0.3"
+trash = { version = "5.2.9", default-features = false, features = ["coinit_apartmentthreaded", "chrono"] }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 time = { version = "0.3.55", features = ["local-offset", "formatting"] }
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
+# Already used by keyring; use metadata-only lookup when updating a secret.
+security-framework = "3"
 libc = "0.2"
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3", features = ["windows-native"] }

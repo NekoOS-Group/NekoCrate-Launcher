@@ -85,6 +85,238 @@ async fn install(launcher: &Launcher, plan: &ResourcePlan) -> Result<()> {
         .await
 }
 
+fn copy_target(launcher: &Launcher, id: &str, working: &Path, isolated: bool) -> PathBuf {
+    launcher.add_version(id, "target").unwrap();
+    let game = launcher.instance(id).unwrap().game_dir(launcher.root());
+    let mut profile = crate::test_http::version_fixture("target");
+    profile.libraries.push(
+        serde_json::from_value::<Library>(json!({"name":"net.fabricmc:fabric-loader:0.16.10"}))
+            .unwrap(),
+    );
+    storage::write_json(
+        &crate::version::metadata_path(&game, "target").unwrap(),
+        &profile,
+    )
+    .unwrap();
+    if isolated {
+        let target = game.join("versions/target");
+        fs::create_dir_all(target.join("mods")).unwrap();
+        target
+    } else {
+        working.to_owned()
+    }
+}
+
+#[tokio::test]
+async fn mod_copy_preserves_source_and_disabled_state_and_is_idempotent() {
+    let (_temp, launcher, id, working) = fixture(true);
+    let target = copy_target(&launcher, &id, &working, true);
+    let cancel = CancellationToken::new();
+    for name in [
+        "enabled.jar",
+        "disabled.jar.disabled",
+        "other.jar.off",
+        "legacy.jar",
+    ] {
+        archive(
+            &working.join("mods").join(name),
+            &[(
+                "fabric.mod.json",
+                &format!(r#"{{"id":"{name}","version":"1"}}"#),
+            )],
+        );
+        if name == "legacy.jar" {
+            archive(
+                &working.join("mods").join(name),
+                &[("example.class", "legacy")],
+            );
+        }
+        let source = ResourceCopySource {
+            kind: ResourceKind::Mods,
+            instance: id.clone(),
+            version: "1.20.1".into(),
+            file: name.into(),
+        };
+        let plan = launcher
+            .prepare_resource_copy(&source, &id, "target", &cancel)
+            .unwrap()
+            .unwrap();
+        install(&launcher, &plan).await.unwrap();
+        assert_eq!(
+            fs::read(working.join("mods").join(name)).unwrap(),
+            fs::read(target.join("mods").join(name)).unwrap()
+        );
+        assert!(
+            launcher
+                .prepare_resource_copy(&source, &id, "target", &cancel)
+                .unwrap()
+                .is_none()
+        );
+        assert!(launcher.resource_plans(&id, "target").unwrap().is_empty());
+    }
+}
+
+#[test]
+fn mod_copy_rejects_conflicts_and_unlisted_sources_without_touching_files() {
+    let (_temp, launcher, id, working) = fixture(true);
+    let target = copy_target(&launcher, &id, &working, true);
+    archive(
+        &working.join("mods/example.jar"),
+        &[("fabric.mod.json", r#"{"id":"example","version":"1"}"#)],
+    );
+    archive(
+        &target.join("mods/example.jar"),
+        &[("fabric.mod.json", r#"{"id":"example","version":"2"}"#)],
+    );
+    let before = fs::read(target.join("mods/example.jar")).unwrap();
+    let cancel = CancellationToken::new();
+    let mut source = ResourceCopySource {
+        kind: ResourceKind::Mods,
+        instance: id.clone(),
+        version: "1.20.1".into(),
+        file: "example.jar".into(),
+    };
+    assert!(
+        launcher
+            .prepare_resource_copy(&source, &id, "target", &cancel)
+            .unwrap_err()
+            .to_string()
+            .contains("目标已存在")
+    );
+    assert_eq!(before, fs::read(target.join("mods/example.jar")).unwrap());
+    assert!(launcher.resource_plans(&id, "target").unwrap().is_empty());
+    for name in ["../example.jar", "/tmp/example.jar", "missing.jar"] {
+        source.file = name.into();
+        assert!(
+            launcher
+                .prepare_resource_copy(&source, &id, "target", &cancel)
+                .is_err()
+        );
+    }
+}
+
+#[test]
+fn mod_copy_between_versions_sharing_a_directory_does_nothing() {
+    let (_temp, launcher, id, working) = fixture(false);
+    copy_target(&launcher, &id, &working, false);
+    archive(
+        &working.join("mods/example.jar"),
+        &[("fabric.mod.json", r#"{"id":"example","version":"1"}"#)],
+    );
+    let source = ResourceCopySource {
+        kind: ResourceKind::Mods,
+        instance: id.clone(),
+        version: "1.20.1".into(),
+        file: "example.jar".into(),
+    };
+    assert!(
+        launcher
+            .prepare_resource_copy(&source, &id, "target", &CancellationToken::new())
+            .unwrap()
+            .is_none()
+    );
+    assert!(launcher.resource_plans(&id, "target").unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn resource_copy_routes_packs_and_shaders_to_the_other_instance_without_moving_source() {
+    let (_temp, launcher, id, working) = fixture(true);
+    let other = launcher.create_instance("Other games", "1.20.1").unwrap();
+    let target = other.game_dir(launcher.root());
+    storage::write_json(
+        &crate::version::metadata_path(&target, "1.20.1").unwrap(),
+        &crate::test_http::version_fixture("1.20.1"),
+    )
+    .unwrap();
+    for (kind, name, contents) in [
+        (
+            ResourceKind::Resourcepacks,
+            "textures.zip",
+            vec![
+                ("pack.mcmeta", "{}"),
+                ("assets/test/texture.png", "texture"),
+            ],
+        ),
+        (
+            ResourceKind::Shaderpacks,
+            "shaders.zip",
+            vec![("shaders/main.fsh", "shader")],
+        ),
+    ] {
+        let original = working.join(kind.directory()).join(name);
+        archive(&original, &contents);
+        let source = ResourceCopySource {
+            kind,
+            instance: id.clone(),
+            version: "1.20.1".into(),
+            file: name.into(),
+        };
+        let plan = launcher
+            .prepare_resource_copy(&source, &other.id, "1.20.1", &CancellationToken::new())
+            .unwrap()
+            .unwrap();
+        install(&launcher, &plan).await.unwrap();
+        assert_eq!(
+            fs::read(&original).unwrap(),
+            fs::read(target.join(kind.directory()).join(name)).unwrap()
+        );
+    }
+    // Folder-format resource packs are copied as a tree, not flattened into a ZIP.
+    let folder = working.join("resourcepacks/folder-pack");
+    fs::create_dir_all(folder.join("assets/example")).unwrap();
+    fs::write(folder.join("pack.mcmeta"), "{}").unwrap();
+    fs::write(folder.join("assets/example/a.txt"), "texture").unwrap();
+    let source = ResourceCopySource {
+        kind: ResourceKind::Resourcepacks,
+        instance: id,
+        version: "1.20.1".into(),
+        file: "folder-pack".into(),
+    };
+    let plan = launcher
+        .prepare_resource_copy(&source, &other.id, "1.20.1", &CancellationToken::new())
+        .unwrap()
+        .unwrap();
+    install(&launcher, &plan).await.unwrap();
+    assert_eq!(
+        fs::read(folder.join("assets/example/a.txt")).unwrap(),
+        fs::read(target.join("resourcepacks/folder-pack/assets/example/a.txt")).unwrap()
+    );
+}
+
+#[test]
+fn deleting_a_profile_removes_only_its_shared_resource_staging() {
+    let (temp, launcher, id, working) = fixture(false);
+    launcher.add_version(&id, "other").unwrap();
+    let mut first = new_plan(launcher.resource_target(&id, "1.20.1").unwrap());
+    first.started = true;
+    let mut second = first.clone();
+    second.id = uuid::Uuid::new_v4().to_string();
+    second.target.version = "other".into();
+    for plan in [&first, &second] {
+        save_plan(plan).unwrap();
+        let stage = task_dir(&plan.target, &plan.id).unwrap().join("stage");
+        fs::create_dir_all(&stage).unwrap();
+        fs::write(stage.join("partial"), b"keep until removed").unwrap();
+    }
+    fs::create_dir_all(working.join("mods")).unwrap();
+    fs::write(working.join("mods/user.jar"), b"user").unwrap();
+    let recycled = temp.path().join("recycled");
+    launcher
+        .delete_version_with_recycle(&id, "1.20.1", |source| {
+            fs::rename(source, &recycled)?;
+            Ok(())
+        })
+        .unwrap();
+    assert!(!task_dir(&first.target, &first.id).unwrap().exists());
+    assert!(
+        task_dir(&second.target, &second.id)
+            .unwrap()
+            .join("stage/partial")
+            .is_file()
+    );
+    assert_eq!(fs::read(working.join("mods/user.jar")).unwrap(), b"user");
+}
+
 #[test]
 fn detects_payloads_instead_of_assuming_every_zip_is_a_modpack() {
     let temp = tempfile::tempdir().unwrap();
@@ -203,6 +435,26 @@ async fn imports_all_resource_kinds_to_the_selected_profile_and_persists_sources
     assert!(plan.conflicts.is_empty());
     assert!(!plan.target.shared);
     install(&launcher, &plan).await.unwrap();
+    // Newly imported files enter the same hash index as network downloads.
+    // A later install can reuse them after staging has already been removed.
+    let content = fs::read(working.join("mods/cat.jar")).unwrap();
+    let duplicate = temp.path().join("another-game/mods/cat.jar");
+    let spec = crate::download::FileSpec {
+        path: duplicate.clone(),
+        url: "http://127.0.0.1:1/must-not-download".into(),
+        hash: {
+            use sha1::{Digest, Sha1};
+            hex::encode(Sha1::digest(&content))
+        },
+        sha256: false,
+        size: content.len() as u64,
+    };
+    crate::download::Downloader::new(launcher.root(), launcher.settings())
+        .unwrap()
+        .file(&spec, &CancellationToken::new(), &sink())
+        .await
+        .unwrap();
+    assert_eq!(fs::read(duplicate).unwrap(), content);
     for (source, _, destination) in files {
         assert!(working.join(destination).exists());
         assert!(temp.path().join(source).exists());

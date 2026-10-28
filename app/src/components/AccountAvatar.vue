@@ -5,8 +5,9 @@ import { loadSkinImage, skinAvatar } from "../previewSkin";
 import type { Account } from "../types";
 
 const props = defineProps<{
-  account: Account;
+  account?: Account;
   preview?: string;
+  texture?: string | null;
   loadTexture: (id: string) => Promise<string | null>;
 }>();
 const image = ref("");
@@ -18,9 +19,9 @@ async function refresh() {
     return;
   }
   try {
-    const source = props.account.skin
+    const source = props.account?.skin
       ? await props.loadTexture(props.account.id)
-      : null;
+      : props.texture || null;
     const texture = await loadSkinImage(source);
     if (request === generation)
       image.value = skinAvatar(texture, texture.width);
@@ -35,7 +36,13 @@ async function refresh() {
   }
 }
 watch(
-  () => [props.account.id, props.account.skin?.url, props.preview].join("|"),
+  () =>
+    [
+      props.account?.id,
+      props.account?.skin?.url,
+      props.preview,
+      props.texture,
+    ].join("|"),
   refresh,
   { immediate: true },
 );

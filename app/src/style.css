@@ -129,9 +129,9 @@ input::placeholder {
   --panel-inset: 28px;
   --edge: 32px;
   --motion-ease: cubic-bezier(0.22, 1, 0.36, 1);
-  --motion-fade: 160ms;
+  --motion-fade: 120ms;
   --motion-panel: 260ms;
-  --motion-row: 440ms;
+  --motion-row: 320ms;
   position: relative;
   display: grid;
   grid-template-rows: 64px minmax(0, 1fr) 64px;
@@ -283,12 +283,13 @@ input::placeholder {
   opacity: 0.6;
 }
 .account-avatar {
+  position: relative;
   display: grid;
   place-items: center;
   width: 40px;
   height: 40px;
   border-radius: 0;
-  overflow: hidden;
+  overflow: visible;
   background: color-mix(in srgb, var(--cyan) 18%, transparent);
   color: var(--blue);
 }
@@ -376,16 +377,51 @@ input::placeholder {
 }
 .skin-viewport canvas {
   display: block;
+  position: absolute;
+  left: 0;
+  top: 0;
   background: transparent;
   cursor: grab;
   touch-action: none;
   outline: none;
+  user-select: none;
 }
 .skin-viewport canvas:focus-visible {
   outline: none;
 }
 .skin-viewport canvas:active {
   cursor: grabbing;
+}
+.skin-pat {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  z-index: 2;
+}
+.skin-pat-hand {
+  position: absolute;
+  width: 68px;
+  height: 48px;
+  left: -30px;
+  top: -43px;
+  transform: translate(var(--pat-x), var(--pat-y)) rotate(var(--pat-turn));
+  transform-origin: 85% 50%;
+  filter: drop-shadow(0 2px 4px #00324940);
+}
+.pat-hand-outline {
+  fill: #003249;
+}
+.pat-hand-palm {
+  fill: #ecfafb;
+}
+.pat-hand-shade {
+  fill: #9ad1d4;
+}
+.pat-hand-cuff {
+  fill: var(--blue);
 }
 .skin-tools {
   position: absolute;
@@ -1627,6 +1663,22 @@ input:read-only {
   border-radius: 0;
   image-rendering: pixelated;
 }
+.guest-avatar-mark {
+  position: absolute;
+  right: -5px;
+  bottom: -5px;
+  color: var(--ink);
+  background: var(--night);
+  padding: 3px;
+  box-sizing: content-box;
+  pointer-events: none;
+}
+.account-avatar > .guest-avatar-mark {
+  right: -3px;
+  bottom: -3px;
+  z-index: 1;
+  padding: 2px;
+}
 .account-name {
   position: absolute;
   top: 80px;
@@ -1648,6 +1700,90 @@ input:read-only {
 .account-choice:focus-within .account-name {
   opacity: 1;
   transform: none;
+}
+.guest-name-button,
+.account-name-button {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  text-align: center;
+}
+.account-choice:hover .guest-name-button,
+.account-choice:focus-within .guest-name-button,
+.account-choice:hover .account-name-button,
+.account-choice:focus-within .account-name-button {
+  pointer-events: auto;
+}
+.guest-name-button:hover:not(:disabled),
+.guest-name-button:focus-visible,
+.account-name-button:hover:not(:disabled),
+.account-name-button:focus-visible {
+  border: 0;
+  background: transparent;
+  outline: none;
+  box-shadow: none;
+  color: var(--blue);
+  text-shadow: 0 0 8px color-mix(in srgb, var(--blue) 40%, transparent);
+}
+.guest-name-input {
+  position: absolute;
+  top: 78px;
+  left: 0;
+  width: 100%;
+  min-width: 0;
+  height: 24px;
+  padding: 1px 4px;
+  border-width: 0 0 1px;
+  background: transparent;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 20px;
+  text-align: center;
+}
+.guest-name-input:focus {
+  border-color: var(--blue);
+  outline: none;
+  box-shadow: none;
+}
+.account-name-editor {
+  position: absolute;
+  top: 78px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 144px;
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--blue);
+}
+.account-name-editor input {
+  flex: 1;
+  width: 0;
+  min-width: 0;
+  height: 24px;
+  padding: 1px 2px;
+  border: 0;
+  outline: none;
+  box-shadow: none;
+  background: transparent;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 20px;
+  text-align: center;
+}
+.account-name-editor .icon-button {
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  color: var(--blue);
+}
+.account-name-hint {
+  margin: -8px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
 }
 .account-choice .account-remove {
   position: absolute;
@@ -2915,9 +3051,49 @@ input:read-only {
   transform-origin: bottom right;
 }
 .version-menu-list {
+  position: relative;
   overflow-y: auto;
+  overflow-x: hidden;
   min-height: 0;
   overscroll-behavior: contain;
+}
+.version-menu-item[data-version-id] {
+  touch-action: none;
+  user-select: none;
+  cursor: grab;
+}
+.version-menu-item.version-dragging {
+  visibility: hidden;
+}
+.version-menu-item.version-sort-move {
+  transition:
+    transform 320ms cubic-bezier(0.16, 1, 0.3, 1),
+    color 140ms,
+    text-shadow 140ms;
+}
+.version-sort-leave-active {
+  position: absolute;
+  pointer-events: none;
+}
+.version-drag-ghost {
+  --glass-fill: var(--control-glass-fill);
+  position: fixed;
+  left: 0;
+  top: 0;
+  z-index: 45;
+  pointer-events: none;
+  margin: 0;
+  box-sizing: border-box;
+  box-shadow:
+    var(--glass-rim),
+    0 8px 24px #0005;
+  transition: none;
+  will-change: transform;
+}
+@media (prefers-reduced-motion: reduce) {
+  .version-menu-item.version-sort-move {
+    transition: none;
+  }
 }
 .version-menu-item {
   display: flex;
@@ -3437,7 +3613,7 @@ input:read-only {
   animation:
     list-row-enter var(--motion-row) var(--motion-ease) backwards,
     list-row-fade var(--motion-fade) var(--motion-ease) backwards;
-  animation-delay: var(--row-delay, 30ms);
+  animation-delay: var(--row-delay, 20ms);
 }
 /* Startup-only entrances. Individual translate preserves the theme control's
    resting transform and never touches the skin/background rendering layers. */
@@ -3445,7 +3621,7 @@ input:read-only {
   animation:
     ui-layer-enter var(--motion-row) var(--motion-ease) backwards,
     list-row-fade var(--motion-fade) var(--motion-ease) backwards;
-  animation-delay: var(--row-delay, 30ms);
+  animation-delay: var(--row-delay, 20ms);
 }
 @keyframes ui-layer-enter {
   from {

@@ -34,6 +34,8 @@ const props = defineProps<{
   busy: boolean;
   task?: Task;
   controlPending?: boolean;
+  retrying?: string;
+  retryEnabled?: boolean;
   rpc: <T>(op: string, data?: Record<string, unknown>) => Promise<T>;
   download: (
     platform: ResourcePlatform,
@@ -49,6 +51,8 @@ const emit = defineEmits<{
   pause: [];
   resume: [];
   cancel: [];
+  retry: [file: string];
+  continue: [];
   close: [];
 }>();
 const platform = ref<ResourcePlatform>("modrinth");
@@ -208,6 +212,10 @@ onBeforeUnmount(() => {
           :name="project?.name || t('整合包')"
           :version="selected?.number"
           :control-pending="controlPending"
+          :retrying="retrying"
+          :retry-enabled="retryEnabled"
+          @retry="emit('retry', $event)"
+          @continue="emit('continue')"
           @close="emit('close')"
           @pause="emit('pause')"
           @resume="emit('resume')"
@@ -222,7 +230,12 @@ onBeforeUnmount(() => {
           <button class="text-button" @click="showTask = false">
             <ArrowLeft :size="15" />{{ t("返回") }}
           </button>
-          <button class="button primary" :disabled="blocked" @click="download">
+          <button
+            v-if="!task.operation"
+            class="button primary"
+            :disabled="blocked"
+            @click="download"
+          >
             {{ t("重试") }}
           </button>
         </footer>

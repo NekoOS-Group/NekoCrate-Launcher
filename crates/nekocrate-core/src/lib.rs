@@ -1,11 +1,15 @@
 mod archive_support;
 pub mod auth;
+pub mod crash;
 pub mod diagnostics;
 pub mod download;
 mod download_concurrency;
+mod download_stall;
+mod download_tasks;
 pub mod fabric;
 pub mod folder_import;
 mod game_options;
+mod installer_cache;
 mod instance_creation;
 pub mod instance_discovery;
 pub mod java;
@@ -22,6 +26,8 @@ pub mod modpack;
 pub mod network;
 mod pack_content;
 mod proxy_credentials;
+mod recycle;
+pub mod resource_manager;
 pub mod resources;
 mod runtime_compatibility;
 pub mod skin;
@@ -51,10 +57,12 @@ struct Shared {
     _lock: fs::File,
     db: Mutex<Database>,
     operation: tokio::sync::Mutex<()>,
+    account_operation: tokio::sync::Mutex<()>,
     progress_scanned: tokio::sync::Mutex<HashSet<(String, String)>>,
     games: Mutex<HashMap<String, CancellationToken>>,
     mod_summaries: version_management::SummaryCache,
     modpack_migration_issues: Mutex<HashMap<(String, String), String>>,
+    sessions: auth::SessionCache,
 }
 impl Drop for Shared {
     fn drop(&mut self) {
@@ -101,7 +109,6 @@ impl Launcher {
             "libraries",
             "versions",
             "runtimes",
-            "trash",
         ] {
             fs::create_dir_all(root.join(dir))?;
         }
@@ -110,13 +117,21 @@ impl Launcher {
             _lock: lock,
             db: Mutex::new(db),
             operation: tokio::sync::Mutex::new(()),
+            account_operation: tokio::sync::Mutex::new(()),
             progress_scanned: tokio::sync::Mutex::new(HashSet::new()),
             games: Mutex::new(HashMap::new()),
             mod_summaries: version_management::SummaryCache::default(),
             modpack_migration_issues: Mutex::default(),
+            sessions: auth::SessionCache::default(),
         }));
         launcher.migrate_modpack_records();
         launcher.refresh_local_versions()?;
+        launcher.clean_old_java_archives();
+        if let Err(error) =
+            download_tasks::reconcile(launcher.root(), &launcher.snapshot().database.instances)
+        {
+            let _ = diagnostics::record_error(launcher.root(), "download_cleanup", &error);
+        }
         Ok(launcher)
     }
     pub fn root(&self) -> &Path {
@@ -417,8 +432,10 @@ impl Launcher {
     ) -> Result<()> {
         // Active jobs own a Settings snapshot. Persist future preferences under
         // the database lock without waiting for downloads or changing their plan.
-        if !(1..=32).contains(&settings.concurrency) || settings.retries > 5 {
-            bail!("并发应为 1–32，重试次数应为 0–5");
+        if !(1..=download_concurrency::MAX_CONCURRENCY).contains(&settings.concurrency)
+            || settings.retries > 5
+        {
+            bail!("并发应为 1–256，重试次数应为 0–5");
         }
         settings.proxy_url = settings.proxy_url.trim().to_owned();
         network::validate(&settings)?;
@@ -779,6 +796,13 @@ impl Launcher {
         self.instance(&i.id)
     }
     pub fn delete_instance(&self, id: &str) -> Result<()> {
+        self.delete_instance_with_recycle(id, recycle::move_to_trash)
+    }
+    pub(crate) fn delete_instance_with_recycle(
+        &self,
+        id: &str,
+        recycle: impl FnOnce(&Path) -> Result<()>,
+    ) -> Result<()> {
         let _guard = self
             .0
             .operation
@@ -787,18 +811,21 @@ impl Launcher {
         self.idle(id)?;
         let instance = self.instance(id)?;
         let source = self.instance_dir(id)?;
-        let dest = self
-            .root()
-            .join("trash")
-            .join(format!("{}-{id}", storage::now()));
         storage::write_json(&source.join("instance.json"), &instance)?;
-        fs::rename(&source, &dest)?;
-        if let Err(e) = self.mutate(|db| {
-            db.instances.retain(|i| i.id != id);
-            Ok(())
-        }) {
-            fs::rename(dest, source)?;
-            return Err(e);
+        self.mutate_recycling(
+            &source,
+            |db| {
+                db.instances.retain(|i| i.id != id);
+                Ok(())
+            },
+            recycle,
+        )?;
+        if let Err(error) = download_tasks::remove_owner(self.root(), id, None) {
+            let _ = diagnostics::record_error(self.root(), "download_cleanup", &error);
+        }
+        let game = instance.game_dir(self.root());
+        if let Err(error) = resources::remove_version_tasks(&game, id, None) {
+            let _ = diagnostics::record_error(self.root(), "download_cleanup", &error);
         }
         Ok(())
     }
@@ -949,7 +976,8 @@ impl Launcher {
             minecraft::check_local_install(&game, &selected.id)?;
         }
         let settings = self.settings();
-        let downloader = download::Downloader::new(self.root(), settings.clone())?;
+        let downloader = download::Downloader::new(self.root(), settings.clone())?
+            .for_installation(self.root(), id, &game, &selected.id, "game")?;
         let downloader = if full_verification {
             downloader.with_full_verification()
         } else {
@@ -1036,6 +1064,7 @@ impl Launcher {
         }
         storage::write_json(&version_dir.join("runtime.json"), &java)?;
         self.set_installed(id, &selected.id, true)?;
+        downloader.finish_installation(&sink).await;
         sink(Event::new("complete", "游戏文件与 Java 已准备好"));
         Ok(())
     }
@@ -1051,19 +1080,34 @@ impl Launcher {
         challenge: auth::DeviceChallenge,
         cancel: &CancellationToken,
     ) -> Result<Account> {
-        let _guard = self.0.operation.lock().await;
         let client = download::Downloader::new(self.root(), self.settings())?.client;
         let session = auth::finish(&client, challenge, cancel).await?;
+        // Waiting for a browser authorization does not block existing accounts.
+        let _guard = self.0.account_operation.lock().await;
         download::check_cancel(cancel)?;
-        auth::save_secret(self.root(), &session.account.id, &session.refresh_token)?;
-        self.save_account(session.account.clone())?;
-        Ok(session.account)
+        self.store_refresh_token(&session.account, session.refresh_token.clone())?;
+        let account = session.account.clone();
+        self.save_account(account.clone(), true)?;
+        self.0.sessions.remember(session);
+        Ok(account)
     }
-    fn save_account(&self, account: Account) -> Result<()> {
+    fn store_refresh_token(&self, account: &Account, token: String) -> Result<()> {
+        // Commit storage and memory together while the account operation is
+        // locked; cancellation must not leave a detached write after removal.
+        auth::save_secret(self.root(), &account.id, &token)?;
+        self.0.sessions.remember_refresh(account, token);
+        Ok(())
+    }
+    fn save_account(&self, account: Account, select: bool) -> Result<()> {
         self.mutate(|db| {
-            db.accounts.retain(|a| a.id != account.id);
-            db.selected_account = Some(account.id.clone());
-            db.accounts.push(account);
+            if select {
+                db.selected_account = Some(account.id.clone());
+            }
+            if let Some(existing) = db.accounts.iter_mut().find(|a| a.id == account.id) {
+                *existing = account;
+            } else {
+                db.accounts.push(account);
+            }
             Ok(())
         })
     }
@@ -1076,48 +1120,102 @@ impl Launcher {
             Ok(())
         })
     }
+    pub fn select_guest(&self) -> Result<()> {
+        self.mutate(|db| {
+            db.selected_account = None;
+            Ok(())
+        })
+    }
+    pub fn set_guest_name(&self, name: &str) -> Result<String> {
+        let name = name.trim();
+        if name.is_empty()
+            || name.len() > 16
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        {
+            bail!("游客名称须为 1–16 位英文字母、数字或下划线");
+        }
+        self.mutate(|db| {
+            db.guest_name = name.into();
+            Ok(())
+        })?;
+        Ok(name.into())
+    }
     pub fn remove_account(&self, id: &str) -> Result<()> {
         let _guard = self
             .0
-            .operation
+            .account_operation
             .try_lock()
             .context("有任务正在使用账户，请稍后移除")?;
         auth::remove_secret(self.root(), id)?;
+        self.0.sessions.remove(id);
         self.mutate(|db| {
             db.accounts.retain(|a| a.id != id);
+            if db.guest_skin == format!("account:{id}") {
+                db.guest_skin = "builtin:steve".into();
+            }
             if db.selected_account.as_deref() == Some(id) {
                 db.selected_account = db.accounts.first().map(|a| a.id.clone());
             }
             Ok(())
         })
     }
-    async fn session(&self) -> Result<auth::MinecraftSession> {
-        let snapshot = self.snapshot();
-        let id = snapshot
+    async fn session(&self, force_refresh: bool) -> Result<auth::MinecraftSession> {
+        // Capture the identity before waiting: a later UI selection must never
+        // redirect an already requested account operation to another player.
+        let id = self
+            .snapshot()
             .database
             .selected_account
             .context("请先添加并选择微软账户")?;
-        let account = snapshot
+        let _guard = self.0.account_operation.lock().await;
+        self.session_for_account(&id, force_refresh).await
+    }
+    // Caller holds account_operation, independently of downloads/installations.
+    async fn session_for_account(
+        &self,
+        id: &str,
+        force_refresh: bool,
+    ) -> Result<auth::MinecraftSession> {
+        let account = self
+            .snapshot()
             .database
             .accounts
             .into_iter()
             .find(|a| a.id == id)
             .context("所选账户不存在")?;
-        let secret = auth::load_secret(self.root(), &id)?;
+        if force_refresh {
+            self.0.sessions.invalidate_session(id);
+        } else if let Some(session) = self.0.sessions.session(&account) {
+            return Ok(session);
+        }
+        let secret = match self.0.sessions.refresh_token(&account) {
+            Some(token) => token,
+            None => {
+                let root = self.root().to_owned();
+                let account_id = id.to_owned();
+                let token =
+                    tokio::task::spawn_blocking(move || auth::load_secret(&root, &account_id))
+                        .await??;
+                self.0.sessions.remember_refresh(&account, token.clone());
+                token
+            }
+        };
         let client = download::Downloader::new(self.root(), self.settings())?.client;
         let session = auth::refresh(&client, &account, &secret, |token| {
-            auth::save_secret(self.root(), &id, token)
+            std::future::ready(self.store_refresh_token(&account, token))
         })
         .await?;
         if session.account.id != id {
             bail!("刷新后账户发生变化，请重新登录");
         }
-        self.save_account(session.account.clone())?;
+        self.save_account(session.account.clone(), false)?;
+        self.0.sessions.remember(session.clone());
         Ok(session)
     }
     pub async fn refresh_account(&self) -> Result<Account> {
-        let _guard = self.0.operation.lock().await;
-        Ok(self.session().await?.account)
+        Ok(self.session(true).await?.account)
     }
     pub async fn account_skin(&self, id: &str) -> Result<Option<Vec<u8>>> {
         let account = self
@@ -1135,14 +1233,18 @@ impl Launcher {
         }
     }
     async fn launch_session(&self, sink: &EventSink) -> Result<minecraft::LaunchSession> {
-        if self.snapshot().database.selected_account.is_none() {
-            sink(Event::new("stage", "以未登录身份 Player 启动"));
-            Ok(minecraft::LaunchSession::guest())
+        let database = self.snapshot().database;
+        if database.selected_account.is_none() {
+            sink(Event::new(
+                "stage",
+                format!("以游客身份 {} 启动", database.guest_name),
+            ));
+            Ok(minecraft::LaunchSession::guest_named(&database.guest_name))
         } else {
-            sink(Event::new("stage", "刷新登录并验证 Java 版权益"));
+            sink(Event::new("stage", "准备登录会话"));
             // An expired or invalid selected account must surface its error,
             // rather than silently change the player's identity and save data.
-            Ok(self.session().await?.into())
+            Ok(self.session(false).await?.into())
         }
     }
     pub async fn launch(
@@ -1160,10 +1262,27 @@ impl Launcher {
         let selected = instance.selected().context("请先选择游戏版本")?;
         let mut resolved = version::resolve(self.root(), &game, &selected.id)?;
         let settings = self.settings();
-        let downloader = download::Downloader::new(self.root(), settings.clone())?;
+        let downloader = download::Downloader::new(self.root(), settings.clone())?
+            .for_installation(self.root(), id, &game, &selected.id, "launch")?;
         runtime_compatibility::prepare(&game, &mut resolved.version, &downloader, cancel, &sink)
             .await?;
         version::check_launch_files(self.root(), &game, &resolved)?;
+        // Assess Java against the original entry point/libraries: the color
+        // overlay must not relax LaunchWrapper's existing Java 8 restriction.
+        let java_requirement = java::JavaRequirement::for_instance(
+            &resolved.version,
+            &game,
+            instance.java_path.as_deref(),
+        )
+        .await?;
+        let compatibility_args = runtime_compatibility::prepare_legacy_colors(
+            &game,
+            &mut resolved,
+            &downloader,
+            cancel,
+            &Event::scoped(&sink, id, Some("prepare")),
+        )
+        .await?;
         let v = resolved.version;
         let root = self.root().to_owned();
         let native_game = game.clone();
@@ -1177,7 +1296,7 @@ impl Launcher {
         sink(Event::workflow("java", "准备 Java"));
         let java = java::ensure(
             self.root(),
-            java::JavaRequirement::for_instance(&v, &game, instance.java_path.as_deref()).await?,
+            java_requirement,
             instance.java_path.as_deref(),
             settings.auto_java,
             &downloader,
@@ -1186,6 +1305,7 @@ impl Launcher {
         )
         .await?;
         sink(Event::workflow("account", "准备游戏身份"));
+        downloader.finish_installation(&sink).await;
         let session = tokio::select! {_=cancel.cancelled()=>bail!("启动已取消"),r=self.launch_session(&sink)=>r?};
         sink(Event::workflow("start", "启动游戏"));
         let memory_instance = instance.clone();
@@ -1217,11 +1337,15 @@ impl Launcher {
         let working_directory = version::working_directory(&game, &v)?;
         let log_dir = self.instance_dir(id)?.join("launcher-logs");
         fs::create_dir_all(&log_dir)?;
+        let log_path = log_dir.join(format!("{}-{}.log", storage::now(), uuid::Uuid::new_v4()));
         let log = Arc::new(tokio::sync::Mutex::new(
-            tokio::fs::File::create(log_dir.join(format!("{}.log", storage::now()))).await?,
+            tokio::fs::File::create(&log_path).await?,
         ));
+        let launched_at = std::time::SystemTime::now();
+        let launch_version = selected.id.clone();
         let mut command = java::background_command(&java::game_executable(Path::new(&java.path)));
         command
+            .args(compatibility_args)
             .args(args)
             .current_dir(&working_directory)
             .stdout(std::process::Stdio::piped())
@@ -1262,7 +1386,13 @@ impl Launcher {
             log.clone(),
             secrets.clone(),
         ));
-        let err = tokio::spawn(pipe_logs(stderr, id.into(), sink.clone(), log, secrets));
+        let err = tokio::spawn(pipe_logs(
+            stderr,
+            id.into(),
+            sink.clone(),
+            log,
+            secrets.clone(),
+        ));
         let launcher = self.clone();
         let id = id.to_owned();
         sink(Event {
@@ -1288,7 +1418,33 @@ impl Launcher {
                 ),
                 Err(e) => format!("读取游戏进程状态失败：{e}"),
             };
+            let diagnosis = if unexpected {
+                let root = launcher.clone();
+                let exit = message.clone();
+                tokio::task::spawn_blocking(move || {
+                    let report = crash::collect(
+                        &working_directory,
+                        &log_path,
+                        launched_at,
+                        pid,
+                        launch_version,
+                        exit,
+                        &secrets,
+                    );
+                    if let Err(error) =
+                        storage::write_json(&log_dir.join("last-crash.json"), &report)
+                    {
+                        let _ = diagnostics::record_error(root.root(), "crash_diagnosis", &error);
+                    }
+                    report
+                })
+                .await
+                .ok()
+            } else {
+                None
+            };
             sink(Event {
+                crash: diagnosis,
                 instance_id: Some(id),
                 ..Event::new(
                     if unexpected {
@@ -1301,6 +1457,20 @@ impl Launcher {
             });
         });
         Ok(pid)
+    }
+    pub async fn retry_download_file(
+        &self,
+        file: &download::RetryFile,
+        id: Option<&str>,
+        cancel: &CancellationToken,
+        sink: &EventSink,
+    ) -> Result<()> {
+        let _guard = self.0.operation.lock().await;
+        if let Some(id) = id {
+            self.instance(id)?;
+            self.idle(id)?;
+        }
+        file.run(cancel, sink).await
     }
     pub fn stop_game(&self, id: &str) -> Result<()> {
         let games = self.0.games.lock().unwrap();
@@ -1668,6 +1838,32 @@ mod tests {
         );
     }
     #[test]
+    fn maximum_download_concurrency_persists_and_rejects_out_of_range_values() {
+        let temp = tempfile::tempdir().unwrap();
+        let launcher = Launcher::open(Some(temp.path().into())).unwrap();
+        launcher
+            .save_settings(Settings {
+                concurrency: 256,
+                ..launcher.settings()
+            })
+            .unwrap();
+        for invalid in [0, 257] {
+            assert!(
+                launcher
+                    .save_settings(Settings {
+                        concurrency: invalid,
+                        ..launcher.settings()
+                    })
+                    .is_err()
+            );
+            assert_eq!(launcher.settings().concurrency, 256);
+        }
+        drop(launcher);
+        let launcher = Launcher::open(Some(temp.path().into())).unwrap();
+        assert_eq!(launcher.settings().concurrency, 256);
+    }
+
+    #[test]
     fn language_preferences_persist_and_invalid_changes_are_not_saved() {
         let temp = tempfile::tempdir().unwrap();
         for preference in ["en-US", "zh-CN", "system"] {
@@ -1848,6 +2044,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repeated_authenticated_launches_reuse_memory_without_persisting_tokens() {
+        let temp = tempfile::tempdir().unwrap();
+        let launcher = Launcher::open(Some(temp.path().into())).unwrap();
+        let account = Account {
+            id: "account-fixture".into(),
+            username: "Fixture".into(),
+            client_id: "client-fixture".into(),
+            expires_at: storage::now() + 3600,
+            owned: true,
+            skin: None,
+        };
+        launcher.save_account(account.clone(), true).unwrap();
+        launcher.0.sessions.remember(auth::MinecraftSession {
+            account,
+            access_token: "access-fixture".into(),
+            refresh_token: "refresh-fixture".into(),
+            xuid: "xuid-fixture".into(),
+            valid_until: std::time::Instant::now() + std::time::Duration::from_secs(300),
+        });
+        let sink: EventSink = Arc::new(|_| {});
+        for _ in 0..3 {
+            // There is deliberately no Keychain item or authentication server.
+            let session = launcher.launch_session(&sink).await.unwrap();
+            assert_eq!(session.access_token, "access-fixture");
+            assert_eq!(session.username, "Fixture");
+        }
+        for public in [
+            serde_json::to_string(&launcher.snapshot()).unwrap(),
+            fs::read_to_string(temp.path().join("database.json")).unwrap(),
+        ] {
+            assert!(!public.contains("access-fixture"));
+            assert!(!public.contains("refresh-fixture"));
+        }
+    }
+
+    #[tokio::test]
     async fn guest_launch_identity_is_stable_and_never_saved_as_an_account() {
         let temp = tempfile::tempdir().unwrap();
         let launcher = Launcher::open(Some(temp.path().into())).unwrap();
@@ -1880,11 +2112,97 @@ mod tests {
         verify_guest_launch_directory(true).await;
     }
 
+    #[tokio::test]
+    async fn guest_can_be_selected_and_renamed_without_losing_microsoft_accounts() {
+        let temp = tempfile::tempdir().unwrap();
+        let launcher = Launcher::open(Some(temp.path().into())).unwrap();
+        let account = Account {
+            id: "account-fixture".into(),
+            username: "Fixture".into(),
+            client_id: "client-fixture".into(),
+            expires_at: storage::now() + 3600,
+            owned: true,
+            skin: None,
+        };
+        launcher.save_account(account.clone(), true).unwrap();
+        launcher.0.sessions.remember(auth::MinecraftSession {
+            account: account.clone(),
+            access_token: "access-fixture".into(),
+            refresh_token: "refresh-fixture".into(),
+            xuid: "xuid-fixture".into(),
+            valid_until: std::time::Instant::now() + std::time::Duration::from_secs(300),
+        });
+        let sink: EventSink = Arc::new(|_| {});
+        assert_eq!(launcher.set_guest_name("  Neko_42  ").unwrap(), "Neko_42");
+        // Editing a guest's name alone never changes the selected identity.
+        assert_eq!(
+            launcher.launch_session(&sink).await.unwrap().username,
+            "Fixture"
+        );
+        launcher.select_guest().unwrap();
+        let guest = launcher.launch_session(&sink).await.unwrap();
+        assert_eq!(guest.username, "Neko_42");
+        assert_eq!(guest.uuid, minecraft::LaunchSession::guest().uuid);
+        assert_eq!(guest.access_token, "0");
+        assert!(guest.log_secrets.is_empty());
+        assert_eq!(launcher.snapshot().database.accounts.len(), 1);
+        for invalid in [
+            "",
+            "  ",
+            "猫咪",
+            "Neko Cat",
+            "bad/name",
+            "abcdefghijklmnopq",
+        ] {
+            assert!(launcher.set_guest_name(invalid).is_err());
+            assert_eq!(launcher.snapshot().database.guest_name, "Neko_42");
+        }
+        assert!(launcher.set_guest_name("1234567890123456").is_ok());
+        launcher.set_guest_name("Neko_42").unwrap();
+        launcher.select_account(&account.id).unwrap();
+        assert_eq!(
+            launcher.launch_session(&sink).await.unwrap().access_token,
+            "access-fixture"
+        );
+        launcher.select_guest().unwrap();
+        drop(launcher);
+
+        let reopened = Launcher::open(Some(temp.path().into())).unwrap();
+        assert!(reopened.snapshot().database.selected_account.is_none());
+        assert_eq!(reopened.snapshot().database.accounts[0].id, account.id);
+        assert_eq!(
+            reopened.launch_session(&sink).await.unwrap().username,
+            "Neko_42"
+        );
+        // Existing databases keep their previous default Player identity.
+        let mut legacy = serde_json::to_value(&reopened.snapshot().database).unwrap();
+        legacy.as_object_mut().unwrap().remove("guest_name");
+        let legacy: Database = serde_json::from_value(legacy).unwrap();
+        assert_eq!(legacy.guest_name, "Player");
+    }
+
     #[cfg(unix)]
     async fn verify_guest_launch_directory(linked: bool) {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
         let launcher = Launcher::open(Some(temp.path().join("launcher"))).unwrap();
+        if linked {
+            launcher
+                .save_account(
+                    Account {
+                        id: "account-without-tokens".into(),
+                        username: "MicrosoftPlayer".into(),
+                        client_id: "client-fixture".into(),
+                        expires_at: 0,
+                        owned: true,
+                        skin: None,
+                    },
+                    true,
+                )
+                .unwrap();
+            launcher.set_guest_name("Local_Neko").unwrap();
+            launcher.select_guest().unwrap();
+        }
         let java = temp.path().join("java fixture");
         fs::write(
             &java,
@@ -1960,7 +2278,7 @@ printf '%s\n' 'offline session 0 started'
             );
         }
         for (key, value) in [
-            ("--username", "Player"),
+            ("--username", if linked { "Local_Neko" } else { "Player" }),
             ("--uuid", "a01e3843e5213998958af459800e4d11"),
             ("--accessToken", "0"),
             ("--userType", "legacy"),
@@ -1987,7 +2305,10 @@ printf '%s\n' 'offline session 0 started'
                 .unwrap()
                 .contains("offline session 0 started")
         );
-        assert!(launcher.snapshot().database.accounts.is_empty());
+        assert_eq!(
+            launcher.snapshot().database.accounts.len(),
+            usize::from(linked)
+        );
         assert!(
             launcher
                 .instance(&instance.id)
@@ -2163,9 +2484,18 @@ printf '%s\n' 'offline session 0 started'
             .unwrap(),
             b"volume:1"
         );
-        l.delete_instance(&b.id).unwrap();
+        let recovered = t.path().join("recycled-instance");
+        l.delete_instance_with_recycle(&b.id, |source| {
+            fs::rename(source, &recovered)?;
+            Ok(())
+        })
+        .unwrap();
         assert_eq!(l.snapshot().database.instances.len(), 1);
-        assert_eq!(fs::read_dir(t.path().join("trash")).unwrap().count(), 1);
+        assert_eq!(
+            fs::read(recovered.join(".minecraft/options.txt")).unwrap(),
+            b"volume:0"
+        );
+        assert!(!t.path().join("trash").exists());
         assert!(l.instance_dir("../outside").is_err());
         assert!(Launcher::open(Some(t.path().into())).is_err());
     }
@@ -2456,7 +2786,9 @@ printf '%s\n' 'offline session 0 started'
             .import_instance(source.clone(), "原目录".into(), "1.21.1".into())
             .await
             .unwrap();
-        launcher.delete_instance(&first.id).unwrap();
+        launcher
+            .delete_instance_with_recycle(&first.id, crate::recycle::discard_test_fixture)
+            .unwrap();
         assert_eq!(
             fs::read(source.join("saves/world/level.dat")).unwrap(),
             b"precious-world"
@@ -2482,7 +2814,9 @@ printf '%s\n' 'offline session 0 started'
         assert!(launcher.clone_instance(&instance.id).await.is_err());
         assert_eq!(launcher.snapshot().database.instances.len(), 1);
         assert!(!source.exists());
-        launcher.delete_instance(&instance.id).unwrap();
+        launcher
+            .delete_instance_with_recycle(&instance.id, crate::recycle::discard_test_fixture)
+            .unwrap();
         assert_eq!(
             fs::read(offline.join("saves/world/level.dat")).unwrap(),
             b"precious-world"

@@ -1,18 +1,52 @@
 <script setup lang="ts">
 import {
   computed,
+  defineAsyncComponent,
+  h,
+  inject,
   nextTick,
   onBeforeUnmount,
   ref,
   watch,
   type Component,
 } from "vue";
-import { Braces, ChevronRight, LoaderCircle } from "lucide-vue-next";
+import {
+  Braces,
+  ChevronRight,
+  LoaderCircle,
+  Settings2,
+  Save,
+  AlignLeft,
+} from "lucide-vue-next";
+import { modFileName } from "../contentIdentity";
+import {
+  resourceTransferKey,
+  isResourceCopyKind,
+} from "../useResourceTransfer";
+import GlassSelect from "./GlassSelect.vue";
 import { locale, t, translateMessage } from "../i18n";
 import { formatBytes } from "../downloadWorkflow";
 import type { ContentKind, ContentMetadata, LocalContentFile } from "../types";
+import type { ConfigFormat } from "../configSyntax";
 
+const ConfigEditor = defineAsyncComponent({
+  loader: () => import("./ConfigEditor.vue"),
+  loadingComponent: {
+    render: () => h("div", { class: "mod-config-editor-loading" }),
+  },
+  delay: 0,
+});
+
+import {
+  configDrafts,
+  configKey,
+  type ModActions,
+  type ModConfigFile,
+  type ModConfigDocument,
+} from "../modManagement";
 const props = defineProps<{
+  modActions?: ModActions;
+  locked?: boolean;
   file: LocalContentFile;
   instanceId: string;
   version: string;
@@ -42,9 +76,30 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{
   error: [error: unknown];
+  changed: [file: string];
   "show-mod": [id: string, version: string, file: string];
 }>();
 const row = ref<HTMLElement | null>(null);
+const transferResource = inject(resourceTransferKey, undefined);
+const draggableResource = computed(
+  () =>
+    !!transferResource &&
+    isResourceCopyKind(props.kind) &&
+    available.value &&
+    !props.locked &&
+    !modSaving.value &&
+    !modDownloading.value,
+);
+function beginResourceDrag(event: PointerEvent) {
+  if (!draggableResource.value || !isResourceCopyKind(props.kind)) return;
+  transferResource?.(event, {
+    kind: props.kind,
+    instance: props.instanceId,
+    version: props.version,
+    file: props.file.file_name,
+    name: displayName.value,
+  });
+}
 const highlighted = ref(false);
 let highlightTimer: ReturnType<typeof setTimeout> | undefined;
 const rawSources = ref<
@@ -62,6 +117,15 @@ const failed = ref(false);
 const openingFolder = ref(false);
 const available = computed(
   () => !props.file.declaration || props.file.declaration.status === "local",
+);
+const canExpand = computed(() =>
+  !available.value
+    ? !!props.file.declaration
+    : props.file.has_metadata === false
+      ? false
+      : metadata.value
+        ? metadata.value.sources.length > 0
+        : props.file.has_metadata === true,
 );
 const statusLabel = computed(() => {
   const status = props.file.declaration?.status;
@@ -100,17 +164,234 @@ const displayName = computed(() => {
   }
   return props.file.name;
 });
+const isMod = computed(() => props.kind === "mods");
+const confirmedEnabled = ref<boolean>();
+const modEnabled = computed(() => confirmedEnabled.value ?? props.file.enabled);
+const displayFileName = computed(() =>
+  isMod.value ? modFileName(props.file.file_name) : props.file.file_name,
+);
+const fileLabel = computed(() =>
+  isMod.value && !modEnabled.value
+    ? `${displayFileName.value} · ${t("已禁用")}`
+    : displayFileName.value,
+);
+const modDownloading = computed(
+  () =>
+    !!props.file.declaration &&
+    !!props.modActions?.downloading?.(
+      props.instanceId,
+      props.version,
+      props.file.declaration.key,
+    ),
+);
+const modState = computed(() =>
+  !available.value ? "missing" : modEnabled.value ? "enabled" : "disabled",
+);
+const modActionLabel = computed(() => {
+  if (modDownloading.value) return t("下载中");
+  if (modSaving.value && !available.value) return t("下载中");
+  if (!available.value) return t("未下载 · 点击下载");
+  return t(modEnabled.value ? "已启用 · 点击禁用" : "已禁用 · 点击启用");
+});
+async function activateMod() {
+  if (props.locked || modSaving.value || modDownloading.value) return;
+  if (available.value) {
+    await changeEnabled();
+    return;
+  }
+  const declaration = props.file.declaration;
+  if (!declaration || !props.modActions?.download) return;
+  const identity = panelId.value;
+  modSaving.value = true;
+  try {
+    await props.modActions.download(
+      props.instanceId,
+      props.version,
+      declaration.key,
+    );
+  } catch (error) {
+    emit("error", error);
+  } finally {
+    modSaving.value = false;
+    if (identity === panelId.value) emit("changed", props.file.file_name);
+  }
+}
+const configOpen = ref(false);
+const configFiles = ref<ModConfigFile[]>([]);
+const configDocument = ref<ModConfigDocument | null>(null);
+const configText = ref("");
+const configLoading = ref(false);
+const configEditor = ref<{ format: () => void; formatting: boolean }>();
+const configIssueCount = ref(0);
+const configFormat = computed<ConfigFormat | null>(() => {
+  const format = configDocument.value?.format.toLowerCase();
+  return format === "json" || format === "toml" || format === "cfg"
+    ? format
+    : null;
+});
+watch(
+  () => configDocument.value?.path,
+  () => {
+    configIssueCount.value = 0;
+  },
+);
+const modSaving = ref(false);
+let configRequest = 0;
+const configDirty = computed(
+  () => configDocument.value && configText.value !== configDocument.value.text,
+);
+function rememberDraft() {
+  const doc = configDocument.value;
+  if (!doc) return;
+  const key = configKey(props.instanceId, props.version, doc.path);
+  if (configDirty.value)
+    configDrafts.set(key, { document: doc, text: configText.value });
+  else configDrafts.delete(key);
+}
+async function changeEnabled() {
+  if (!props.modActions || props.locked || modSaving.value || !available.value)
+    return;
+  const identity = panelId.value;
+  const enabled = !modEnabled.value;
+  modSaving.value = true;
+  try {
+    const name = await props.modActions.setEnabled(
+      props.instanceId,
+      props.version,
+      props.file.file_name,
+      enabled,
+    );
+    if (identity === panelId.value) {
+      confirmedEnabled.value = enabled;
+      emit("changed", name);
+    }
+  } catch (error) {
+    emit("error", error);
+  } finally {
+    modSaving.value = false;
+  }
+}
+async function chooseConfig(path: string) {
+  if (!props.modActions || modSaving.value) return;
+  rememberDraft();
+  const ticket = ++configRequest;
+  const key = configKey(props.instanceId, props.version, path);
+  configLoading.value = true;
+  try {
+    const draft = configDrafts.get(key);
+    const doc =
+      draft?.document ??
+      (await props.modActions.read(
+        props.instanceId,
+        props.version,
+        props.file.file_name,
+        path,
+      ));
+    if (ticket !== configRequest) return;
+    configDocument.value = doc;
+    configText.value = draft?.text ?? doc.text;
+  } catch (error) {
+    if (ticket === configRequest) emit("error", error);
+  } finally {
+    if (ticket === configRequest) configLoading.value = false;
+  }
+}
+async function showConfig() {
+  if (!props.modActions) return;
+  expanded.value = true;
+  configOpen.value = !configOpen.value;
+  if (!configOpen.value) {
+    expanded.value = canExpand.value;
+    void loadDetails();
+    return;
+  }
+  const ticket = ++configRequest;
+  configLoading.value = true;
+  try {
+    const files = await props.modActions.list(
+      props.instanceId,
+      props.version,
+      props.file.file_name,
+    );
+    if (ticket !== configRequest) return;
+    configFiles.value = files;
+    if (!files.length) {
+      configOpen.value = false;
+      expanded.value = false;
+      emit("changed", props.file.file_name);
+      return;
+    }
+    if (files.length && !configDocument.value)
+      await chooseConfig(files[0]!.path);
+  } catch (error) {
+    if (ticket === configRequest) emit("error", error);
+  } finally {
+    if (ticket === configRequest) configLoading.value = false;
+  }
+}
+async function saveConfig() {
+  const doc = configDocument.value;
+  if (
+    !doc ||
+    !props.modActions ||
+    props.locked ||
+    configLoading.value ||
+    configIssueCount.value > 0 ||
+    modSaving.value ||
+    !configDirty.value
+  )
+    return;
+  modSaving.value = true;
+  const ticket = configRequest;
+  const key = configKey(props.instanceId, props.version, doc.path);
+  try {
+    const saved = await props.modActions.save(
+      props.instanceId,
+      props.version,
+      props.file.file_name,
+      doc.path,
+      doc.revision,
+      configText.value,
+    );
+    configDrafts.delete(key);
+    if (ticket === configRequest) {
+      configDocument.value = saved;
+      configText.value = saved.text;
+    }
+  } catch (error) {
+    emit("error", error);
+  } finally {
+    modSaving.value = false;
+  }
+}
+onBeforeUnmount(() => {
+  rememberDraft();
+  configRequest++;
+});
 let request = 0;
 const panelId = computed(
   () =>
     `content-${encodeURIComponent(JSON.stringify([props.instanceId, props.version, props.kind, props.file.file_name]))}`,
 );
 async function toggle() {
+  if (!canExpand.value) return;
+  if (configOpen.value) {
+    configOpen.value = false;
+    expanded.value = true;
+    await loadDetails();
+    return;
+  }
   expanded.value = !expanded.value;
   await loadDetails();
 }
 async function loadDetails() {
-  if (!available.value || !expanded.value || metadata.value || loading.value)
+  if (
+    !canExpand.value ||
+    !available.value ||
+    !expanded.value ||
+    metadata.value ||
+    loading.value
+  )
     return;
   const ticket = ++request;
   loading.value = true;
@@ -155,7 +436,7 @@ function showDependency(id: string) {
 }
 async function reveal() {
   const identity = panelId.value;
-  expanded.value = true;
+  expanded.value = canExpand.value;
   void loadDetails();
   highlighted.value = true;
   clearTimeout(highlightTimer);
@@ -208,10 +489,19 @@ watch(
     () => props.instanceId,
     () => props.version,
     () => props.kind,
-    () => props.file.file_name,
+    () =>
+      props.kind === "mods"
+        ? modFileName(props.file.file_name)
+        : props.file.file_name,
   ],
   () => {
     request++;
+    configRequest++;
+    confirmedEnabled.value = undefined;
+    configOpen.value = false;
+    configDocument.value = null;
+    configFiles.value = [];
+    configLoading.value = false;
     expanded.value = false;
     metadata.value = null;
     loading.value = false;
@@ -221,6 +511,12 @@ watch(
     clearTimeout(highlightTimer);
   },
 );
+watch(
+  () => props.file.enabled,
+  () => {
+    confirmedEnabled.value = undefined;
+  },
+);
 watch(available, () => {
   request++;
   metadata.value = null;
@@ -228,6 +524,20 @@ watch(available, () => {
   failed.value = false;
   rawSources.value = {};
   if (available.value) void loadDetails();
+});
+watch(
+  () => props.file.has_metadata,
+  () => {
+    request++;
+    metadata.value = null;
+    loading.value = false;
+    failed.value = false;
+    rawSources.value = {};
+    if (expanded.value && !configOpen.value) void loadDetails();
+  },
+);
+watch(canExpand, (value) => {
+  if (!value && !configOpen.value) expanded.value = false;
 });
 onBeforeUnmount(() => {
   request++;
@@ -248,31 +558,93 @@ onBeforeUnmount(() => {
   >
     <div
       class="content-item-heading"
-      :class="{ disabled: !file.enabled }"
+      :class="{
+        disabled: available && (isMod ? !modEnabled : !file.enabled),
+        'is-expandable': canExpand,
+      }"
       @click="toggle"
     >
-      <component :is="icon" :size="18" />
-      <span class="content-item-label">
-        <button
+      <button
+        v-if="isMod && modActions"
+        type="button"
+        class="content-item-icon content-state-button"
+        :data-state="modState"
+        :title="modActionLabel"
+        :aria-label="`${modActionLabel} · ${file.name}`"
+        :aria-busy="modSaving || modDownloading"
+        :disabled="
+          locked ||
+          modSaving ||
+          modDownloading ||
+          (!available && !modActions.download)
+        "
+        @click.stop="activateMod"
+      >
+        <LoaderCircle
+          v-if="modDownloading || (modSaving && !available)"
+          :size="18"
+          class="spin"
+          aria-hidden="true"
+        />
+        <svg
+          v-else
+          width="18"
+          height="18"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path class="mod-state-shell" d="m12 2 9 5v10l-9 5-9-5V7z" />
+          <path
+            v-if="modState !== 'missing'"
+            d="m3 7 9 5 9-5M12 12v10M7.5 4.5l9 5"
+          />
+          <path v-else d="M12 7v10m-3-3 3 3 3-3" />
+        </svg>
+      </button>
+      <span
+        v-else
+        class="content-item-icon"
+        :title="statusLabel ? t(statusLabel) : undefined"
+        :role="statusLabel ? 'img' : undefined"
+        :aria-label="statusLabel ? t(statusLabel) : undefined"
+        :aria-hidden="statusLabel ? undefined : true"
+      >
+        <component :is="icon" :size="18" aria-hidden="true" />
+      </span>
+      <span
+        class="content-item-label"
+        :class="{ 'resource-drag-handle': draggableResource }"
+        @pointerdown="beginResourceDrag"
+        @dragstart.prevent
+      >
+        <component
+          :is="canExpand ? 'button' : 'span'"
           v-if="hasDisplayName"
-          type="button"
+          :type="canExpand ? 'button' : undefined"
           class="content-item-toggle"
-          :aria-expanded="expanded"
-          :aria-controls="panelId"
+          :aria-expanded="canExpand ? expanded : undefined"
+          :aria-controls="canExpand ? panelId : undefined"
           @click.stop="toggle"
         >
           <strong :title="displayName">{{ displayName }}</strong>
-        </button>
+          <span
+            v-if="file.version"
+            class="content-item-version"
+            :title="file.version"
+            >{{ file.version }}</span
+          >
+        </component>
         <span
           class="content-item-file"
           :class="{ 'is-primary': !hasDisplayName }"
         >
-          <span
-            v-if="available"
-            class="content-file-name"
-            :title="file.file_name"
-          >
-            {{ file.file_name }}
+          <span v-if="available" class="content-file-name" :title="fileLabel">
+            {{ displayFileName }}
           </span>
           <span v-else class="content-planned-file">{{
             file.declaration?.path ||
@@ -280,13 +652,24 @@ onBeforeUnmount(() => {
               ? "File #" + file.declaration.file
               : file.file_name)
           }}</span>
+          <span
+            v-if="!hasDisplayName && file.version"
+            class="content-item-version"
+            :title="file.version"
+            >{{ file.version }}</span
+          >
           <small v-if="file.size > 0 || (kind === 'mods' && available)">{{
             formatBytes(file.size)
           }}</small>
+          <small
+            v-if="available && (isMod ? !modEnabled : !file.enabled)"
+            class="content-disabled-label"
+            >{{ t("已禁用") }}</small
+          >
         </span>
       </span>
       <span
-        v-if="file.declaration"
+        v-if="file.declaration && !available && !isMod"
         class="content-item-status"
         :data-status="file.declaration.status"
       >
@@ -296,11 +679,22 @@ onBeforeUnmount(() => {
           {{ formatBytes(file.declaration.total) }}</small
         >
       </span>
-      <span v-if="file.version || !file.enabled" class="content-item-version"
-        >{{ file.version
-        }}<small v-if="!file.enabled">{{ t("已禁用") }}</small></span
+      <template
+        v-if="kind === 'mods' && available && modActions && file.has_config"
       >
+        <button
+          type="button"
+          class="content-item-expand"
+          :aria-label="t('配置')"
+          :title="t('配置')"
+          :aria-expanded="configOpen && expanded"
+          @click.stop="showConfig"
+        >
+          <Settings2 :size="14" />
+        </button>
+      </template>
       <button
+        v-if="canExpand"
         type="button"
         class="content-item-expand"
         :aria-label="`${t('元数据')} · ${file.name}`"
@@ -331,7 +725,113 @@ onBeforeUnmount(() => {
       >
         <div class="content-item-clip">
           <div class="content-item-detail">
-            <template v-if="!available && file.declaration">
+            <section
+              v-if="configOpen && modActions"
+              class="mod-config"
+              :aria-label="t('配置')"
+            >
+              <div class="mod-config-frame">
+                <div class="mod-config-toolbar">
+                  <span :id="`${panelId}-config-label`" hidden>{{
+                    t("配置文件")
+                  }}</span>
+                  <GlassSelect
+                    v-if="configFiles.length"
+                    :id="`${panelId}-config`"
+                    :model-value="configDocument?.path || ''"
+                    :disabled="
+                      configLoading || modSaving || !configFiles.length
+                    "
+                    :options="
+                      configFiles.map((entry) => ({
+                        value: entry.path,
+                        label: entry.path,
+                      }))
+                    "
+                    compact
+                    floating
+                    literal-labels
+                    @update:model-value="chooseConfig"
+                  />
+                  <button
+                    v-if="configFormat"
+                    type="button"
+                    class="text-button mod-config-format"
+                    :title="t('格式化（Shift + Alt + F）')"
+                    :aria-label="t('格式化')"
+                    :disabled="
+                      locked ||
+                      modSaving ||
+                      configLoading ||
+                      !configEditor ||
+                      configEditor.formatting
+                    "
+                    @click="configEditor?.format()"
+                  >
+                    <AlignLeft :size="14" />
+                  </button>
+                  <button
+                    class="text-button"
+                    type="button"
+                    :disabled="
+                      locked ||
+                      modSaving ||
+                      configLoading ||
+                      !configDirty ||
+                      configIssueCount > 0
+                    "
+                    @click="saveConfig"
+                  >
+                    <Save :size="14" />{{ t("保存")
+                    }}<span v-if="configDirty"> ·</span>
+                  </button>
+                </div>
+                <ConfigEditor
+                  v-if="configDocument && configFormat"
+                  :key="configDocument.path"
+                  ref="configEditor"
+                  v-model="configText"
+                  :format="configFormat"
+                  :label="configDocument.path"
+                  :readonly="locked || modSaving || configLoading"
+                  @update:model-value="rememberDraft"
+                  @issues="configIssueCount = $event"
+                  @save="saveConfig"
+                />
+                <textarea
+                  v-else-if="configDocument"
+                  v-model="configText"
+                  :readonly="locked || modSaving || configLoading"
+                  spellcheck="false"
+                  class="mod-config-editor"
+                  :aria-label="configDocument.path"
+                  @input="rememberDraft"
+                  @keydown.ctrl.enter.prevent="saveConfig"
+                  @keydown.meta.enter.prevent="saveConfig"
+                />
+                <p v-else-if="!configLoading" class="content-item-note">
+                  {{
+                    t("未找到匹配的配置文件；部分 Mod 首次运行后才生成配置。")
+                  }}
+                </p>
+              </div>
+              <p v-if="configDocument" class="content-item-note">
+                {{ t("按 Mod ID 匹配配置；保存保留原文并创建备份。") }}
+              </p>
+              <button
+                v-if="configDirty"
+                type="button"
+                class="text-button"
+                :disabled="modSaving"
+                @click="
+                  configText = configDocument!.text;
+                  rememberDraft();
+                "
+              >
+                {{ t("放弃修改") }}
+              </button>
+            </section>
+            <template v-else-if="!available && file.declaration">
               <p
                 v-if="file.declaration.status !== 'unresolved'"
                 class="content-item-note"
@@ -365,16 +865,13 @@ onBeforeUnmount(() => {
                 </div>
               </dl>
             </template>
-            <p v-if="loading" class="content-item-note">
+            <p v-if="loading && !configOpen" class="content-item-note">
               <LoaderCircle class="spin" :size="14" />{{ t("读取中") }}
             </p>
-            <p v-else-if="failed" class="content-item-note">
+            <p v-else-if="failed && !configOpen" class="content-item-note">
               {{ t("无法读取元数据") }}
             </p>
-            <template v-if="metadata">
-              <p v-if="!metadata.sources.length" class="content-item-note">
-                {{ t("此文件未提供可识别的元数据") }}
-              </p>
+            <template v-if="metadata && !configOpen">
               <section
                 v-for="(source, sourceIndex) in metadata.sources"
                 :key="sourceIndex"
@@ -483,7 +980,7 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.content-item.is-pending .content-item-heading > svg {
+.content-item.is-pending .content-item-icon:not(.content-state-button) {
   opacity: 0.65;
   stroke-dasharray: 3 2;
 }
@@ -499,9 +996,6 @@ onBeforeUnmount(() => {
   gap: 3px;
   color: var(--muted);
   font-size: 10px;
-}
-.content-item-status[data-status="local"] {
-  color: var(--tab-color);
 }
 .content-item-status small {
   font: 9px/1.4 var(--mono);
@@ -536,9 +1030,19 @@ onBeforeUnmount(() => {
   background: transparent;
   color: var(--ink);
   text-align: left;
+  cursor: default;
+}
+.content-item-heading.is-expandable {
   cursor: pointer;
 }
-.content-item-heading > svg {
+span.content-item-toggle {
+  cursor: default;
+}
+.content-item-icon {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
   color: var(--tab-color);
   flex-shrink: 0;
   opacity: 0.75;
@@ -620,6 +1124,9 @@ onBeforeUnmount(() => {
 .content-item-heading.disabled {
   opacity: 0.55;
 }
+.content-item-heading {
+  transition: opacity 180ms ease-out;
+}
 .content-item-label {
   display: flex;
   flex-direction: column;
@@ -629,6 +1136,7 @@ onBeforeUnmount(() => {
 }
 .content-item-label strong {
   display: block;
+  min-width: 0;
   font-size: 13px;
   font-weight: 500;
   white-space: nowrap;
@@ -638,7 +1146,7 @@ onBeforeUnmount(() => {
     color 180ms,
     text-shadow 180ms;
 }
-.content-item-heading:hover strong,
+.content-item-heading.is-expandable:hover strong,
 .is-expanded .content-item-label strong {
   color: var(--tab-color);
   text-shadow: 0 0 10px color-mix(in srgb, var(--tab-color) 25%, transparent);
@@ -682,16 +1190,18 @@ onBeforeUnmount(() => {
   color: var(--tab-color);
 }
 .content-item-version {
-  max-width: 100px;
-  overflow-wrap: anywhere;
+  min-width: 0;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font: 11px/17px var(--mono);
   color: var(--muted);
-  text-align: right;
 }
-.content-item-version small {
-  display: block;
-  font-size: 10px;
-  line-height: 16px;
+.content-item-toggle {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
 }
 .content-item-chevron {
   transition: transform 220ms var(--motion-ease);
@@ -812,5 +1322,129 @@ onBeforeUnmount(() => {
   .content-item-label strong {
     transition: none;
   }
+}
+</style>
+
+<style scoped>
+.mod-config {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.mod-config-toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  padding: 6px 8px 2px;
+}
+.mod-config-frame {
+  min-width: 0;
+  border: 1px solid color-mix(in srgb, currentColor 16%, transparent);
+  transition: border-color 180ms ease;
+}
+.mod-config-frame:focus-within {
+  border-color: color-mix(in srgb, var(--tab-color) 55%, transparent);
+}
+.mod-config-toolbar .text-button {
+  flex-shrink: 0;
+  min-height: 28px;
+  padding: 0 4px;
+  font-size: 11px;
+}
+.mod-config-toolbar :deep(.source-select) {
+  flex: 1;
+  min-width: 0;
+  background: transparent;
+  color: inherit;
+  border: 0;
+  font: inherit;
+  font-size: 11px;
+}
+
+.mod-config-editor {
+  display: block;
+  width: 100%;
+  min-height: 220px;
+  max-height: 420px;
+  resize: vertical;
+  box-sizing: border-box;
+  margin: 0;
+  padding: 8px 12px 12px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: inherit;
+  font:
+    12px/1.65 ui-monospace,
+    SFMono-Regular,
+    Consolas,
+    monospace;
+  tab-size: 2;
+}
+.mod-config-editor-loading {
+  min-height: 266px;
+}
+</style>
+
+<style scoped>
+.mod-config-toolbar :deep(.source-select-trigger) {
+  height: 28px;
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  font-size: 11px;
+}
+.mod-config-toolbar :deep(.selection-label) {
+  flex: 1;
+}
+.mod-config-toolbar :deep(.source-select-trigger:hover:not(:disabled)),
+.mod-config-toolbar :deep(.source-select-trigger[aria-expanded="true"]) {
+  color: var(--tab-color);
+  text-shadow: 0 0 10px var(--glow);
+}
+</style>
+
+<style scoped>
+.content-state-button {
+  box-sizing: content-box;
+  padding: 8px;
+  margin: -8px;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  opacity: 1;
+  transition:
+    color 180ms ease-out,
+    filter 180ms ease-out;
+}
+.content-state-button[data-state="enabled"] .mod-state-shell {
+  fill: currentColor;
+  fill-opacity: 0.3;
+}
+.content-state-button .mod-state-shell {
+  fill: currentColor;
+  fill-opacity: 0;
+  transition: fill-opacity 180ms ease-out;
+}
+.content-state-button[data-state="disabled"] {
+  color: var(--muted);
+}
+.content-state-button[data-state="missing"] .mod-state-shell {
+  stroke-dasharray: 3 2;
+}
+.content-state-button:hover:not(:disabled),
+.content-state-button:focus-visible {
+  color: var(--tab-color);
+  filter: drop-shadow(
+    0 0 4px color-mix(in srgb, var(--tab-color) 45%, transparent)
+  );
+}
+.content-state-button:focus-visible {
+  outline: none;
+}
+.content-state-button:disabled {
+  cursor: default;
 }
 </style>

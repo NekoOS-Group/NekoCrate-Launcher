@@ -98,6 +98,8 @@ export interface LocalContentFile {
   enabled: boolean;
   size: number;
   mod_ids: string[];
+  has_metadata?: boolean;
+  has_config?: boolean;
   declaration?: {
     key: string;
     source: string;
@@ -157,6 +159,8 @@ export interface Snapshot {
     instances: Instance[];
     accounts: Account[];
     selected_account: string | null;
+    guest_name: string;
+    guest_skin: string;
   };
   running: string[];
 }
@@ -164,7 +168,20 @@ export interface VersionManifest {
   latest: Record<string, string>;
   versions: { id: string; type: string; url: string; sha1: string }[];
 }
+export interface CrashReport {
+  version: string;
+  time: number;
+  exit: string;
+  sources: string[];
+  findings: {
+    code: string;
+    title: string;
+    advice: string;
+    evidence: string[];
+  }[];
+}
 export interface LauncherEvent {
+  crash?: CrashReport;
   kind: string;
   message: string;
   instance_id: string | null;
@@ -178,8 +195,17 @@ export interface LauncherEvent {
   files?: DownloadFile[];
 }
 export type FileStatus =
-  "queued" | "downloading" | "verifying" | "done" | "error" | "cancelled";
+  | "queued"
+  | "downloading"
+  | "verifying"
+  | "reusing"
+  | "installing"
+  | "done"
+  | "error"
+  | "cancelled";
 export interface DownloadFile {
+  error?: string;
+  retryable?: boolean;
   id: string;
   name: string;
   downloaded: number;
@@ -189,6 +215,7 @@ export interface DownloadFile {
   step?: string;
 }
 export interface WorkflowStep {
+  activity?: Record<string, number>;
   id: string;
   label: string;
   status: "pending" | "running" | "paused" | "done" | "error" | "cancelled";
@@ -208,6 +235,8 @@ export interface Challenge {
   interval: number;
 }
 export interface Task {
+  operation?: string;
+  arguments?: Record<string, unknown>;
   resource_task?: string;
   resource_pausable?: boolean;
   modpack_status?: ModpackStatus;

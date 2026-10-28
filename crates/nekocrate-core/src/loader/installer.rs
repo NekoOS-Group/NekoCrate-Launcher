@@ -109,7 +109,34 @@ impl Install<'_> {
         )?;
         let mut result = serde_json::to_value(resolved.version)?;
         result["patches"] = json!([{"id":"game", "version":minecraft}]);
+        // Keep the archive throughout retries/cancellation of later game-file steps.
+        if let Some(loader) =
+            loader.filter(|loader| matches!(loader.kind.as_str(), "forge" | "neoforge"))
+            && let Err(error) = self.discard_forge_installer(loader).await
+        {
+            sink(Event::new(
+                "warning",
+                format!("清理加载器安装包失败：{error:#}"),
+            ));
+        }
         Ok(result)
+    }
+    async fn discard_forge_installer(&self, loader: &ModLoader) -> Result<()> {
+        let cache = self
+            .root
+            .join("metadata/loader-installers")
+            .join(&loader.kind)
+            .join(format!("{}-{}", self.minecraft, loader.version));
+        let hash = storage::read_json::<String>(&cache.join("installer.sha1.json"))?;
+        self.downloader
+            .discard_installer(&FileSpec {
+                url: String::new(),
+                path: cache.join("installer.jar"),
+                hash,
+                sha256: false,
+                size: 0,
+            })
+            .await
     }
     fn files_sink(&self) -> EventSink {
         let forward = self.sink.clone();
@@ -149,18 +176,15 @@ impl Install<'_> {
                 hash
             }
         };
+        let installer_spec = FileSpec {
+            url,
+            path: installer.clone(),
+            hash,
+            sha256: false,
+            size: 0,
+        };
         self.downloader
-            .file(
-                &FileSpec {
-                    url,
-                    path: installer.clone(),
-                    hash,
-                    sha256: false,
-                    size: 0,
-                },
-                self.cancel,
-                &self.step("loader"),
-            )
+            .file(&installer_spec, self.cancel, &self.step("loader"))
             .await?;
         let mut zip = archive::open(&installer)?;
         let install = archive::json(&mut zip, "install_profile.json")?;

@@ -643,6 +643,11 @@ async fn crash_event_is_emitted_after_logs_but_not_for_a_user_requested_stop() {
         let events = events.lock().unwrap();
         let event = events.last().unwrap();
         assert_eq!(event.kind, expected);
+        assert_eq!(event.crash.is_some(), expected == "game_crash");
+        assert_eq!(
+            launcher.crash_report(&instance.id).unwrap().is_some(),
+            expected == "game_crash"
+        );
         assert!(
             events
                 .iter()

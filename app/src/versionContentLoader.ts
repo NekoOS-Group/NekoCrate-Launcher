@@ -1,3 +1,4 @@
+import { anchorModFiles, modFileName } from "./contentIdentity.ts";
 import type {
   ContentKind,
   ContentLoadOptions,
@@ -6,28 +7,56 @@ import type {
 } from "./types.ts";
 
 type Rpc = <T>(op: string, data: Record<string, unknown>) => Promise<T>;
-type Index = VersionContent & { pending: string[] };
+type Index = VersionContent & { pending: string[]; config_ids?: string[] };
 const MAX_CACHE_BYTES = 8 * 1024 * 1024;
 const MAX_CACHED_LISTS = 12;
+
+function configAvailability(ids: string[] = []) {
+  const configIds = new Set(ids);
+  return (file: LocalContentFile): LocalContentFile => {
+    const ids = file.mod_ids?.length
+      ? file.mod_ids
+      : [
+          modFileName(file.file_name)
+            .split("/")
+            .pop()!
+            .replace(/\.jar$/i, "")
+            .split("-")[0]!,
+        ];
+    return {
+      ...file,
+      has_config:
+        (!file.declaration || file.declaration.status === "local") &&
+        ids.some((id) =>
+          configIds.has(id.replace(/[A-Z]/g, (ch) => ch.toLowerCase())),
+        ),
+    };
+  };
+}
 
 // One loader per launcher UI: cached lists survive closing the dialog, while every
 // visit still reconciles with disk. Abort stops scheduling further archive batches.
 export function createVersionContentLoader(rpc: Rpc) {
-  const cache = new Map<string, { value: VersionContent; bytes: number }>();
+  const cache = new Map<
+    string,
+    { value: VersionContent; bytes: number; visible: LocalContentFile[] }
+  >();
   const indexes = new Map<string, Promise<Index>>();
-  function readIndex(id: string, version: string) {
+  function readIndex(id: string, version: string, fresh = false) {
     const key = JSON.stringify([id, version]);
-    let pending = indexes.get(key);
+    let pending = fresh ? undefined : indexes.get(key);
     if (!pending) {
       pending = rpc<Index>("version_content_index", { id, version }).finally(
-        () => indexes.delete(key),
+        () => {
+          if (indexes.get(key) === pending) indexes.delete(key);
+        },
       );
       indexes.set(key, pending);
     }
     return pending;
   }
   let cacheBytes = 0;
-  function remember(key: string, value: VersionContent) {
+  function remember(key: string, value: VersionContent, visible = value.files) {
     const old = cache.get(key);
     if (old) {
       cacheBytes -= old.bytes;
@@ -47,7 +76,7 @@ export function createVersionContentLoader(rpc: Rpc) {
           0,
         ));
     if (bytes > MAX_CACHE_BYTES) return;
-    cache.set(key, { value, bytes });
+    cache.set(key, { value, bytes, visible });
     cacheBytes += bytes;
     while (cache.size > MAX_CACHED_LISTS || cacheBytes > MAX_CACHE_BYTES) {
       const first = cache.keys().next().value!;
@@ -79,19 +108,19 @@ export function createVersionContentLoader(rpc: Rpc) {
       remember(key, value);
       return value;
     }
-    const index = await readIndex(id, version);
+    const index = await readIndex(id, version, options.fresh);
     check();
+    // One directory snapshot serves all Mod batches. Config contents remain lazy.
+    const withConfig = configAvailability(index.config_ids);
     // Preserve the visible row order while enriching names; completed names can
     // have a very different alphabetic order from their JAR filenames.
-    const indexed = new Map(index.files.map((file) => [file.file_name, file]));
-    const anchored = (cached?.value.files || []).flatMap((file) => {
-      const fresh = indexed.get(file.file_name);
-      indexed.delete(file.file_name);
-      return fresh ? [fresh] : [];
-    });
     let value: VersionContent = {
       directory: index.directory,
-      files: [...anchored, ...indexed.values()],
+      files: anchorModFiles(
+        options.fresh ? cached?.visible || [] : cached?.value.files || [],
+        index.files,
+        new Set(index.pending),
+      ).map(withConfig),
     };
     onProgress?.(value);
     // The first visible rows arrive sooner; later batches amortize IPC overhead.
@@ -107,7 +136,9 @@ export function createVersionContentLoader(rpc: Rpc) {
         files,
       });
       check();
-      const updated = new Map(batch.map((file) => [file.file_name, file]));
+      const updated = new Map(
+        batch.map((file) => [file.file_name, withConfig(file)]),
+      );
       const requested = new Set(files);
       value = {
         directory: index.directory,
@@ -125,12 +156,15 @@ export function createVersionContentLoader(rpc: Rpc) {
       files: [...value.files].sort(
         (a, b) =>
           compare(a.name.toLowerCase(), b.name.toLowerCase()) ||
-          compare(a.file_name.toLowerCase(), b.file_name.toLowerCase()),
+          compare(
+            modFileName(a.file_name).toLowerCase(),
+            modFileName(b.file_name).toLowerCase(),
+          ),
       ),
     };
     // Use the normal alphabetical order next time the page opens, without
     // shuffling the currently visible rows or replaying their entrance animation.
-    remember(key, sorted);
+    remember(key, sorted, value.files);
     return value;
   }
   return Object.assign(load, {
@@ -141,7 +175,10 @@ export function createVersionContentLoader(rpc: Rpc) {
       const key = JSON.stringify([id, version, "mods"]);
       // Preparing a tab never opens JARs and never replaces an already enriched view.
       if (!cache.has(key))
-        remember(key, { directory: index.directory, files: index.files });
+        remember(key, {
+          directory: index.directory,
+          files: index.files.map(configAvailability(index.config_ids)),
+        });
     },
   });
 }

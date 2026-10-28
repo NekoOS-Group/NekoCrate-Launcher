@@ -285,7 +285,7 @@ fn find_java(root: &Path) -> Option<PathBuf> {
         .map(|e| e.into_path())
 }
 pub async fn discover(root: &Path) -> Vec<JavaInfo> {
-    let mut candidates = vec![];
+    let mut candidates = crate::resource_manager::registered_java(root);
     if let Ok(home) = std::env::var("JAVA_HOME") {
         candidates.push(PathBuf::from(home).join("bin").join(executable_name()));
     }
@@ -477,22 +477,17 @@ pub async fn ensure(
         .context("暂无适合此系统的 Java，请指定本地 Java 路径")?;
     let name = package["name"].as_str().context("Java 下载信息缺失")?;
     let archive = root.join("cache/java").join(storage::safe_relative(name)?);
-    downloader
-        .file(
-            &FileSpec {
-                url: link.into(),
-                path: archive.clone(),
-                hash: package["checksum"]
-                    .as_str()
-                    .context("Java 校验值缺失")?
-                    .into(),
-                sha256: true,
-                size: package["size"].as_u64().unwrap_or(0),
-            },
-            cancel,
-            sink,
-        )
-        .await?;
+    let archive_spec = FileSpec {
+        url: link.into(),
+        path: archive.clone(),
+        hash: package["checksum"]
+            .as_str()
+            .context("Java 校验值缺失")?
+            .into(),
+        sha256: true,
+        size: package["size"].as_u64().unwrap_or(0),
+    };
+    downloader.file(&archive_spec, cancel, sink).await?;
     check_cancel(cancel)?;
     let staging = root
         .join("runtimes")
@@ -517,6 +512,12 @@ pub async fn ensure(
     let java = inspect(&runtime.join(relative)).await?;
     if java.major != major || !requirement.matches(&java) {
         bail!("安装后的 Java 版本与要求不匹配");
+    }
+    if let Err(error) = downloader.discard_installer(&archive_spec).await {
+        sink(Event::new(
+            "warning",
+            format!("清理 Java 安装包失败：{error:#}"),
+        ));
     }
     Ok(java)
 }

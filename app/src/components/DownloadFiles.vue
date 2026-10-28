@@ -1,16 +1,24 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { Check, CircleAlert } from "lucide-vue-next";
+import { Check, CircleAlert, RotateCcw } from "lucide-vue-next";
 import { t } from "../i18n";
 import { fileRowHeight, filePercent, formatBytes } from "../downloadWorkflow";
 import { indexedFileWindow, type FileOrder } from "../fileOrder";
-const props = defineProps<{ order: FileOrder; paused?: boolean }>();
+const props = defineProps<{
+  order: FileOrder;
+  paused?: boolean;
+  retryEnabled?: boolean;
+  retrying?: string;
+}>();
+defineEmits<{ retry: [file: string] }>();
 const scrollTop = ref(0);
 const visible = computed(() => indexedFileWindow(props.order, scrollTop.value));
 const labels = {
   queued: "等待中",
   downloading: "下载中",
   verifying: "校验中",
+  reusing: "复用中",
+  installing: "安装中",
   done: "已完成",
   error: "失败",
   cancelled: "已取消",
@@ -45,7 +53,7 @@ const labels = {
           :data-status="file.status"
         >
           <div class="workflow-file-copy">
-            <span class="workflow-file-name" :title="file.id">{{
+            <span class="workflow-file-name" :title="file.error || file.id">{{
               file.name
             }}</span>
             <span class="workflow-file-amount"
@@ -60,14 +68,31 @@ const labels = {
                 :size="12"
               />{{
                 file.status === "done" && file.cached
-                  ? t("已缓存")
-                  : paused && ["downloading", "verifying"].includes(file.status)
+                  ? t("已复用")
+                  : paused &&
+                      [
+                        "downloading",
+                        "verifying",
+                        "reusing",
+                        "installing",
+                      ].includes(file.status)
                     ? t("已暂停")
                     : file.status === "downloading" && file.total
-                      ? `${filePercent(file)}%`
+                      ? `${t("下载中")} ${filePercent(file)}%`
                       : t(labels[file.status])
               }}</span
             >
+            <button
+              v-if="file.status === 'error' && file.retryable"
+              type="button"
+              class="file-retry icon-button"
+              :disabled="!retryEnabled || !!retrying"
+              :aria-label="`${t('重试此文件')} · ${file.name}`"
+              :title="file.error || t('重试此文件')"
+              @click="$emit('retry', file.id)"
+            >
+              <RotateCcw :size="12" />
+            </button>
           </div>
           <div
             class="workflow-file-track"
@@ -88,3 +113,12 @@ const labels = {
     </div>
   </div>
 </template>
+
+<style scoped>
+.file-retry {
+  padding: 3px;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+}
+</style>

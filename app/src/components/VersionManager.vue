@@ -49,7 +49,12 @@ import type {
   VersionMetadata,
 } from "../types";
 
+import { anchorModFiles, modFileName, modRowKeys } from "../contentIdentity";
+import type { ModActions } from "../modManagement";
 const props = defineProps<{
+  initialVersion?: string;
+  initialTab?: ContentKind;
+  modActions?: ModActions;
   instance: Instance;
   instances: readonly Instance[];
   locked: boolean;
@@ -116,7 +121,7 @@ const tabs = [
   { id: "saves", label: "存档", icon: MapIcon, color: "#7dbfee" },
   { id: "unresolved", label: "待解析", icon: FileQuestion, color: "#e7bc76" },
 ] as const;
-const tab = ref<VersionContentTab | "metadata">("metadata");
+const tab = ref<VersionContentTab | "metadata">(props.initialTab || "metadata");
 const tabBar = ref<HTMLElement | null>(null);
 const header = ref<HTMLElement>();
 useHorizontalLayout(header);
@@ -132,7 +137,10 @@ const visibleTabs = computed(() =>
 );
 const activeTab = computed(() => tabs.find((item) => item.id === tab.value)!);
 const selected = ref(
-  props.instance.selected_version || props.instance.versions[0]?.id || "",
+  props.initialVersion ||
+    props.instance.selected_version ||
+    props.instance.versions[0]?.id ||
+    "",
 );
 const version = computed(() =>
   props.instance.versions.find((v) => v.id === selected.value),
@@ -146,14 +154,21 @@ const libraries = shallowRef<VersionMetadata["libraries"]>([]);
 let contentController: AbortController | undefined;
 let prefetchController: AbortController | undefined;
 const rowMotions = new Map<string, ReturnType<typeof listRevealStyle>>();
+const modKeys = computed(() => modRowKeys(content.value?.files || []));
+function contentRowKey(file: Pick<LocalContentFile, "file_name">) {
+  return tab.value === "mods"
+    ? modKeys.value.get(file.file_name) || file.file_name
+    : file.file_name;
+}
 function contentRevealStyle(
   file: Pick<LocalContentFile, "file_name">,
   index: number,
 ) {
-  let style = rowMotions.get(file.file_name);
+  const key = contentRowKey(file);
+  let style = rowMotions.get(key);
   if (!style) {
     style = listRevealStyle(index, 0);
-    rowMotions.set(file.file_name, style);
+    rowMotions.set(key, style);
   }
   return style;
 }
@@ -268,11 +283,35 @@ function ensureVisibleTab() {
       (item) => item.id !== "metadata" && (counts.value[item.id] || 0) > 0,
     )?.id || "metadata";
 }
+async function contentChanged(file: LocalContentFile, name: string) {
+  if (
+    tab.value === "mods" &&
+    content.value &&
+    name !== file.file_name &&
+    modFileName(name) === modFileName(file.file_name)
+  ) {
+    content.value = {
+      ...content.value,
+      files: content.value.files.map((item) =>
+        item.file_name === file.file_name
+          ? { ...item, file_name: name, enabled: /\.jar$/i.test(name) }
+          : item,
+      ),
+    };
+  }
+  await reload(true);
+}
 async function reload(preserve = false) {
   const current = ++request;
   contentController?.abort();
   contentController = new AbortController();
   const kind = tab.value;
+  const previousFiles =
+    preserve && kind === "mods" ? content.value?.files : undefined;
+  const reconcile = (result: VersionContent) =>
+    previousFiles
+      ? { ...result, files: anchorModFiles(previousFiles, result.files) }
+      : result;
   if (!preserve) {
     content.value = null;
     libraries.value = [];
@@ -295,12 +334,12 @@ async function reload(preserve = false) {
       signal: contentController.signal,
       onProgress: (result) => {
         if (current !== request) return;
-        content.value = result;
+        content.value = reconcile(result);
         counts.value[kind] = result.files.length;
       },
     });
     if (current === request) {
-      content.value = result;
+      content.value = reconcile(result);
       counts.value[kind] = result.files.length;
     }
   } catch (error) {
@@ -632,6 +671,8 @@ defineExpose({ refresh });
               class="version-manager-choice list-reveal-item"
               :data-resource-instance="instance.id"
               :data-resource-version="item.id"
+              :data-resource-copy-instance="instance.id"
+              :data-resource-copy-version="item.id"
               :style="listRevealStyle(index)"
               :aria-current="item.id === selected ? 'true' : undefined"
               :disabled="saving"
@@ -658,7 +699,7 @@ defineExpose({ refresh });
               class="version-manager-confirmation"
             >
               <p>
-                {{ t("版本文件将移入游戏目录的回收区，共享 Mod 和存档保留。") }}
+                {{ t("版本文件将移入系统回收站，共享 Mod 和存档保留。") }}
               </p>
               <div>
                 <button
@@ -818,13 +859,16 @@ defineExpose({ refresh });
                       class="list-reveal-item"
                       :style="contentRevealStyle(file, index)"
                       v-for="(file, index) in filteredFiles"
-                      :key="`${instance.id}:${selected}:${tab}:${file.file_name}`"
+                      :key="`${instance.id}:${selected}:${tab}:${contentRowKey(file)}`"
                       :ref="(row) => setContentRow(file.file_name, row)"
                       :file="file"
                       :instance-id="instance.id"
                       :version="selected"
                       :kind="tab as ContentKind"
                       :icon="activeTab.icon"
+                      :mod-actions="modActions"
+                      :locked="locked"
+                      @changed="(name) => contentChanged(file, name)"
                       :load-metadata="loadContentMetadata"
                       :open-folder="openContentFolder"
                       :load-source="loadContentSource"
@@ -876,6 +920,7 @@ defineExpose({ refresh });
 .version-manager .modal-header {
   justify-content: flex-start;
   gap: 10px;
+  margin-bottom: 0;
 }
 .version-manager .modal-header h2 {
   flex: 0 0 auto;
@@ -1055,7 +1100,7 @@ defineExpose({ refresh });
   align-items: center;
   justify-content: space-evenly;
   gap: 12px;
-  margin-bottom: 12px;
+  margin: 8px 0 4px;
   flex-shrink: 0;
   min-height: 36px;
 }

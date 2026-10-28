@@ -21,6 +21,13 @@ pub struct LocalImport {
     pub path: PathBuf,
     pub kind: Option<ResourceKind>,
 }
+#[derive(Clone, Debug, Deserialize)]
+pub struct ResourceCopySource {
+    pub kind: ResourceKind,
+    pub instance: String,
+    pub version: String,
+    pub file: String,
+}
 const DESCRIPTORS: &[&str] = &[
     "fabric.mod.json",
     "quilt.mod.json",
@@ -64,11 +71,20 @@ pub(super) fn inspect(path: &Path) -> Result<DetectedResource> {
             }
         }
     } else {
-        let extension = path
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
+        let filename = result.name.to_ascii_lowercase();
+        let enabled_name = filename
+            .strip_suffix(".disabled")
+            .or_else(|| filename.strip_suffix(".off"))
+            .unwrap_or(&filename);
+        let extension = Path::new(if enabled_name.ends_with(".jar") {
+            enabled_name
+        } else {
+            &filename
+        })
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
         if !["jar", "zip", "mrpack"].contains(&extension.as_str()) {
             return Ok(result);
         }
@@ -145,6 +161,53 @@ pub(super) fn inspect(path: &Path) -> Result<DetectedResource> {
 }
 
 impl Launcher {
+    /// Resolve a listed resource rather than trusting a frontend-supplied absolute path.
+    /// Use the normal transactional installer; copying never removes the source.
+    pub fn prepare_resource_copy(
+        &self,
+        source: &ResourceCopySource,
+        id: &str,
+        version: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Option<ResourcePlan>> {
+        self.idle(id)?;
+        use crate::version_management::ContentKind;
+        let kind = match source.kind {
+            ResourceKind::Mods => ContentKind::Mods,
+            ResourceKind::Resourcepacks => ContentKind::Resourcepacks,
+            ResourceKind::Shaderpacks => ContentKind::Shaderpacks,
+            _ => bail!("此资源类型不支持跨版本复制"),
+        };
+        let path =
+            self.version_content_path(&source.instance, &source.version, kind, &source.file, None)?;
+        let target = self.resource_target(id, version)?;
+        let origin = self.resource_target(&source.instance, &source.version)?;
+        if origin.directory == target.directory {
+            return Ok(None);
+        }
+        let plan = self.prepare_local_resources_inner(
+            id,
+            version,
+            &[LocalImport {
+                path,
+                kind: Some(source.kind),
+            }],
+            None,
+            cancel,
+            source.kind == ResourceKind::Mods,
+        )?;
+        if !plan.conflicts.is_empty() || plan.entries.iter().all(|entry| entry.reuse) {
+            // This new plan has no staged data. Failed/idempotent drags must not
+            // accumulate unfinished tasks in the target version.
+            fs::remove_dir_all(task_dir(&plan.target, &plan.id)?)?;
+            if !plan.conflicts.is_empty() {
+                bail!("{}", plan.conflicts.join("\n"));
+            }
+            return Ok(None);
+        }
+        Ok(Some(plan))
+    }
+
     pub fn inspect_resources(&self, paths: &[PathBuf]) -> Result<Vec<DetectedResource>> {
         if paths.is_empty() || paths.len() > 256 {
             bail!("每次可导入 1–256 个文件或目录");
@@ -175,13 +238,30 @@ impl Launcher {
         world: Option<&str>,
         cancel: &CancellationToken,
     ) -> Result<ResourcePlan> {
+        self.prepare_local_resources_inner(id, version, inputs, world, cancel, false)
+    }
+    fn prepare_local_resources_inner(
+        &self,
+        id: &str,
+        version: &str,
+        inputs: &[LocalImport],
+        world: Option<&str>,
+        cancel: &CancellationToken,
+        listed_mod: bool,
+    ) -> Result<ResourcePlan> {
         self.idle(id)?;
         if inputs.is_empty() || inputs.len() > 256 {
             bail!("每次可导入 1–256 个文件或目录");
         }
         let mut plan = new_plan(self.resource_target(id, version)?);
         for input in inputs {
-            let detected = inspect(&input.path)?;
+            let mut detected = inspect(&input.path)?;
+            // Legacy/core Mods may lack loader descriptors. A file already
+            // resolved from a version's Mods list is still a valid copy source.
+            if listed_mod && detected.kinds.is_empty() && detected.format == "unknown" {
+                archive_support::open(&input.path)?;
+                detected.kinds.push(ResourceKind::Mods);
+            }
             let kind = input
                 .kind
                 .or_else(|| (detected.kinds.len() == 1).then(|| detected.kinds[0]))
@@ -213,11 +293,12 @@ impl Launcher {
                 .filter(|(file, _)| archive.file_names().any(|name| name == *file))
                 .map(|(_, loader)| loader)
                 .collect();
-                if !plan
-                    .target
-                    .loader
-                    .as_ref()
-                    .is_some_and(|l| loaders.contains(&l.kind.to_ascii_lowercase().as_str()))
+                if !loaders.is_empty()
+                    && !plan
+                        .target
+                        .loader
+                        .as_ref()
+                        .is_some_and(|l| loaders.contains(&l.kind.to_ascii_lowercase().as_str()))
                 {
                     plan.conflicts.push(format!(
                         "Mod 加载器不匹配：{} ({})",

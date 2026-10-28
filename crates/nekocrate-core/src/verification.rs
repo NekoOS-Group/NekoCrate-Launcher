@@ -5,7 +5,7 @@ use ring::digest::{Context as HashContext, SHA256};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     io::Read,
     path::{Path, PathBuf},
@@ -125,10 +125,67 @@ struct Index {
     entries: HashMap<PathBuf, Receipt>,
 }
 
+#[derive(Default)]
+struct Receipts {
+    paths: HashMap<PathBuf, Receipt>,
+    hashes: HashMap<(bool, String), HashSet<PathBuf>>,
+}
+impl Receipts {
+    fn insert(&mut self, path: PathBuf, receipt: Receipt) {
+        self.remove(&path);
+        self.hashes
+            .entry((receipt.sha256, receipt.hash.to_ascii_lowercase()))
+            .or_default()
+            .insert(path.clone());
+        self.paths.insert(path, receipt);
+    }
+    fn remove(&mut self, path: &Path) -> Option<Receipt> {
+        let old = self.paths.remove(path)?;
+        let key = (old.sha256, old.hash.to_ascii_lowercase());
+        if let Some(paths) = self.hashes.get_mut(&key) {
+            paths.remove(path);
+            if paths.is_empty() {
+                self.hashes.remove(&key);
+            }
+        }
+        Some(old)
+    }
+}
+impl std::ops::Deref for Receipts {
+    type Target = HashMap<PathBuf, Receipt>;
+    fn deref(&self) -> &Self::Target {
+        &self.paths
+    }
+}
+
+/// Read only valid receipts for legacy archive cleanup; no payload rehash on a hit.
+pub(crate) fn recorded_sha256(root: &Path, paths: &[PathBuf]) -> HashMap<PathBuf, String> {
+    let index = fs::read(root.join("cache/verified-files.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Index>(&bytes).ok())
+        .filter(|index| index.version == 1)
+        .unwrap_or_default();
+    paths
+        .iter()
+        .filter_map(|path| {
+            let receipt = index.entries.get(path)?;
+            if !receipt.sha256
+                || receipt.hash.len() != 64
+                || !receipt.hash.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                return None;
+            }
+            let metadata = fs::symlink_metadata(path).ok()?;
+            (Fingerprint::read_at(path, &metadata)? == receipt.fingerprint)
+                .then(|| (path.clone(), receipt.hash.to_ascii_lowercase()))
+        })
+        .collect()
+}
+
 pub(crate) struct VerificationCache {
     path: PathBuf,
     loaded: OnceCell<()>,
-    entries: Mutex<HashMap<PathBuf, Receipt>>,
+    entries: Mutex<Receipts>,
     generation: AtomicU64,
     saved: AtomicU64,
     writer: AsyncMutex<()>,
@@ -168,9 +225,110 @@ impl VerificationCache {
                     .and_then(|bytes| serde_json::from_slice::<Index>(&bytes).ok())
                     .filter(|index| index.version == 1)
                     .unwrap_or_default();
-                *self.entries.lock().unwrap() = index.entries;
+                let mut receipts = Receipts::default();
+                for (path, receipt) in index.entries {
+                    receipts.insert(path, receipt);
+                }
+                *self.entries.lock().unwrap() = receipts;
             })
             .await;
+    }
+    /// Metadata-only receipt lookup, used to seed resumed progress without rehashing.
+    pub async fn matches_receipt(&self, path: &Path, hash: &str, sha256: bool, size: u64) -> bool {
+        self.load().await;
+        let receipt = self.entries.lock().unwrap().get(path).cloned();
+        let Some(receipt) = receipt else {
+            return false;
+        };
+        if !receipt.hash.eq_ignore_ascii_case(hash)
+            || receipt.sha256 != sha256
+            || (size > 0 && receipt.fingerprint.size != size)
+        {
+            return false;
+        }
+        Fingerprint::snapshot(path)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|current| current == receipt.fingerprint)
+    }
+    /// Content lookup is indexed, never a scan of game trees or all receipts per file.
+    /// Candidates are only hints: the downloader must verify before copying.
+    pub async fn candidates(&self, hash: &str, sha256: bool, size: u64) -> Vec<PathBuf> {
+        self.load().await;
+        let entries = self.entries.lock().unwrap();
+        let mut paths: Vec<_> = entries
+            .hashes
+            .get(&(sha256, hash.to_ascii_lowercase()))
+            .into_iter()
+            .flatten()
+            .filter(|path| size == 0 || entries.paths[*path].fingerprint.size == size)
+            .cloned()
+            .collect();
+        paths.sort();
+        paths
+    }
+
+    pub async fn forget_tree(&self, directory: &Path) {
+        self.load().await;
+        let mut entries = self.entries.lock().unwrap();
+        let paths: Vec<_> = entries
+            .keys()
+            .filter(|p| p.starts_with(directory))
+            .cloned()
+            .collect();
+        for path in paths {
+            entries.remove(&path);
+            self.generation.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Index imported local files in the SHA-1 namespace used by game/CDN manifests.
+    pub async fn index_local(self: &Arc<Self>, path: &Path) -> Result<()> {
+        self.load().await;
+        let store = self.clone();
+        let path = path.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let meta = fs::symlink_metadata(&path)?;
+            let Some(before) = Fingerprint::read_at(&path, &meta) else {
+                return Ok(());
+            };
+            if store
+                .entries
+                .lock()
+                .unwrap()
+                .get(&path)
+                .is_some_and(|r| !r.sha256 && r.fingerprint == before)
+            {
+                return Ok(());
+            }
+            let mut input = fs::File::open(&path)?;
+            let mut digest = Sha1::new();
+            let mut buffer = vec![0; 256 * 1024];
+            loop {
+                let n = input.read(&mut buffer)?;
+                if n == 0 {
+                    break;
+                }
+                digest.update(&buffer[..n]);
+            }
+            if Fingerprint::read(&input.metadata()?, Some(&input)) == Some(before.clone())
+                && Fingerprint::read_at(&path, &fs::symlink_metadata(&path)?)
+                    == Some(before.clone())
+            {
+                store.entries.lock().unwrap().insert(
+                    path,
+                    Receipt {
+                        hash: hex::encode(digest.finalize()),
+                        sha256: false,
+                        fingerprint: before,
+                    },
+                );
+                store.generation.fetch_add(1, Ordering::Relaxed);
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await?
     }
     pub async fn verify(
         self: &Arc<Self>,
@@ -209,7 +367,7 @@ impl VerificationCache {
             let revision = store.generation.load(Ordering::Relaxed);
             let index = Index {
                 version: 1,
-                entries: entries.clone(),
+                entries: entries.paths.clone(),
             };
             drop(entries);
             let bytes = serde_json::to_vec(&index)?;

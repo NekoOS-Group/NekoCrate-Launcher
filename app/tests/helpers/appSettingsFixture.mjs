@@ -16,6 +16,10 @@ const stubs = {
   "@tauri-apps/plugin-dialog": `export const open = async (...args) => globalThis.__settingsFixture.pickFile?.(...args) ?? null;`,
   "@tauri-apps/plugin-opener": `export const openUrl = async () => {};`,
   "./instanceIcons": `export const resolveInstanceIcon = () => 0;`,
+  "./builtinSkins": `export const builtinSkins = [
+    { id: "builtin:steve", name: "steve", slim: false, texture: "bundled:steve", builtin: true },
+    { id: "builtin:cirno", name: "cirno", slim: true, texture: "bundled:cirno", builtin: true }
+  ];`,
   "../package.json": `export const version = ${JSON.stringify(packageVersion)};`,
   "./useInstanceSorting": `import { ref } from ${JSON.stringify(vueUrl)};
     export const useInstanceSorting = instances => ({ strip: ref(), toggle: ref(), expanded: ref(false), ghost: ref(),
@@ -98,6 +102,8 @@ export async function settingsFixture() {
         },
         accounts: [],
         selected_account: null,
+        guest_name: "Player",
+        guest_skin: "builtin:steve",
         instances: [
           {
             id: "instance-a",

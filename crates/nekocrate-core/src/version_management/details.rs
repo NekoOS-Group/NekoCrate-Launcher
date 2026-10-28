@@ -1,6 +1,6 @@
 //! On-demand, read-only inspection of a listed item. No archive extraction,
 //! network lookups, recursive world scans, or loading/executing mod code.
-use super::{ContentKind, read_content};
+use super::{ContentKind, VersionContent, read_content};
 use crate::{Launcher, storage};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
@@ -23,6 +23,45 @@ pub(super) const MOD_DESCRIPTORS: [&str; 5] = [
     "META-INF/mods.toml",
     "mcmod.info",
 ];
+
+/// Presence only: reuse Mod summaries, inspect pack archive directories, and never
+/// parse full metadata or world data just to decide whether a row can expand.
+pub(super) fn mark_available(working: &Path, content: &mut VersionContent, kind: ContentKind) {
+    let records = crate::resources::records(working).unwrap_or_default();
+    for file in &mut content.files {
+        if file
+            .declaration
+            .as_ref()
+            .is_some_and(|d| d.status != "local")
+        {
+            continue;
+        }
+        let path = content.directory.join(&file.file_name);
+        let provenance = path.strip_prefix(working).is_ok_and(|relative| {
+            records.contains_key(&relative.to_string_lossy().replace('\\', "/"))
+        });
+        if provenance {
+            file.has_metadata = Some(true);
+        } else if kind != ContentKind::Mods {
+            file.has_metadata = Some(match kind {
+                ContentKind::Datapacks | ContentKind::Resourcepacks => {
+                    if path.is_dir() {
+                        path.join("pack.mcmeta").is_file()
+                    } else {
+                        fs::File::open(path)
+                            .ok()
+                            .and_then(|file| zip::ZipArchive::new(file).ok())
+                            .is_some_and(|archive| archive.index_for_name("pack.mcmeta").is_some())
+                    }
+                }
+                ContentKind::Saves => {
+                    path.join("level.dat").is_file() || path.join("level.dat_old").is_file()
+                }
+                _ => false,
+            });
+        }
+    }
+}
 
 #[derive(Debug, Serialize)]
 pub struct ContentMetadata {

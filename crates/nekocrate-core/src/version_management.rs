@@ -12,6 +12,7 @@ use std::{
 mod cache;
 mod declarations;
 pub mod details;
+pub mod mods;
 pub(crate) use cache::SummaryCache;
 
 #[derive(Clone, Debug, Serialize)]
@@ -22,6 +23,9 @@ pub struct LocalContentFile {
     pub enabled: bool,
     pub size: u64,
     pub mod_ids: Vec<String>,
+    /// None until the existing archive-summary batch has inspected this file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_metadata: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub declaration: Option<ContentDeclaration>,
 }
@@ -50,6 +54,8 @@ pub struct VersionContentIndex {
     #[serde(flatten)]
     pub content: VersionContent,
     pub pending: Vec<String>,
+    /// Matched against Mod IDs after summaries arrive; scan config directories once.
+    pub config_ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -75,6 +81,40 @@ pub enum ContentKind {
 }
 
 impl Launcher {
+    /// Reorder version metadata without changing the selected version or game files.
+    pub fn move_version(&self, id: &str, version: &str, before_id: Option<&str>) -> Result<()> {
+        self.mutate(|db| {
+            let instance = db
+                .instances
+                .iter_mut()
+                .find(|i| i.id == id)
+                .context("实例不存在")?;
+            let from = instance
+                .versions
+                .iter()
+                .position(|v| v.id == version)
+                .context("此实例未添加该版本")?;
+            let before = before_id
+                .map(|target| {
+                    instance
+                        .versions
+                        .iter()
+                        .position(|v| v.id == target)
+                        .context("目标版本不存在，请刷新后重试")
+                })
+                .transpose()?;
+            if before == Some(from) {
+                return Ok(());
+            }
+            let entry = instance.versions.remove(from);
+            let destination = before
+                .map(|index| if index > from { index - 1 } else { index })
+                .unwrap_or(instance.versions.len());
+            instance.versions.insert(destination, entry);
+            Ok(())
+        })
+    }
+
     pub fn rename_version(&self, id: &str, version_id: &str, name: &str) -> Result<()> {
         storage::safe_version(version_id)?;
         self.instance(id)?;
@@ -94,9 +134,17 @@ impl Launcher {
         })
     }
 
-    /// Move the version folder to a recoverable location on the same volume.
+    /// Move the version folder to the operating system's recycle bin.
     /// Shared libraries/assets/mods/saves are not part of this operation.
     pub fn delete_version(&self, id: &str, version_id: &str) -> Result<Instance> {
+        self.delete_version_with_recycle(id, version_id, crate::recycle::move_to_trash)
+    }
+    pub(crate) fn delete_version_with_recycle(
+        &self,
+        id: &str,
+        version_id: &str,
+        recycle: impl FnOnce(&Path) -> Result<()>,
+    ) -> Result<Instance> {
         let _guard = self
             .0
             .operation
@@ -132,46 +180,37 @@ impl Launcher {
             }
         }
         let source = versions.join(version_id);
-        let trash = game
-            .join(".nekocrate-trash")
-            .join(uuid::Uuid::new_v4().to_string())
-            .join(version_id);
-        let moved = match fs::symlink_metadata(&source) {
-            Ok(_) => {
-                fs::create_dir_all(trash.parent().unwrap())?;
-                fs::rename(&source, &trash)
-                    .context("无法移除版本目录，请关闭占用这些文件的程序")?;
-                true
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-            Err(error) => return Err(error.into()),
-        };
-        let result = self.mutate(|db| {
-            let instance = db
-                .instances
-                .iter_mut()
-                .find(|i| i.id == id)
-                .context("实例不存在")?;
-            let index = instance
-                .versions
-                .iter()
-                .position(|v| v.id == version_id)
-                .context("此实例未添加该版本")?;
-            instance.versions.remove(index);
-            if instance.selected_version.as_deref() == Some(version_id) {
-                instance.selected_version = instance
+        let result = self.mutate_recycling(
+            &source,
+            |db| {
+                let instance = db
+                    .instances
+                    .iter_mut()
+                    .find(|i| i.id == id)
+                    .context("实例不存在")?;
+                let index = instance
                     .versions
-                    .get(index.min(instance.versions.len().saturating_sub(1)))
-                    .map(|v| v.id.clone());
-            }
-            Ok(instance.clone())
-        });
-        if result.is_err() && moved {
-            fs::rename(&trash, &source).with_context(|| {
-                format!("保存删除结果失败，版本文件保留在：{}", trash.display())
-            })?;
+                    .iter()
+                    .position(|v| v.id == version_id)
+                    .context("此实例未添加该版本")?;
+                instance.versions.remove(index);
+                if instance.selected_version.as_deref() == Some(version_id) {
+                    instance.selected_version = instance
+                        .versions
+                        .get(index.min(instance.versions.len().saturating_sub(1)))
+                        .map(|v| v.id.clone());
+                }
+                Ok(instance.clone())
+            },
+            |source| crate::download_tasks::recycle_without_staging(self.root(), source, recycle),
+        )?;
+        if let Err(error) = crate::download_tasks::remove_owner(self.root(), id, Some(version_id)) {
+            let _ = crate::diagnostics::record_error(self.root(), "download_cleanup", &error);
         }
-        result
+        if let Err(error) = crate::resources::remove_version_tasks(&game, id, Some(version_id)) {
+            let _ = crate::diagnostics::record_error(self.root(), "download_cleanup", &error);
+        }
+        Ok(result)
     }
 
     pub fn version_content(
@@ -183,6 +222,7 @@ impl Launcher {
         let (working, resolved) = self.content_location(id, version_id)?;
         let mut content = read_content(&working, resolved.as_ref(), kind, true)?;
         self.merge_declared_content(id, version_id, &working, kind, &mut content)?;
+        details::mark_available(&working, &mut content, kind);
         sort_content(&mut content.files);
         Ok(content)
     }
@@ -205,6 +245,7 @@ impl Launcher {
             }
         }
         self.merge_declared_content(id, version_id, &working, ContentKind::Mods, &mut content)?;
+        details::mark_available(&working, &mut content, ContentKind::Mods);
         sort_content(&mut content.files);
         // Read visible rows first, rather than the filesystem's arbitrary enumeration order.
         let pending: std::collections::HashSet<_> = pending.into_iter().collect();
@@ -217,7 +258,12 @@ impl Launcher {
             })
             .map(|f| f.file_name.clone())
             .collect();
-        Ok(VersionContentIndex { content, pending })
+        let config_ids = mods::config_ids(&working);
+        Ok(VersionContentIndex {
+            content,
+            pending,
+            config_ids,
+        })
     }
 
     pub fn version_content_summaries(
@@ -259,7 +305,12 @@ impl Launcher {
             );
             result.push(file);
         }
-        Ok(result)
+        let mut content = VersionContent {
+            directory: content.directory,
+            files: result,
+        };
+        details::mark_available(&working, &mut content, ContentKind::Mods);
+        Ok(content.files)
     }
 
     /// Enumerate all tabs eagerly without opening each mod archive or sorting its metadata.
@@ -418,6 +469,7 @@ fn apply_identity(file: &mut LocalContentFile, identity: ModIdentity) {
     }
     file.version = identity.version;
     file.mod_ids = identity.ids;
+    file.has_metadata = Some(identity.has_metadata);
 }
 
 fn content_entries(directory: &Path) -> Result<Vec<PathBuf>> {
@@ -470,6 +522,7 @@ fn scan_content(
             file_name: relative_name(&path, root)?,
             name,
             mod_ids: Vec::new(),
+            has_metadata: None,
             version: None,
             enabled: true,
             size: if metadata.is_file() {
@@ -517,6 +570,7 @@ fn scan_mods(
             name: identity.name.unwrap_or(name),
             version: identity.version,
             mod_ids: identity.ids,
+            has_metadata: read_metadata.then_some(identity.has_metadata),
             enabled,
             size: metadata.len(),
         });
@@ -538,6 +592,7 @@ pub(crate) struct ModIdentity {
     name: Option<String>,
     version: Option<String>,
     pub(crate) ids: Vec<String>,
+    has_metadata: bool,
 }
 
 pub(crate) fn mod_metadata(path: &Path) -> Option<ModIdentity> {
@@ -547,6 +602,7 @@ pub(crate) fn mod_metadata(path: &Path) -> Option<ModIdentity> {
         let Ok(mut file) = archive.by_name(descriptor) else {
             continue;
         };
+        result.has_metadata = true;
         if file.size() > 1024 * 1024 {
             continue;
         }
@@ -815,6 +871,62 @@ mod tests {
         );
     }
     #[test]
+    fn version_order_persists_without_changing_selection_files_or_other_instances() {
+        let temp = tempfile::tempdir().unwrap();
+        let launcher = Launcher::open(Some(temp.path().into())).unwrap();
+        let instance = launcher.create_instance("Game", "a").unwrap();
+        let other = launcher.create_instance("Other", "other").unwrap();
+        let game = launcher.game_dir(&instance.id).unwrap();
+        for id in ["a", "b", "c"] {
+            profile(&game, id);
+            launcher.add_version(&instance.id, id).unwrap();
+        }
+        launcher.select_version(&instance.id, "b").unwrap();
+        let originals: Vec<_> = ["a", "b", "c"]
+            .into_iter()
+            .map(|id| {
+                let path = version::metadata_path(&game, id).unwrap();
+                let bytes = fs::read(&path).unwrap();
+                (path, bytes)
+            })
+            .collect();
+        let guard = launcher.0.operation.try_lock().unwrap();
+        launcher.move_version(&instance.id, "c", Some("a")).unwrap();
+        launcher.move_version(&instance.id, "a", None).unwrap();
+        launcher.move_version(&instance.id, "a", Some("a")).unwrap();
+        for (source, target) in [("missing", Some("a")), ("a", Some("missing"))] {
+            assert!(launcher.move_version(&instance.id, source, target).is_err());
+        }
+        assert!(launcher.move_version("missing", "a", None).is_err());
+        drop(guard);
+        launcher.add_version(&instance.id, "new").unwrap();
+        launcher.select_version(&instance.id, "b").unwrap();
+        drop(launcher);
+        let launcher = Launcher::open(Some(temp.path().into())).unwrap();
+        let restored = launcher.instance(&instance.id).unwrap();
+        assert_eq!(
+            restored
+                .versions
+                .iter()
+                .map(|v| v.id.as_str())
+                .collect::<Vec<_>>(),
+            ["c", "b", "a", "new"]
+        );
+        assert_eq!(restored.selected_version.as_deref(), Some("b"));
+        assert_eq!(
+            launcher
+                .instance(&other.id)
+                .unwrap()
+                .selected_version
+                .as_deref(),
+            Some("other")
+        );
+        for (path, bytes) in originals {
+            assert_eq!(fs::read(path).unwrap(), bytes);
+        }
+    }
+
+    #[test]
     fn rename_persists_across_discovery_without_changing_profile_or_directory() {
         let temp = tempfile::tempdir().unwrap();
         let launcher = Launcher::open(Some(temp.path().into())).unwrap();
@@ -878,24 +990,36 @@ mod tests {
                 .contains("child")
         );
         assert!(game.join("versions/base/base.json").is_file());
-        let result = launcher.delete_version(&instance.id, "child").unwrap();
+        let recovered = temp.path().join("recycled-child");
+        let result = launcher
+            .delete_version_with_recycle(&instance.id, "child", |source| {
+                assert_eq!(source, game.join("versions/child"));
+                fs::rename(source, &recovered)?;
+                Ok(())
+            })
+            .unwrap();
         assert_eq!(result.selected_version.as_deref(), Some("base"));
         assert!(!game.join("versions/child").exists());
-        assert!(
-            walkdir::WalkDir::new(game.join(".nekocrate-trash"))
-                .into_iter()
-                .filter_map(Result::ok)
-                .any(|e| e.path().ends_with("child/saves/level.dat"))
+        assert_eq!(
+            fs::read(recovered.join("saves/level.dat")).unwrap(),
+            b"isolated save"
         );
+        assert!(!game.join(".nekocrate-trash").exists());
         for dir in ["mods", "saves", "libraries", "assets"] {
             assert_eq!(fs::read(game.join(dir).join("keep")).unwrap(), b"shared");
         }
         drop(launcher);
         let launcher = Launcher::open(Some(temp.path().into())).unwrap();
         assert_eq!(launcher.instance(&instance.id).unwrap().versions.len(), 1);
-        launcher.delete_version(&instance.id, "base").unwrap();
+        launcher
+            .delete_version_with_recycle(&instance.id, "base", crate::recycle::discard_test_fixture)
+            .unwrap();
         launcher.add_version(&instance.id, "pending").unwrap();
-        let result = launcher.delete_version(&instance.id, "pending").unwrap();
+        let result = launcher
+            .delete_version_with_recycle(&instance.id, "pending", |_| {
+                panic!("missing files must not reach system trash")
+            })
+            .unwrap();
         assert!(result.versions.is_empty());
         assert!(result.selected_version.is_none());
     }
@@ -923,7 +1047,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn linked_version_deletion_rolls_back_failed_metadata_writes_and_uses_local_recovery() {
+    async fn linked_version_deletion_checks_database_write_before_recycling() {
         let temp = tempfile::tempdir().unwrap();
         let game = temp.path().join("external/.minecraft");
         profile(&game, "pack");
@@ -936,18 +1060,26 @@ mod tests {
         if backup.is_file() {
             fs::remove_file(&backup).unwrap();
         }
-        fs::create_dir(&backup).unwrap(); // Make the database save fail after the folder move.
-        assert!(launcher.delete_version(&instance.id, "pack").is_err());
+        fs::create_dir(&backup).unwrap(); // Fail database persistence before touching files.
+        assert!(
+            launcher
+                .delete_version_with_recycle(&instance.id, "pack", |_| panic!(
+                    "database write failed; files must stay untouched"
+                ))
+                .is_err()
+        );
         assert!(game.join("versions/pack/pack.jar").is_file());
         assert_eq!(launcher.instance(&instance.id).unwrap().versions.len(), 1);
         fs::remove_dir(backup).unwrap();
-        launcher.delete_version(&instance.id, "pack").unwrap();
-        assert!(
-            walkdir::WalkDir::new(game.join(".nekocrate-trash"))
-                .into_iter()
-                .filter_map(Result::ok)
-                .any(|e| e.path().ends_with("pack/pack.jar"))
-        );
+        let recovered = temp.path().join("recycled-pack");
+        launcher
+            .delete_version_with_recycle(&instance.id, "pack", |source| {
+                fs::rename(source, &recovered)?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(recovered.join("pack.jar").is_file());
+        assert!(!game.join(".nekocrate-trash").exists());
         assert!(!launcher.root().join(".nekocrate-trash").exists());
         assert!(game.is_dir());
     }

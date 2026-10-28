@@ -10,7 +10,7 @@ import {
   Pause,
   Play,
 } from "lucide-vue-next";
-import { t } from "../i18n";
+import { t, translateMessage } from "../i18n";
 import DownloadFiles from "./DownloadFiles.vue";
 import type { Task } from "../types";
 import { createFileOrder } from "../fileOrder";
@@ -21,19 +21,32 @@ const props = defineProps<{
   name: string;
   version?: string;
   controlPending?: boolean;
+  retrying?: string;
+  retryEnabled?: boolean;
 }>();
-defineEmits<{ close: []; cancel: []; pause: []; resume: [] }>();
+defineEmits<{
+  close: [];
+  cancel: [];
+  pause: [];
+  resume: [];
+  retry: [file: string];
+  continue: [];
+}>();
 const active = computed(
   () =>
     props.task.workflow.steps.find((step) =>
-      ["running", "paused"].includes(step.status),
+      ["running", "paused", "error"].includes(step.status),
     )?.id,
 );
 const expanded = ref<string | null>(null);
 watch(
   [() => props.task.id, active],
   () => {
-    expanded.value = active.value || null;
+    expanded.value =
+      active.value ||
+      (props.task.workflow.steps.some((step) => step.id === expanded.value)
+        ? expanded.value
+        : null);
   },
   { immediate: true },
 );
@@ -44,6 +57,13 @@ const labels = {
   done: "已完成",
   error: "失败",
   cancelled: "已取消",
+};
+const activities = {
+  downloading: "下载中",
+  reusing: "复用中",
+  verifying: "校验中",
+  installing: "安装中",
+  reused: "已复用",
 };
 </script>
 <template>
@@ -56,11 +76,23 @@ const labels = {
         <small v-if="version">{{ version }}</small>
       </div>
       <div class="workflow-header-actions">
+        <button
+          v-if="['error', 'cancelled'].includes(task.status) && task.operation"
+          type="button"
+          class="text-button"
+          :disabled="!retryEnabled || !!retrying"
+          @click="$emit('continue')"
+        >
+          <Play :size="14" />{{ t("继续任务") }}
+        </button>
         <template
-          v-if="['running', 'paused'].includes(task.status) && task.cancellable"
+          v-if="
+            (['running', 'paused'].includes(task.status) || retrying) &&
+            task.cancellable
+          "
         >
           <button
-            v-if="task.version_id || task.resource_pausable"
+            v-if="!retrying && (task.version_id || task.resource_pausable)"
             type="button"
             class="text-button"
             :disabled="controlPending"
@@ -152,6 +184,16 @@ const labels = {
               :class="{ expanded: expanded === step.id }"
             />
           </button>
+          <div v-if="step.activity" class="workflow-activity">
+            <template v-for="(label, status) in activities" :key="status"
+              ><small v-if="step.activity[status]"
+                >{{ t(label) }} {{ step.activity[status] }}</small
+              ></template
+            >
+          </div>
+          <p v-if="step.status === 'error'" class="workflow-error">
+            {{ translateMessage(task.message) }}
+          </p>
           <slot name="step-details" :step="step" />
           <Transition name="network-options"
             ><DownloadFiles
@@ -159,9 +201,29 @@ const labels = {
               :key="`${task.id}-${step.id}`"
               :order="task.workflow.fileOrder.get(step.id) || emptyFiles"
               :paused="task.status === 'paused'"
+              :retry-enabled="retryEnabled && task.status === 'error'"
+              :retrying="retrying"
+              @retry="$emit('retry', $event)"
           /></Transition>
         </div>
       </li>
     </ol>
   </div>
 </template>
+
+<style scoped>
+.workflow-activity {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  opacity: 0.65;
+  font-size: 10px;
+}
+.workflow-error {
+  margin: 6px 0;
+  font-size: 11px;
+  line-height: 1.5;
+  opacity: 0.75;
+  overflow-wrap: anywhere;
+}
+</style>

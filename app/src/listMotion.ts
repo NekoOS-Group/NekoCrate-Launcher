@@ -1,6 +1,7 @@
 /** Stable, compositor-only entrances. Long offscreen lists stay idle. */
-const ROW_STAGGER_MS = 30;
-const ROW_FADE_MS = 160;
+const ROW_STAGGER_MS = 20;
+const ROW_ANIMATION_LIMIT = 28;
+const ROW_FADE_MS = 120;
 const ROW_EASE = "cubic-bezier(.22,1,.36,1)";
 export function reducedListMotion() {
   return (
@@ -13,11 +14,11 @@ export function reducedListMotion() {
  * animation to rows that are remounted during ordinary scrolling. */
 export function enterListRows(
   elements: readonly HTMLElement[],
-  initialDelay = 30,
+  initialDelay = 20,
 ) {
   if (reducedListMotion()) return () => {};
   const rows = elements
-    .slice(0, 12)
+    .slice(0, ROW_ANIMATION_LIMIT)
     .filter((element) => !!element.animate)
     .map((element) => {
       const style = getComputedStyle(element);
@@ -47,7 +48,7 @@ export function enterListRows(
           },
           { transform },
         ],
-        { duration: 440, delay, easing: ROW_EASE, fill: "backwards" },
+        { duration: 320, delay, easing: ROW_EASE, fill: "backwards" },
       ),
     );
   }
@@ -56,10 +57,14 @@ export function enterListRows(
   ).then(stop);
   return stop;
 }
-export function listRevealStyle(index: number, initialDelay = 30) {
+export function listRevealStyle(
+  index: number,
+  initialDelay = 20,
+  stagger = ROW_STAGGER_MS,
+) {
   return {
-    "--row-delay": `${initialDelay + Math.min(index, 11) * ROW_STAGGER_MS}ms`,
-    ...(index >= 12 ? { animation: "none" } : {}),
+    "--row-delay": `${initialDelay + Math.min(index, ROW_ANIMATION_LIMIT - 1) * stagger}ms`,
+    ...(index >= ROW_ANIMATION_LIMIT ? { animation: "none" } : {}),
   };
 }
 
@@ -81,6 +86,7 @@ export function leaveList(element: Element, done: () => void) {
   }
   const viewport =
     root.querySelector<HTMLElement>("[data-list-viewport]") || root;
+  const stagger = Number(viewport.dataset.listStagger ?? ROW_STAGGER_MS);
   const bounds = viewport.getBoundingClientRect();
   const rows = Array.from(
     viewport.querySelectorAll<HTMLElement>(".list-reveal-item"),
@@ -112,7 +118,7 @@ export function leaveList(element: Element, done: () => void) {
   for (const [index, { row, opacity, transform }] of rows.entries()) {
     // Start from the current appearance even if entry is still in progress.
     row.style.animation = "none";
-    const delay = Math.min(index, 11) * ROW_STAGGER_MS;
+    const delay = Math.min(index, ROW_ANIMATION_LIMIT - 1) * stagger;
     // Complement the entering row's opacity on the same staggered timeline.
     // Position takes longer, so the fading row does not visibly snap to its end.
     animations.push(
@@ -123,7 +129,7 @@ export function leaveList(element: Element, done: () => void) {
         fill: "both",
       }),
       row.animate([{ transform }, { transform: "translateY(-8px)" }], {
-        duration: 240,
+        duration: 180,
         delay,
         easing: ROW_EASE,
         fill: "both",
@@ -145,7 +151,7 @@ export function leaveList(element: Element, done: () => void) {
   if (!rows.length)
     animations.push(
       root.animate([{ opacity: 1 }, { opacity: 0 }], {
-        duration: 140,
+        duration: ROW_FADE_MS,
         fill: "both",
       }),
     );

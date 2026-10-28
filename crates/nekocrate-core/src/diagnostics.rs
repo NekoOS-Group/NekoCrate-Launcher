@@ -46,6 +46,9 @@ pub fn record_error(root: &Path, operation: &str, error: &anyhow::Error) -> std:
 pub fn record_startup(root: &Path, phase: &str) -> std::io::Result<()> {
     record(root, "INFO", "startup", "message", phase)
 }
+pub(crate) fn record_download_recovery(root: &Path, message: &str) -> std::io::Result<()> {
+    record(root, "WARNING", "download_recovery", "message", message)
+}
 
 fn record(
     root: &Path,

@@ -2,8 +2,12 @@ use crate::{model::Account, storage::now};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
+
+mod profile_name;
+mod session_cache;
+pub(crate) use session_cache::SessionCache;
 
 const OAUTH: &str = "https://login.microsoftonline.com/consumers/oauth2/v2.0";
 const SCOPE: &str = "XboxLive.signin offline_access";
@@ -31,11 +35,14 @@ struct OAuthToken {
     access_token: String,
     refresh_token: Option<String>,
 }
+#[derive(Clone)]
 pub struct MinecraftSession {
     pub account: Account,
     pub access_token: String,
     pub xuid: String,
     pub refresh_token: String,
+    // In-memory only: changing the computer clock must not extend a token's life.
+    pub(crate) valid_until: Instant,
 }
 
 pub fn explain_error(code: &str, xerr: Option<u64>) -> &'static str {
@@ -149,14 +156,31 @@ pub async fn finish(
         return tokio::select! { _=cancel.cancelled()=>bail!("登录已取消"), r=exchange(client,oauth,&challenge.client_id)=>r };
     }
 }
-pub async fn refresh(
+pub async fn refresh<F>(
     client: &reqwest::Client,
     account: &Account,
     refresh_token: &str,
-    persist: impl Fn(&str) -> Result<()>,
-) -> Result<MinecraftSession> {
+    persist: impl Fn(String) -> F,
+) -> Result<MinecraftSession>
+where
+    F: std::future::Future<Output = Result<()>>,
+{
+    let token = refresh_oauth(client, account, refresh_token, OAUTH, persist).await?;
+    exchange(client, token, &account.client_id).await
+}
+
+async fn refresh_oauth<F>(
+    client: &reqwest::Client,
+    account: &Account,
+    refresh_token: &str,
+    endpoint: &str,
+    persist: impl Fn(String) -> F,
+) -> Result<OAuthToken>
+where
+    F: std::future::Future<Output = Result<()>>,
+{
     let response = client
-        .post(format!("{OAUTH}/token"))
+        .post(format!("{endpoint}/token"))
         .form(&[
             ("grant_type", "refresh_token"),
             ("client_id", account.client_id.as_str()),
@@ -171,8 +195,11 @@ pub async fn refresh(
     let rotated = token
         .refresh_token
         .get_or_insert_with(|| refresh_token.to_owned());
-    persist(rotated)?;
-    exchange(client, token, &account.client_id).await
+    if rotated != refresh_token {
+        // Commit rotation before the Xbox/Minecraft exchange, which may fail.
+        persist(rotated.clone()).await?;
+    }
+    Ok(token)
 }
 async fn exchange(
     client: &reqwest::Client,
@@ -216,6 +243,10 @@ async fn exchange_at(
         .as_str()
         .context("Minecraft 未返回访问令牌")?
         .to_owned();
+    let lifetime = minecraft["expires_in"].as_u64().unwrap_or(3600);
+    let valid_until = Instant::now()
+        .checked_add(Duration::from_secs(lifetime.saturating_sub(60)))
+        .context("Minecraft 返回的令牌有效期无效")?;
     let entitlements = response_value(
         client.get(endpoints[3]).bearer_auth(&access).send().await?,
         "游戏权益检查",
@@ -238,7 +269,7 @@ async fn exchange_at(
         account: Account {
             id,
             username: profile["name"].as_str().context("档案缺少玩家名称")?.into(),
-            expires_at: now() + minecraft["expires_in"].as_u64().unwrap_or(3600),
+            expires_at: now().saturating_add(lifetime),
             client_id: client_id.into(),
             owned: true,
             skin: crate::skin::profile_skin(&profile),
@@ -248,19 +279,60 @@ async fn exchange_at(
         refresh_token: oauth
             .refresh_token
             .context("微软未返回刷新令牌，请确认 offline_access 权限")?,
+        valid_until,
     })
 }
 
-pub fn secret_entry(root: &std::path::Path, id: &str) -> Result<keyring::Entry> {
+fn secret_account(root: &std::path::Path, id: &str) -> String {
     use ring::digest::{SHA256, digest};
     let namespace = hex::encode(digest(&SHA256, root.to_string_lossy().as_bytes()));
-    keyring::Entry::new("NekoCrate Launcher", &format!("{}-{id}", &namespace[..16]))
+    format!("{}-{id}", &namespace[..16])
+}
+pub fn secret_entry(root: &std::path::Path, id: &str) -> Result<keyring::Entry> {
+    keyring::Entry::new("NekoCrate Launcher", &secret_account(root, id))
         .context("系统凭据存储不可用")
 }
 pub fn save_secret(root: &std::path::Path, id: &str, token: &str) -> Result<()> {
-    secret_entry(root, id)?
+    #[cfg(target_os = "macos")]
+    let result = save_macos_secret(&secret_account(root, id), token);
+    #[cfg(not(target_os = "macos"))]
+    let result = secret_entry(root, id)?
         .set_password(token)
-        .context("无法写入系统钥匙串；登录信息未保存。请解锁钥匙串或启用 Secret Service")
+        .map_err(anyhow::Error::from);
+    result.context("无法写入系统钥匙串；登录信息未保存。请解锁钥匙串或启用 Secret Service")
+}
+
+#[cfg(target_os = "macos")]
+fn save_macos_secret(account: &str, token: &str) -> Result<()> {
+    use security_framework::{
+        item::{ItemClass, ItemSearchOptions, Reference, SearchResult},
+        os::macos::keychain::{SecKeychain, SecPreferencesDomain},
+    };
+    let keychain = SecKeychain::default_for_domain(SecPreferencesDomain::User)?;
+    // keyring's setter reads the old password before replacing it. Request only
+    // its item reference, preserving the exact keychain/service/account and ACL.
+    let result = ItemSearchOptions::new()
+        .keychains(std::slice::from_ref(&keychain))
+        .class(ItemClass::generic_password())
+        .service("NekoCrate Launcher")
+        .account(account)
+        .load_refs(true)
+        .limit(1)
+        .search();
+    match result {
+        Ok(items) => match items.into_iter().next() {
+            Some(SearchResult::Ref(Reference::KeychainItem(mut item))) => {
+                item.set_password(token.as_bytes())?;
+            }
+            _ => bail!("系统钥匙串返回了无效凭据引用"),
+        },
+        Err(error) if error.code() == -25300 => {
+            // errSecItemNotFound; authorization errors must never create a copy.
+            keychain.add_generic_password("NekoCrate Launcher", account, token.as_bytes())?;
+        }
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
 }
 pub fn load_secret(root: &std::path::Path, id: &str) -> Result<String> {
     secret_entry(root, id)?
@@ -277,6 +349,65 @@ pub fn remove_secret(root: &std::path::Path, id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn refresh_only_persists_changed_tokens_and_propagates_storage_failure() {
+        use std::sync::Mutex;
+        let account = Account {
+            id: "account-fixture".into(),
+            username: "Fixture".into(),
+            client_id: "client-fixture".into(),
+            expires_at: 0,
+            owned: true,
+            skin: None,
+        };
+        for returned in [None, Some("old-fixture"), Some("rotated-fixture")] {
+            let (url, server) = crate::test_http::serve(vec![(
+                200,
+                json!({"access_token":"ms-fixture", "refresh_token":returned}).to_string(),
+            )])
+            .await;
+            let saved = Mutex::new(Vec::new());
+            let token = refresh_oauth(
+                &crate::test_http::client(),
+                &account,
+                "old-fixture",
+                &url,
+                |token| {
+                    saved.lock().unwrap().push(token);
+                    std::future::ready(Ok(()))
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                token.refresh_token.as_deref(),
+                Some(returned.unwrap_or("old-fixture"))
+            );
+            assert_eq!(
+                saved.lock().unwrap().len(),
+                usize::from(returned == Some("rotated-fixture"))
+            );
+            let requests = server.await.unwrap();
+            assert!(requests[0].contains("refresh_token=old-fixture"));
+        }
+        let (url, server) = crate::test_http::serve(vec![(
+            200,
+            json!({"access_token":"ms-fixture", "refresh_token":"rotated-fixture"}).to_string(),
+        )])
+        .await;
+        let result = refresh_oauth(
+            &crate::test_http::client(),
+            &account,
+            "old-fixture",
+            &url,
+            |_| std::future::ready(Err(anyhow::anyhow!("storage fixture failure"))),
+        )
+        .await;
+        assert_eq!(result.err().unwrap().to_string(), "storage fixture failure");
+        server.await.unwrap();
+    }
+
     #[tokio::test]
     async fn device_login_defaults_to_project_app_and_preserves_explicit_overrides() {
         for configured in ["", " \t", " 2bc9d1a1-9cbc-49a2-992c-6ab525827e22 "] {

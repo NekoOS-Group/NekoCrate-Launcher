@@ -30,6 +30,22 @@ pub async fn serve(replies: Vec<(u16, String)>) -> (String, tokio::task::JoinHan
 pub async fn serve_with_headers(
     replies: Vec<(u16, String, String)>,
 ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+    let (address, task) = serve_bytes_with_headers(replies).await;
+    (
+        address,
+        tokio::spawn(async move {
+            task.await
+                .unwrap()
+                .into_iter()
+                .map(|bytes| String::from_utf8(bytes).unwrap())
+                .collect()
+        }),
+    )
+}
+
+pub async fn serve_bytes_with_headers(
+    replies: Vec<(u16, String, String)>,
+) -> (String, tokio::task::JoinHandle<Vec<Vec<u8>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = format!("http://{}", listener.local_addr().unwrap());
     let task = tokio::spawn(async move {
@@ -61,7 +77,7 @@ pub async fn serve_with_headers(
                     }
                 }
             }
-            requests.push(String::from_utf8(bytes).unwrap());
+            requests.push(bytes);
             let response = format!(
                 "HTTP/1.1 {status} Test\r\n{headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()

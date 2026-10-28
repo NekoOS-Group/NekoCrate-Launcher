@@ -113,7 +113,9 @@ mod tests {
         assert_eq!(launcher.instance(&instance.id).unwrap().icon, instance.icon);
         assert_eq!(launcher.instance(&managed.id).unwrap().icon, managed.icon);
         fs::write(game.join("options.txt"), b"new game settings").unwrap();
-        launcher.delete_instance(&instance.id).unwrap();
+        launcher
+            .delete_instance_with_recycle(&instance.id, crate::recycle::discard_test_fixture)
+            .unwrap();
         assert_eq!(
             fs::read(game.join("options.txt")).unwrap(),
             b"new game settings"

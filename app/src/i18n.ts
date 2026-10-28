@@ -27,6 +27,213 @@ export function setLanguage(preference: string, system: string) {
 
 /** Chinese source keys stay readable in templates; interpolate only after translation. */
 export const english: Readonly<Record<string, string>> = {
+  游客: "Guest",
+  游客名称: "Guest name",
+  修改游客名称: "Edit guest name",
+  "游客 · {name}": "Guest · {name}",
+  "以游客身份启动 · {name}": "Play as guest · {name}",
+  "游客名称须为 1–16 位英文字母、数字或下划线":
+    "Use 1–16 letters, numbers or underscores for the guest name",
+  复制到版本: "Copy to version",
+  运行中: "Running",
+  复制资源: "Copy resource",
+  暂无其他已安装版本: "No other installed versions",
+  目标版本已有此资源: "This resource is already in the target version",
+  "已复制 {name} 到 {version}": "Copied {name} to {version}",
+  刷新: "Refresh",
+  关闭: "Close",
+  移除: "Remove",
+  确认: "Confirm",
+  加载中: "Loading",
+  实例指定: "Instance configured",
+  "请选择 PNG 皮肤文件": "Choose a PNG skin file",
+  资源管理: "Resource manager",
+  游戏资源: "Game resources",
+  皮肤: "Skins",
+  缓存: "Cache",
+  全局可用的运行环境: "Available runtimes",
+  获取: "Get",
+  "获取 Java": "Get Java",
+  "添加 Java": "Add Java",
+  收起详情: "Close details",
+  拖到此处删除版本: "Drop here to delete this version",
+  登记本地: "Register local Java",
+  启动器托管: "Launcher managed",
+  手动登记: "Registered",
+  系统安装: "System",
+  移入回收站: "Move to Trash",
+  取消登记: "Unregister",
+  正在被实例使用: "In use by an instance",
+  "未发现 Java，可登记本地文件或获取所需版本。":
+    "No Java found. Register a local runtime or get a version above.",
+  "正在获取 Java": "Getting Java",
+  "只取消登记，保留原文件。":
+    "Remove registration only. Original files are kept.",
+  没有匹配的资源: "No matching resources",
+  暂无本地资源: "No local resources",
+  部分目录无法读取: "Some folders could not be read",
+  "导入 PNG": "Import PNG",
+  "{name} 正在使用": "Used by {name}",
+  "拖入 PNG 收藏皮肤": "Drop PNG files to collect skins",
+  皮肤名称: "Skin name",
+  正在应用皮肤: "Applying skin",
+  "Java 版玩家名称": "Java Edition player name",
+  "Java 版玩家名称须为 3–16 位英文字母、数字或下划线":
+    "Use 3–16 letters, numbers or underscores for your Java Edition name",
+  "30天可修改一次": "Once every 30 days",
+  确认改名: "Confirm name change",
+  经典模型: "Classic model",
+  纤细模型: "Slim model",
+  导出: "Export",
+  个文件: "files",
+  清理: "Clear",
+  索引与元数据: "Indexes & metadata",
+  资源缓存: "Resource cache",
+  未完成下载: "Unfinished downloads",
+  "清理后需要重新下载这些文件。":
+    "These files will need to be downloaded again.",
+  "请在皮肤页拖入 PNG，或在 Java 页拖入 Java 可执行文件。":
+    "Drop PNG files on Skins, or a Java executable on Java.",
+
+  配置: "Configuration",
+  配置文件: "Configuration file",
+  格式化: "Format",
+  "格式化（Shift + Alt + F）": "Format (Shift + Alt + F)",
+  "第 {line} 行，第 {column} 列": "Ln {line}, Col {column}",
+  "Tab 缩进；Esc 后按 Tab 移出编辑器；Ctrl/⌘ + Enter 保存":
+    "Tab to indent; Escape then Tab to leave the editor; Ctrl/⌘ + Enter to save",
+  字符串未结束: "Unterminated string constant",
+  表名未结束: "Unterminated table-key",
+  数组未结束: "Unterminated array",
+  内联表未结束: "Unterminated inline table",
+  键名不能为空: "Empty bare keys are not allowed",
+  此处需要换行: "Must be a newline",
+  缺少等号: "Expected equal (=) token",
+  缺少值: "Unspecified values are invalid",
+  缺少逗号: "Expected comma (,) token",
+  键名重复定义: "Defining a key multiple times is invalid",
+  无效字符: "Unexpected character",
+  此处不应出现该内容: "Unexpected token",
+  不允许控制字符: "Control characters (codes < 0x1f and 0x7f) are not allowed",
+  "键名、等号和值必须在同一行":
+    "The key, equals sign, and value must be on the same line",
+  内联表中此处不允许换行:
+    "No newlines are allowed between the curly braces unless they are valid within a value",
+  下划线只能出现在数字之间: "Underscores are allowed between digits",
+  此处不允许空格: "Unexpected spaces",
+  此处不允许连续多个引号: "Three or more quotes are not permitted",
+  日期无效: "Unexpected invalid date",
+  时间无效: "Unexpected invalid time",
+  不允许多余的前导零: "Leading zeros are not allowed",
+  内联表不允许尾随逗号: "Trailing comma is not permitted in an inline table",
+  转义字符无效: "Invalid character in escape sequence",
+  键名不能包含连续的点: "Consecutive dots are not permitted in keys",
+  键名不能以点结尾: "Keys cannot end with a dot",
+  键名不能以点开头: "Keys cannot start with a dot",
+  无效符号: "Invalid symbol",
+  数字格式无效: "Invalid number format",
+  属性名需要双引号: "Property names require double quotes",
+  缺少冒号: "Expected a colon",
+  缺少右花括号: "Expected a closing brace",
+  缺少右方括号: "Expected a closing bracket",
+  此处应结束文档: "Expected end of document",
+  "JSON 不支持注释": "JSON does not allow comments",
+  注释未结束: "Unterminated comment",
+  数字未结束: "Unterminated number",
+  "Unicode 转义无效": "Invalid Unicode escape",
+  编辑辅助暂不可用: "Editing assistance unavailable",
+  "CFG 分组缺少对应的左花括号": "CFG group has no matching opening brace",
+  "CFG 分组未结束，缺少 }": "Unclosed CFG group: expected }",
+  "CFG 列表未结束，缺少 >": "Unclosed CFG list: expected >",
+  重新读取配置: "Reload configuration",
+  "启用 Mod": "Enable mod",
+  "已启用 · 点击禁用": "Enabled · Click to disable",
+  "已禁用 · 点击启用": "Disabled · Click to enable",
+  "未下载 · 点击下载": "Not downloaded · Click to download",
+  处理中: "Working",
+  "下载 Mod": "Download mod",
+  "解析 Mod 文件": "Resolve mod file",
+  "下载与校验 Mod": "Download and verify mod",
+  "安装 Mod": "Install mod",
+  放弃修改: "Discard changes",
+  "未找到匹配的配置文件；部分 Mod 首次运行后才生成配置。":
+    "No matching configuration found. Some mods create configuration on first launch.",
+  "按 Mod ID 匹配配置；保存保留原文并创建备份。":
+    "Matched by mod ID. Saving preserves your text and creates a backup.",
+  崩溃诊断: "Crash diagnosis",
+  日志依据: "Log evidence",
+  复制诊断: "Copy diagnosis",
+  "未找到明确的已知原因，请结合完整日志继续排查。":
+    "No specific known cause was found. Review the complete log for more information.",
+  "诊断来自本次运行日志，不代表已确定唯一原因。":
+    "Hints are based on this run and may not identify the sole cause.",
+  "Java 堆内存不足": "Java heap memory exhausted",
+  系统或原生内存不足: "System or native memory exhausted",
+  "Java 版本不兼容": "Incompatible Java version",
+  "加载器或字节码解析器不支持此 Java 字节码":
+    "Unsupported bytecode in the loader or parser",
+  "Mod 依赖缺失或版本冲突": "Missing or incompatible mod dependencies",
+  "存在重复的 Mod": "Duplicate mods",
+  配置文件读取失败: "Configuration loading failed",
+  "Mixin 注入失败": "Mixin injection failed",
+  图形上下文创建失败: "Graphics context creation failed",
+  "JVM 或原生库异常退出": "JVM or native library crash",
+  "检查实例的最大内存；结合系统可用内存适当增加，或减少资源包与 Mod。":
+    "Check the maximum memory setting. Increase it within available system memory, or reduce resource packs and mods.",
+  "关闭占用内存的程序；检查是否给 Java 分配了过多堆内存，为原生库和系统保留空间。":
+    "Close memory-heavy programs. Check whether the Java heap leaves enough memory for native libraries and the system.",
+  "检查报错要求的 Java 版本，并在实例设置中选择兼容版本。":
+    "Check the required Java version in the error and select a compatible runtime in directory settings.",
+  "检查加载器与 Mod 的兼容范围；仅更新 Java 不一定能解决此问题。":
+    "Check loader and mod compatibility. Updating Java alone may not solve this error.",
+  "根据日志中的 Mod 名称和版本范围补全前置，或换成兼容当前游戏与加载器的版本。":
+    "Use the mod names and version requirements in the log to install missing dependencies or select compatible versions.",
+  "在 Mods 页检查重复 Mod ID，保留适用的版本并禁用多余文件。":
+    "Check duplicate mod IDs in the Mods tab and disable redundant files.",
+  "查看日志指出的配置文件；修正格式或先备份再恢复默认配置。":
+    "Check the configuration file named in the log. Correct its syntax or back it up before restoring defaults.",
+  "检查下方涉及的 Mod 与加载器版本，优先排查最近添加或更新的 Mod；注入失败本身不能确定唯一责任 Mod。":
+    "Check the listed mods and loader versions, starting with recent changes. An injection failure alone does not identify a single responsible mod.",
+  "检查显卡驱动和 OpenGL 支持；若使用远程桌面，尝试在本机启动。":
+    "Check graphics drivers and OpenGL support. If using remote desktop, try launching locally.",
+  "查看原生崩溃日志的 Problematic frame，核对 Java 架构、显卡驱动及原生库；不能仅凭退出码判断是哪个 Mod。":
+    "Inspect the problematic frame in the native crash log and check Java architecture, graphics drivers and native libraries. An exit code alone cannot identify a mod.",
+  复用中: "Reusing",
+  安装中: "Installing",
+  已复用: "Reused",
+  重试此文件: "Retry this file",
+  继续任务: "Continue task",
+  "文件已恢复，点击继续任务完成后续安装":
+    "File recovered. Continue the task to finish installation.",
+  "配置和 Mod 编辑不支持符号链接":
+    "Configuration and mod editing do not support symbolic links",
+  文件不存在或不是普通文件: "The file is missing or is not a regular file",
+  "配置文件超过 512 KiB，请使用外部编辑器":
+    "Configuration exceeds 512 KiB. Use an external editor",
+  "Mod 路径不在游戏目录内": "The mod path is outside the game directory",
+  "Mod 不存在": "The mod no longer exists",
+  "Mod 尚未下载": "The mod has not been downloaded",
+  "文件任务正在运行，请完成后修改 Mod":
+    "Wait for the file task to finish before modifying mods",
+  无法识别禁用文件名: "Unrecognized disabled mod filename",
+  "目标 Mod 文件已存在，未覆盖":
+    "The destination mod already exists and was not overwritten",
+  "来源信息保存失败，恢复 Mod 文件名失败":
+    "Saving provenance failed and the original mod filename could not be restored",
+  "配置文件未关联到此 Mod":
+    "This configuration file is not associated with the mod",
+  "配置不是 UTF-8 文本，请使用外部编辑器":
+    "Configuration is not UTF-8 text. Use an external editor",
+  配置不是文本文件: "Configuration is not a text file",
+  "文件任务正在运行，请完成后保存配置":
+    "Wait for the file task to finish before saving configuration",
+  "配置内容无效或超过 512 KiB": "Configuration is invalid or exceeds 512 KiB",
+  "配置已被其他程序修改，请重新读取后再保存":
+    "Another program changed this configuration. Reload it before saving",
+  "JSON 配置格式错误": "Invalid JSON configuration",
+  "TOML 配置格式错误": "Invalid TOML configuration",
+  "此失败文件已过期，请继续原安装任务":
+    "The retry handle has expired. Continue the original installation task",
   添加资源: "Add resources",
   添加内容: "Add content",
   整合包: "Modpacks",
@@ -179,7 +386,7 @@ export const english: Readonly<Record<string, string>> = {
   客户端版本: "Client version",
   资源索引: "Asset index",
   发布时间: "Released at",
-  运行依赖: "Runtime libraries",
+  运行依赖: "Libraries",
   "Mod 列表格式": "Mod list format",
   整合包清单: "Modpack manifest",
   "HMCL 版本设置": "HMCL profile settings",
@@ -491,6 +698,8 @@ export const english: Readonly<Record<string, string>> = {
   玩家皮肤: "Player skin",
   "玩家皮肤，拖拽旋转；方向键左右旋转，Home 复位":
     "Player skin. Drag or use Left/Right arrows to rotate; Home to reset.",
+  "玩家皮肤，单击压扁，双击摸头；拖拽或方向键旋转，Home 复位，Enter 压扁，Shift+Enter 摸头":
+    "Player skin: click to squish, double-click to pat; drag or arrow keys rotate, Home resets, Enter squishes, Shift+Enter pats",
   正在加载皮肤: "Loading skin",
   重新加载皮肤: "Reload skin",
   主题配色: "Theme colors",
@@ -516,8 +725,8 @@ export const english: Readonly<Record<string, string>> = {
   没有匹配的内容: "No matching items",
   暂无内容: "No items yet",
   已禁用: "Disabled",
-  "版本文件将移入游戏目录的回收区，共享 Mod 和存档保留。":
-    "Version files move to the game directory’s recovery folder. Shared mods and saves are kept.",
+  "版本文件将移入系统回收站，共享 Mod 和存档保留。":
+    "Version files move to the system Trash / Recycle Bin. Shared mods and saves are kept.",
   确认删除: "Confirm deletion",
   请先结束游戏或当前任务: "Stop the game or finish the current task first",
   导入实例: "Import instance",
@@ -553,8 +762,8 @@ export const english: Readonly<Record<string, string>> = {
     "Sign in from the desktop launcher. Microsoft sign-in is unavailable in the browser preview.",
   "未能自动打开浏览器。请点击下方登录链接重试。":
     "Could not open your browser. Click the sign-in link below to retry.",
-  "并发下载请填写 1–32 的整数。":
-    "Parallel downloads must be an integer from 1 to 32.",
+  "并发下载请填写 1–256 的整数。":
+    "Parallel downloads must be an integer from 1 to 256.",
   "失败重试请填写 0–5 的整数。":
     "Retry attempts must be an integer from 0 to 5.",
   "无法访问剪贴板，请手动选择并复制。":
@@ -570,8 +779,8 @@ export const english: Readonly<Record<string, string>> = {
   "移除账户 {name}": "Remove account {name}",
   "仅从列表移除「{name}」，原目录和游戏文件保留在原处。":
     "Remove “{name}” from the list. Its folder and game files will stay where they are.",
-  "「{name}」将移至回收目录，游戏文件会保留。":
-    "“{name}” will move to the trash folder. Its game files will be kept.",
+  "「{name}」将移入系统回收站，可在其中恢复或清空。":
+    "“{name}” will move to the system Trash / Recycle Bin, where you can restore or permanently delete it.",
   "{name} · 点击修改名称": "{name} · Click to rename",
   "打开游戏目录：{path}": "Open game folder: {path}",
   "{title}，{progress}，查看下载任务": "{title}, {progress}. View downloads",

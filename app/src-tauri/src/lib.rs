@@ -7,16 +7,19 @@ use tauri_plugin_opener::OpenerExt;
 use tokio_util::sync::CancellationToken;
 
 mod clipboard;
+mod download_retry;
 mod folder_scan;
 mod import_picker;
 mod jobs;
 mod pausable;
+mod resource_manager;
 mod startup;
 mod updater;
 
 struct AppState {
     launcher: Launcher,
     jobs: jobs::Jobs,
+    download_retries: download_retry::Retries,
     updater: updater::UpdateManager,
     folder_scan: folder_scan::FolderScanManager,
 }
@@ -29,6 +32,45 @@ impl AppState {
 #[derive(Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 enum Request {
+    ResourceManager {
+        action: resource_manager::Action,
+    },
+    DownloadDeclaredMod {
+        id: String,
+        version: String,
+        key: String,
+    },
+    RetryDownloadFile {
+        file: String,
+    },
+    CrashReport {
+        id: String,
+    },
+    SetModEnabled {
+        id: String,
+        version: String,
+        file: String,
+        enabled: bool,
+    },
+    ModConfigFiles {
+        id: String,
+        version: String,
+        file: String,
+    },
+    ReadModConfig {
+        id: String,
+        version: String,
+        file: String,
+        config: String,
+    },
+    SaveModConfig {
+        id: String,
+        version: String,
+        file: String,
+        config: String,
+        revision: String,
+        text: String,
+    },
     SearchModpacks {
         platform: nekocrate_core::resources::Platform,
         query: String,
@@ -71,6 +113,11 @@ enum Request {
         version: String,
         inputs: Vec<nekocrate_core::resources::LocalImport>,
         world: Option<String>,
+    },
+    CopyResource {
+        source: nekocrate_core::resources::ResourceCopySource,
+        id: String,
+        version: String,
     },
     ResourcePlans {
         id: String,
@@ -202,6 +249,11 @@ enum Request {
         id: String,
         version: String,
     },
+    MoveVersion {
+        id: String,
+        version: String,
+        before_id: Option<String>,
+    },
     RenameVersion {
         id: String,
         version: String,
@@ -288,7 +340,14 @@ enum Request {
         id: String,
     },
     SelectAccount {
+        id: Option<String>,
+    },
+    SetGuestName {
+        name: String,
+    },
+    RenameAccount {
         id: String,
+        name: String,
     },
     RemoveAccount {
         id: String,
@@ -326,7 +385,10 @@ fn dispatch<'a>(
             return Err("正在安装启动器更新，请稍候".into());
         }
         let handle = app.clone();
+        let retry_scopes = Arc::new(download_retry::Scopes::default());
+        let scopes = retry_scopes.clone();
         let sink: EventSink = Arc::new(move |event| {
+            scopes.observe(&event);
             let _ = handle.emit("launcher-event", event);
         });
         let launcher = &state.launcher;
@@ -340,6 +402,7 @@ fn dispatch<'a>(
                 Some("add_loader_version")
             }
             Request::Install { .. } => Some("install"),
+            Request::DownloadDeclaredMod { .. } => Some("download_mod"),
             Request::Launch { .. } => Some("launch"),
             Request::CheckUpdate => Some("check_update"),
             Request::DownloadLauncherUpdate { .. } => Some("download_launcher_update"),
@@ -347,10 +410,32 @@ fn dispatch<'a>(
             Request::BeginLogin { .. } | Request::WaitLogin { .. } | Request::RefreshAccount => {
                 Some("login")
             }
+            Request::RenameAccount { .. } => Some("rename_account"),
             _ => None,
         };
         let result: Result<Value, anyhow::Error> = async {
         Ok(match request{
+            Request::ResourceManager{action}=>resource_manager::handle(action,&state,&app,&sink).await?,
+            Request::DownloadDeclaredMod{id,version,key}=>{
+                let (cancel,guard)=state.job().await?;
+                let receiver=guard.enable_pause();
+                let operation=launcher.download_declared_mod(&id,&version,&key,&cancel,&sink);
+                json!(pausable::run(operation,&cancel,receiver).await?)
+            },
+            Request::SetModEnabled{id,version,file,enabled}=>{let launcher=launcher.clone(); json!(tauri::async_runtime::spawn_blocking(move || launcher.set_mod_enabled(&id,&version,&file,enabled)).await??)},
+            Request::ModConfigFiles{id,version,file}=>{let launcher=launcher.clone(); json!(tauri::async_runtime::spawn_blocking(move || launcher.mod_config_files(&id,&version,&file)).await??)},
+            Request::ReadModConfig{id,version,file,config}=>{let launcher=launcher.clone(); json!(tauri::async_runtime::spawn_blocking(move || launcher.read_mod_config(&id,&version,&file,&config)).await??)},
+            Request::SaveModConfig{id,version,file,config,revision,text}=>{let launcher=launcher.clone(); json!(tauri::async_runtime::spawn_blocking(move || launcher.save_mod_config(&id,&version,&file,&config,&revision,&text)).await??)},
+            Request::CrashReport{id}=>{let launcher=launcher.clone(); json!(tauri::async_runtime::spawn_blocking(move || launcher.crash_report(&id)).await??)},
+            Request::RetryDownloadFile{file}=>{
+                let (cancel,_guard)=state.job().await?;
+                let entry=state.download_retries.get(&file)?;
+
+                let scoped = match &entry.instance { Some(id)=>Event::scoped(&sink,id,entry.step.as_deref()), None=>sink.clone() };
+                launcher.retry_download_file(&entry.file,entry.instance.as_deref(),&cancel,&scoped).await?;
+                state.download_retries.completed(&file);
+                json!(true)
+            },
             Request::CopyText{text}=>{clipboard::write_text(&app, text)?;json!(true)},
             Request::Snapshot=>{
                 let recovery = launcher.clone();
@@ -388,6 +473,16 @@ fn dispatch<'a>(
                 let (cancel,_guard)=state.job().await?;
                 let launcher=launcher.clone();
                 json!(tauri::async_runtime::spawn_blocking(move || launcher.prepare_local_resources(&id,&version,&inputs,world.as_deref(),&cancel)).await??)
+            },
+            Request::CopyResource{source,id,version}=>{
+                let (cancel,_guard)=state.job().await?;
+                let worker=launcher.clone();
+                let token=cancel.clone();
+                let plan=tauri::async_runtime::spawn_blocking(move || worker.prepare_resource_copy(&source,&id,&version,&token)).await??;
+                if let Some(plan)=plan {
+                    launcher.install_resources(&plan.target.instance,&plan.target.version,&plan.id,&cancel,&sink).await?;
+                    json!(true)
+                } else { json!(false) }
             },
             Request::ResourcePlans{id,version}=>{
                 let launcher=launcher.clone();
@@ -451,7 +546,14 @@ fn dispatch<'a>(
             },
             Request::Update{id,name,memory_mb,memory_mode,java_path,icon}=>{launcher.update_instance_memory(&id,&name,nekocrate_core::memory::MemoryConfig{mode:memory_mode,custom_mb:memory_mb},java_path,icon)?;json!(true)},
             Request::Clone{id}=>{let (_cancel,_guard)=state.job().await?;json!(launcher.clone_instance(&id).await?)},
-            Request::Delete{id}=>{let (_cancel,_guard)=state.job().await?;launcher.delete_instance(&id)?;json!(true)},
+            Request::Delete{id}=>{
+                let (_cancel,_guard)=state.job().await?;
+                let launcher = launcher.clone();
+                let scope = id.clone();
+                tauri::async_runtime::spawn_blocking(move || launcher.delete_instance(&id)).await??;
+                state.download_retries.invalidate_instance(&scope);
+                json!(true)
+            },
             Request::MoveInstance{id,before_id}=>{launcher.move_instance(&id,before_id.as_deref())?;json!(true)},
             Request::Import{source,name,version}=>{let (_cancel,_guard)=state.job().await?;json!(launcher.import_instance(PathBuf::from(source),name,version).await?)},
             Request::ScanFolders{scan_id,paths}=>{
@@ -481,11 +583,15 @@ fn dispatch<'a>(
             Request::PickInstanceLocation{path}=>json!(import_picker::pick(&app,&path,launcher.ui_language() == "en-US",true).await?),
             Request::AddVersion{id,version}=>{let (_cancel,_guard)=state.job().await?;json!(launcher.add_version(&id,&version)?)},
             Request::SelectVersion{id,version}=>{let (_cancel,_guard)=state.job().await?;launcher.select_version(&id,&version)?;json!(true)},
-            Request::RenameVersion{id,version,name}=>{launcher.rename_version(&id,&version,&name)?;json!(true)},
+            Request::MoveVersion{id,version,before_id}=>{launcher.move_version(&id,&version,before_id.as_deref())?;json!(true)},
+            Request::RenameVersion{id,version,name}=>{launcher.rename_version(&id,&version,&name)?;state.download_retries.invalidate_instance(&id);json!(true)},
             Request::DeleteVersion{id,version}=>{
                 let (_cancel,_guard)=state.job().await?;
                 let launcher = launcher.clone();
-                json!(tauri::async_runtime::spawn_blocking(move || launcher.delete_version(&id,&version)).await??)
+                let scope = id.clone();
+                let result = tauri::async_runtime::spawn_blocking(move || launcher.delete_version(&id,&version)).await??;
+                state.download_retries.invalidate_instance(&scope);
+                json!(result)
             },
             Request::VersionContentCounts{id,version}=>{
                 let launcher = launcher.clone();
@@ -563,13 +669,16 @@ fn dispatch<'a>(
             Request::CancelLogin{session_id}=>{state.jobs.cancel_login(&session_id).await;json!(true)},
             Request::RefreshAccount=>{let (_cancel,_guard)=state.job().await?;json!(launcher.refresh_account().await?)},
             Request::AccountSkin{id}=>json!(launcher.account_skin(&id).await?),
-            Request::SelectAccount{id}=>{let (_cancel,_guard)=state.job().await?;launcher.select_account(&id)?;json!(true)},
+            Request::SelectAccount{id}=>{let (_cancel,_guard)=state.job().await?;if let Some(id)=id {launcher.select_account(&id)?;} else {launcher.select_guest()?;}json!(true)},
+            Request::SetGuestName{name}=>json!(launcher.set_guest_name(&name)?),
+            Request::RenameAccount{id,name}=>json!(Box::pin(launcher.rename_account(&id,&name)).await?),
             Request::RemoveAccount{id}=>{let (_cancel,_guard)=state.job().await?;launcher.remove_account(&id)?;json!(true)},
             Request::OpenFolder{id}=>{let path=match id{Some(id)=>launcher.game_dir(&id)?,None=>launcher.root().to_owned()};app.opener().open_path(path.to_string_lossy(),None::<&str>)?;json!(true)},
             Request::InstanceDirectory{id}=>json!(launcher.game_dir(&id)?),
         })
     }.await;
         result.map_err(|error| {
+            state.download_retries.capture(&error, &retry_scopes);
             let error = nekocrate_core::network::explain_error(error);
             if let Some(operation) = diagnostic_operation
                 && !error.to_string().contains("取消")
@@ -645,6 +754,7 @@ pub fn run() {
             app.manage(AppState {
                 launcher,
                 jobs: jobs::Jobs::default(),
+                download_retries: download_retry::Retries::default(),
                 updater: updater::UpdateManager::default(),
                 folder_scan: folder_scan::FolderScanManager::default(),
             });

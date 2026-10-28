@@ -203,7 +203,13 @@ impl Launcher {
         storage::write_json(&record_path(&game, selected)?, &record)?;
         self.set_installed(id, selected, false)?;
         let settings = self.settings();
-        let downloader = Downloader::new(self.root(), settings.clone())?;
+        let downloader = Downloader::new(self.root(), settings.clone())?.for_installation(
+            self.root(),
+            id,
+            &game,
+            selected,
+            "game",
+        )?;
         let downloader = if repair {
             downloader.with_full_verification()
         } else {
@@ -284,6 +290,7 @@ impl Launcher {
         record.progress = 100.0;
         storage::write_json(&record_path(&game, selected)?, &record)?;
         self.set_installed(id, selected, true)?;
+        downloader.finish_installation(&sink).await;
         sink(Event::new("complete", "游戏与加载器已安装"));
         Ok(())
     }

@@ -1,3 +1,5 @@
+import { createLog4jDecoder } from "./log4jPresentation.ts";
+
 export type LogLine = {
   time: string;
   kind: string;
@@ -103,6 +105,7 @@ export function presentLogs(
 /** Append batches without rebuilding historical rows; reset after clear or locale changes. */
 export function createLogPresenter() {
   let rows: LogRow[] = [];
+  const xml = createLog4jDecoder();
   const contexts = new Map<string, { level: LogLevel | ""; group: number }>();
   let previous: LogLine | undefined;
   let first: LogLine | undefined;
@@ -122,75 +125,92 @@ export function createLogPresenter() {
       ) {
         rows = [];
         contexts.clear();
+        xml.clear();
         processed = 0;
         previous = undefined;
       }
       translationKey = key;
       first = lines[0];
       for (let i = processed; i < lines.length; i++) {
-        const line = lines[i];
-        let entry = cache.get(line);
-        if (!entry) {
-          const parsed = parseLog(line.message, line.kind);
-          entry = {
-            id: nextId++,
-            parsed,
-            search: `${parsed.source}\n${parsed.message}`.toLowerCase(),
-          };
-          cache.set(line, entry);
-        }
-        const parsed =
-          line.kind === "log"
-            ? entry.parsed
-            : { ...entry.parsed, message: translate(entry.parsed.message) };
-        const last = rows.at(-1);
-        const scope = line.instanceId || "launcher";
-        const context = contexts.get(scope);
-        const filterLevel =
-          parsed.detail === "cause"
-            ? "ERROR"
-            : parsed.detail === "stack"
-              ? context?.level || "ERROR"
-              : parsed.level;
-        const group =
-          parsed.detail &&
-          context &&
-          ["WARN", "ERROR", "FATAL"].includes(context.level)
-            ? context.group
-            : entry.id;
-        if (
-          last &&
-          previous?.kind === line.kind &&
-          previous.instanceId === line.instanceId &&
-          parsed.message !== "" &&
-          last.message === parsed.message &&
-          last.level === parsed.level &&
-          last.source === parsed.source
-        ) {
-          last.count++;
-          last.lastTime = line.time;
-          last.originals.push(line);
-        } else {
-          rows.push({
-            ...parsed,
-            id: entry.id,
-            time: line.time,
-            lastTime: line.time,
-            count: 1,
-            scope,
-            filterLevel,
-            group,
-            search:
-              line.kind === "log"
-                ? entry.search
-                : `${parsed.source}\n${parsed.message}`.toLowerCase(),
-            originals: [line],
+        for (const display of xml.push(lines[i])) {
+          const { line } = display;
+          let entry = cache.get(line);
+          if (!entry || display.parsed) {
+            const plain = parseLog(
+              display.parsed?.message ?? line.message,
+              line.kind,
+            );
+            const parsed = display.parsed
+              ? {
+                  ...display.parsed,
+                  message: plain.message,
+                  detail: display.parsed.detail || plain.detail,
+                }
+              : plain;
+            entry = {
+              id: entry?.id ?? nextId++,
+              parsed,
+              search: `${parsed.source}\n${parsed.message}`.toLowerCase(),
+            };
+            cache.set(line, entry);
+          }
+          const parsed =
+            line.kind === "log"
+              ? entry.parsed
+              : { ...entry.parsed, message: translate(entry.parsed.message) };
+          const last = rows.at(-1);
+          const scope = line.instanceId || "launcher";
+          const context = contexts.get(scope);
+          const filterLevel =
+            parsed.detail === "cause"
+              ? "ERROR"
+              : parsed.detail === "stack"
+                ? context?.level || "ERROR"
+                : parsed.level;
+          const group =
+            parsed.detail &&
+            context &&
+            ["WARN", "ERROR", "FATAL"].includes(context.level)
+              ? context.group
+              : entry.id;
+          if (
+            last &&
+            previous?.kind === line.kind &&
+            previous.instanceId === line.instanceId &&
+            parsed.message !== "" &&
+            last.message === parsed.message &&
+            last.level === parsed.level &&
+            last.source === parsed.source
+          ) {
+            last.count++;
+            last.lastTime = line.time;
+            last.originals.push(...(display.originals || [line]));
+          } else {
+            rows.push({
+              ...parsed,
+              id: entry.id,
+              time: line.time,
+              lastTime: line.time,
+              count: 1,
+              scope,
+              filterLevel,
+              group,
+              search:
+                line.kind === "log"
+                  ? entry.search
+                  : `${parsed.source}\n${parsed.message}`.toLowerCase(),
+              originals: display.originals || [line],
+            });
+          }
+          contexts.set(scope, {
+            level: filterLevel,
+            group: rows.at(-1)!.group,
           });
+          previous = line;
         }
-        contexts.set(scope, { level: filterLevel, group: rows.at(-1)!.group });
-        previous = line;
       }
       processed = lines.length;
+      previous = lines.at(-1);
       return rows.slice();
     },
   };

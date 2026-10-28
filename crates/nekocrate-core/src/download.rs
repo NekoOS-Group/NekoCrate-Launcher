@@ -26,6 +26,8 @@ pub struct FileSpec {
 impl FileSpec {
     fn progress(&self, status: &str, downloaded: u64, total: u64) -> FileProgress {
         FileProgress {
+            error: None,
+            retryable: false,
             id: self.path.to_string_lossy().into_owned(),
             name: self
                 .path
@@ -55,9 +57,43 @@ impl FileSpec {
     }
 }
 
+/// Trusted retry handles remain in the backend; the UI only submits a listed file ID.
+#[derive(Clone)]
+pub struct RetryFile {
+    downloader: Downloader,
+    file: FileSpec,
+}
+impl RetryFile {
+    pub fn id(&self) -> String {
+        self.file.path.to_string_lossy().into_owned()
+    }
+    pub async fn run(&self, cancel: &CancellationToken, sink: &EventSink) -> Result<()> {
+        self.downloader
+            .batch(vec![self.file.clone()], cancel, sink)
+            .await
+    }
+}
+pub struct DownloadFailures {
+    pub files: Vec<RetryFile>,
+    message: String,
+}
+impl std::fmt::Display for DownloadFailures {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+impl std::fmt::Debug for DownloadFailures {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+impl std::error::Error for DownloadFailures {}
+
 #[derive(Clone)]
 pub struct Downloader {
     pub client: reqwest::Client,
+    network_root: Arc<PathBuf>,
+    stall_policy: crate::download_stall::StallPolicy,
     cache: PathBuf,
     settings: Settings,
     metrics: Arc<TransferMetrics>,
@@ -67,6 +103,7 @@ pub struct Downloader {
     full_verification: bool,
     mirrors: Arc<std::collections::HashMap<PathBuf, Vec<String>>>,
     curseforge: Option<(reqwest::Client, reqwest::header::HeaderValue)>,
+    task: Option<Arc<crate::download_tasks::DownloadTask>>,
 }
 #[derive(Default)]
 struct TransferMetrics {
@@ -141,11 +178,16 @@ impl BatchProgress {
         Self {
             files: files
                 .iter()
-                .map(|file| (file.id.clone(), (file.downloaded, file.total, false)))
+                .map(|file| {
+                    (
+                        file.id.clone(),
+                        (file.downloaded, file.total, file.status == "done"),
+                    )
+                })
                 .collect(),
             bytes: files.iter().map(|file| file.downloaded).sum(),
             total_bytes: files.iter().map(|file| file.total).sum(),
-            completed: 0,
+            completed: files.iter().filter(|file| file.status == "done").count(),
             last: std::time::Instant::now() - Duration::from_secs(1),
         }
     }
@@ -197,6 +239,8 @@ impl BatchProgress {
 impl Downloader {
     pub fn new(root: &Path, settings: Settings) -> Result<Self> {
         Ok(Self {
+            network_root: Arc::new(root.to_owned()),
+            stall_policy: Default::default(),
             client: crate::network::client_builder(root, &settings)?
                 .connect_timeout(Duration::from_secs(15))
                 // Large game/JRE files may take minutes on slower networks.
@@ -212,7 +256,74 @@ impl Downloader {
             full_verification: false,
             mirrors: Arc::default(),
             curseforge: None,
+            task: None,
         })
+    }
+    pub(crate) fn for_installation(
+        mut self,
+        root: &Path,
+        instance: &str,
+        game: &Path,
+        version: &str,
+        task: &str,
+    ) -> Result<Self> {
+        self.task = Some(crate::download_tasks::DownloadTask::new(
+            root, instance, game, version, task,
+        )?);
+        Ok(self)
+    }
+
+    /// Call only after the complete installation transaction has been published.
+    pub(crate) async fn finish_installation(&self, sink: &EventSink) {
+        let Some(task) = &self.task else {
+            return;
+        };
+        match task.complete().await {
+            Ok(paths) => {
+                for path in paths {
+                    self.verification.forget(&path);
+                }
+                self.flush_verification(sink).await;
+            }
+            Err(error) => sink(Event::new(
+                "warning",
+                format!("清理安装暂存文件失败：{error:#}"),
+            )),
+        }
+    }
+
+    pub(crate) async fn index_installed(&self, file: &FileSpec) -> Result<()> {
+        // Publication may rename/hard-link a staged file, changing its identity.
+        if !self
+            .verification
+            .verify(
+                &file.path,
+                &file.hash,
+                file.sha256,
+                file.size,
+                false,
+                &CancellationToken::new(),
+            )
+            .await?
+        {
+            bail!("安装后的文件校验失败：{}", file.path.display());
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn retain_until_installed(&self, paths: Vec<PathBuf>) -> Result<()> {
+        if let Some(task) = &self.task {
+            task.track_extra(paths).await?;
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn forget_staging(&self, path: &Path) {
+        self.verification.forget_tree(path).await;
+    }
+
+    pub(crate) async fn index_local(&self, path: &Path) -> Result<()> {
+        self.verification.index_local(path).await
     }
     pub(crate) fn with_mirrors(
         mut self,
@@ -284,6 +395,36 @@ impl Downloader {
             url = next;
         }
         bail!("下载跳转次数过多")
+    }
+
+    // Cloning reqwest::Client shares its connection pool. A stalled HTTP/2
+    // stream can otherwise keep retrying on the very same bad connection.
+    fn reconnect(&mut self) -> Result<()> {
+        let client = |redirects| {
+            crate::network::client_builder(&self.network_root, &self.settings)?
+                .redirect(redirects)
+                .connect_timeout(Duration::from_secs(15))
+                .read_timeout(Duration::from_secs(45))
+                .build()
+                .map_err(anyhow::Error::from)
+        };
+        self.client = client(reqwest::redirect::Policy::default())?;
+        if let Some((connection, _)) = &mut self.curseforge {
+            *connection = client(reqwest::redirect::Policy::none())?;
+        }
+        Ok(())
+    }
+
+    async fn watched_response(
+        &self,
+        url: &str,
+        offset: u64,
+        stalls: u32,
+    ) -> Result<reqwest::Response> {
+        let wait = self.stall_policy.wait(Duration::ZERO, stalls, true);
+        tokio::time::timeout(wait, self.file_response(url, offset))
+            .await
+            .map_err(|_| crate::download_stall::Stalled(wait))?
     }
 
     pub(crate) async fn import_cached_files(
@@ -465,19 +606,52 @@ impl Downloader {
         cancel: &CancellationToken,
         sink: &EventSink,
     ) -> Result<()> {
+        check_cancel(cancel)?;
+        if let Some(task) = &self.task {
+            task.track(&self.cache, std::slice::from_ref(file)).await?;
+        }
         let bytes = self.local_bytes(file).await?;
         let result = self.file_with_progress(file, bytes, cancel, sink).await;
         self.flush_verification(sink).await;
-        result
+        result.map_err(|error| {
+            if cancel.is_cancelled() {
+                return error;
+            }
+            DownloadFailures {
+                files: vec![RetryFile {
+                    downloader: self.clone(),
+                    file: file.clone(),
+                }],
+                message: crate::diagnostics::redact(&format!("{error:#}")),
+            }
+            .into()
+        })
+    }
+    /// A successfully consumed installer is not a reusable game dependency.
+    /// Remove its target and content-addressed copy, but never partial downloads.
+    pub(crate) async fn discard_installer(&self, file: &FileSpec) -> Result<()> {
+        // Scoped installations retain all staging until the complete transaction commits.
+        if self.task.is_some() {
+            return Ok(());
+        }
+        let cache = self.cache_path(file)?;
+        for path in [&file.path, &cache] {
+            match tokio::fs::remove_file(path).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            self.verification.forget(path);
+        }
+        self.verification.flush().await
     }
     async fn file_with_progress(
         &self,
         file: &FileSpec,
-        bytes: u64,
+        _bytes: u64,
         cancel: &CancellationToken,
         sink: &EventSink,
     ) -> Result<()> {
-        file.emit(sink, "verifying", bytes, file.size.max(bytes));
         let result = self.file_inner(file, cancel, sink).await;
         match &result {
             Ok(cached) => {
@@ -488,16 +662,28 @@ impl Downloader {
                 };
                 file.complete(sink, total, *cached);
             }
-            Err(_) => file.emit(
-                sink,
-                if cancel.is_cancelled() {
-                    "cancelled"
-                } else {
-                    "error"
-                },
-                0,
-                file.size,
-            ),
+            Err(error) => {
+                let mut progress = file.progress(
+                    if cancel.is_cancelled() {
+                        "cancelled"
+                    } else {
+                        "error"
+                    },
+                    self.local_bytes(file).await.unwrap_or(0),
+                    file.size,
+                );
+                progress.retryable = !cancel.is_cancelled();
+                progress.error = progress.retryable.then(|| {
+                    crate::diagnostics::redact(&format!("{error:#}"))
+                        .chars()
+                        .take(1200)
+                        .collect()
+                });
+                sink(Event {
+                    files: vec![progress],
+                    ..Event::new("file", "")
+                });
+            }
         }
         result.map(|_| ())
     }
@@ -542,15 +728,76 @@ impl Downloader {
             .await?;
         Ok(())
     }
-    async fn restore_cached(&self, file: &FileSpec, cancel: &CancellationToken) -> Result<bool> {
-        check_cancel(cancel)?;
-        let cache = self.cache_path(file)?;
-        if self.verify(&file.path, file, cancel).await? {
+    async fn verify_visible(
+        &self,
+        path: &Path,
+        file: &FileSpec,
+        cancel: &CancellationToken,
+        sink: &EventSink,
+    ) -> Result<bool> {
+        if !self.full_verification
+            && self
+                .verification
+                .matches_receipt(path, &file.hash, file.sha256, file.size)
+                .await
+        {
             return Ok(true);
         }
-        if self.verify(&cache, file, cancel).await? {
+        if let Ok(metadata) = tokio::fs::metadata(path).await {
+            file.emit(
+                sink,
+                "verifying",
+                if file.size > 0 {
+                    metadata.len().min(file.size)
+                } else {
+                    metadata.len()
+                },
+                file.size.max(metadata.len()),
+            );
+        }
+        self.verify(path, file, cancel).await
+    }
+    async fn restore_cached(
+        &self,
+        file: &FileSpec,
+        cancel: &CancellationToken,
+        sink: &EventSink,
+    ) -> Result<bool> {
+        check_cancel(cancel)?;
+        let cache = self.cache_path(file)?;
+        if self.verify_visible(&file.path, file, cancel, sink).await? {
+            return Ok(true);
+        }
+        if self.verify_visible(&cache, file, cancel, sink).await? {
+            file.emit(sink, "reusing", file.size, file.size);
             self.copy_cached(file, &cache, cancel).await?;
             return Ok(true);
+        }
+        for source in self
+            .verification
+            .candidates(&file.hash, file.sha256, file.size)
+            .await
+        {
+            if source == file.path
+                || source == cache
+                || source.extension().is_some_and(|e| e == "part")
+            {
+                continue;
+            }
+            check_cancel(cancel)?;
+            match self.verify_visible(&source, file, cancel, sink).await {
+                Ok(true) => {
+                    file.emit(sink, "reusing", file.size, file.size);
+                    match self.copy_cached(file, &source, cancel).await {
+                        Ok(()) => return Ok(true),
+                        Err(_) if !cancel.is_cancelled() => self.verification.forget(&source),
+                        Err(error) => return Err(error),
+                    }
+                }
+                Ok(false) | Err(_) if !cancel.is_cancelled() => self.verification.forget(&source),
+                Err(error) => return Err(error),
+                Ok(false) => check_cancel(cancel)?,
+            }
         }
         Ok(false)
     }
@@ -574,7 +821,7 @@ impl Downloader {
             .clone();
         let _guard =
             tokio::select! { _=cancel.cancelled()=>bail!("操作已取消"), guard=lock.lock()=>guard };
-        if self.restore_cached(file, cancel).await? {
+        if self.restore_cached(file, cancel, sink).await? {
             return Ok(true);
         }
         let bytes = self.partial_bytes(file).await?;
@@ -582,11 +829,13 @@ impl Downloader {
         // Partial network objects survive cancellation and process restarts.
         // They are never considered complete until the expected hash matches.
         let part = cache.with_extension("part");
-        let cached = self.verify(&part, file, cancel).await?;
+        let cached = self.verify_visible(&part, file, cancel, sink).await?;
         if !cached {
             tokio::fs::create_dir_all(cache.parent().unwrap()).await?;
             let mut errors = vec![];
             let mut done = false;
+            let mut connection = self.clone();
+            let mut stalls = 0;
             'sources: for url in self.ordered_urls(&file.url, cancel).await? {
                 for attempt in 0..=self.settings.retries {
                     let download = async {
@@ -595,7 +844,8 @@ impl Downloader {
                             tokio::fs::remove_file(&part).await?;
                             offset = 0;
                         }
-                        let mut response = self.file_response(&url, offset).await?;
+                        let mut response =
+                            connection.watched_response(&url, offset, stalls).await?;
                         // A stale partial or a server without range support can
                         // safely restart, never append a whole response to it.
                         if response.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE
@@ -610,7 +860,7 @@ impl Downloader {
                             ));
                             tokio::fs::remove_file(&part).await?;
                             offset = 0;
-                            response = self.file_response(&url, offset).await?;
+                            response = connection.watched_response(&url, offset, stalls).await?;
                         }
                         let response = response.error_for_status()?;
                         let length = if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
@@ -646,7 +896,22 @@ impl Downloader {
                             .await?;
                         let mut bytes = offset;
                         let mut last = std::time::Instant::now();
-                        while let Some(chunk) = stream.next().await {
+                        let mut cadence = Duration::ZERO;
+                        loop {
+                            let wait = self.stall_policy.wait(cadence, stalls, false);
+                            let started = tokio::time::Instant::now();
+                            let next = tokio::time::timeout(wait, stream.next())
+                                .await
+                                .map_err(|_| crate::download_stall::Stalled(wait))?;
+                            let Some(chunk) = next else { break };
+                            // Only network waiting counts; exclude local writes,
+                            // hashing and event delivery from the cadence estimate.
+                            let elapsed = started.elapsed();
+                            cadence = if cadence.is_zero() {
+                                elapsed
+                            } else {
+                                (cadence * 3 + elapsed) / 4
+                            };
                             let chunk = chunk?;
                             if self.settings.adaptive_concurrency {
                                 self.metrics
@@ -686,13 +951,15 @@ impl Downloader {
                             break 'sources;
                         }
                         Err(e) => {
+                            let stalled =
+                                e.downcast_ref::<crate::download_stall::Stalled>().is_some();
                             let certificate = crate::network::is_certificate_error(&e);
                             let e = crate::network::explain_error(e);
                             // Invalid responses/hash failures may have discarded
                             // the partial. Reflect the actual retained bytes.
                             let bytes = self.partial_bytes(file).await?;
                             file.emit(sink, "queued", bytes, file.size.max(bytes));
-                            if self.settings.adaptive_concurrency {
+                            if self.settings.adaptive_concurrency && !stalled {
                                 self.metrics.retries.fetch_add(1, Ordering::Relaxed);
                             }
                             errors.push(format!("{e:#}"));
@@ -700,6 +967,27 @@ impl Downloader {
                             // allow a separately verified mirror to succeed.
                             if certificate || attempt == self.settings.retries {
                                 break;
+                            }
+                            if stalled {
+                                stalls += 1;
+                                let message = format!(
+                                    "{e}；保留 {bytes} 字节并重新连接：{}",
+                                    file.path.file_name().unwrap_or_default().to_string_lossy()
+                                );
+                                sink(Event::new("warning", &message));
+                                let root = self.network_root.clone();
+                                let worker = connection.clone();
+                                // Client/TLS setup and log I/O must not block all
+                                // other download futures on the runtime thread.
+                                connection = tokio::task::spawn_blocking(move || {
+                                    let _ = crate::diagnostics::record_download_recovery(
+                                        &root, &message,
+                                    );
+                                    let mut worker = worker;
+                                    worker.reconnect()?;
+                                    Ok::<_, anyhow::Error>(worker)
+                                })
+                                .await??;
                             }
                             sink(Event::new(
                                 "retry",
@@ -727,6 +1015,7 @@ impl Downloader {
         self.verification
             .remember(&cache, &file.hash, file.sha256)
             .await?;
+        file.emit(sink, "installing", file.size, file.size);
         self.copy_cached(file, &cache, cancel).await?;
         Ok(cached)
     }
@@ -736,6 +1025,10 @@ impl Downloader {
         cancel: &CancellationToken,
         sink: &EventSink,
     ) -> Result<()> {
+        check_cancel(cancel)?;
+        if let Some(task) = &self.task {
+            task.track(&self.cache, &files).await?;
+        }
         let result = self.batch_inner(files, cancel, sink).await;
         self.flush_verification(sink).await;
         result
@@ -752,7 +1045,17 @@ impl Downloader {
         }
         let inventory = futures_util::stream::iter(unique.into_values().map(|file| async move {
             let bytes = self.local_bytes(&file).await?;
-            let progress = file.progress("queued", bytes, file.size.max(bytes));
+            let reused = !self.full_verification
+                && self
+                    .verification
+                    .matches_receipt(&file.path, &file.hash, file.sha256, file.size)
+                    .await;
+            let mut progress = file.progress(
+                if reused { "done" } else { "queued" },
+                bytes,
+                file.size.max(bytes),
+            );
+            progress.cached = reused;
             Ok::<_, anyhow::Error>((file, progress))
         }))
         .buffered(8)
@@ -797,11 +1100,13 @@ impl Downloader {
         // for a second pass over the entire local installation.
         sink(Event::new("stage", "复用缓存并下载缺失文件"));
         let mut completed = 0;
+        let mut failures = Vec::new();
+        let mut errors = Vec::new();
         let mut queue = files.into_iter().zip(planned).peekable();
         let mut active = FuturesUnordered::new();
         let mut concurrency = crate::download_concurrency::Concurrency::new(
             if self.settings.adaptive_concurrency {
-                32
+                crate::download_concurrency::MAX_CONCURRENCY
             } else {
                 self.settings.concurrency
             },
@@ -810,7 +1115,8 @@ impl Downloader {
             self.metrics.retries.load(Ordering::Relaxed),
         );
         let period = Duration::from_secs(1);
-        let mut sample = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        let mut sampled_at = tokio::time::Instant::now();
+        let mut sample = tokio::time::interval_at(sampled_at + period, period);
         sample.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             check_cancel(cancel)?;
@@ -838,8 +1144,7 @@ impl Downloader {
                                 .await;
                         }
                     }
-                    result?;
-                    Ok::<_, anyhow::Error>(file.path)
+                    Ok::<_, anyhow::Error>((file, result))
                 });
             }
             if active.is_empty() {
@@ -849,13 +1154,32 @@ impl Downloader {
                 biased;
                 _ = cancel.cancelled() => bail!("操作已取消"),
                 result = active.next() => {
-                    let _path = result.expect("active downloads exist")?;
-                    completed += 1;
+                    let (file, result) = result.expect("active downloads exist")?;
+                    match result {
+                        Ok(()) => completed += 1,
+                        Err(error) => {
+                            errors.push(crate::diagnostics::redact(&format!("{error:#}")));
+                            failures.push(RetryFile {downloader:self.clone(),file});
+                        }
+                    }
                 }
                 _ = sample.tick(), if self.settings.adaptive_concurrency && queue.peek().is_some() => {
-                    concurrency.observe(self.metrics.bytes.load(Ordering::Relaxed), self.metrics.retries.load(Ordering::Relaxed), completed);
+                    let now = tokio::time::Instant::now();
+                    concurrency.observe(self.metrics.bytes.load(Ordering::Relaxed), self.metrics.retries.load(Ordering::Relaxed), completed, now - sampled_at, active.len());
+                    sampled_at = now;
                 }
             }
+        }
+        if !failures.is_empty() {
+            return Err(DownloadFailures {
+                message: format!(
+                    "{} 个文件下载失败，其余文件已保留。{}",
+                    failures.len(),
+                    errors.first().map(String::as_str).unwrap_or("")
+                ),
+                files: failures,
+            }
+            .into());
         }
         Ok(())
     }
@@ -933,8 +1257,292 @@ pub fn check_cancel(cancel: &CancellationToken) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+
+    #[tokio::test]
+    async fn stalled_download_reconnects_and_resumes_only_the_missing_bytes() {
+        use tokio::net::TcpListener;
+        for headers in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let captured = requests.clone();
+            let (release, wait) = tokio::sync::oneshot::channel::<()>();
+            let server = tokio::spawn(async move {
+                let mut held = Vec::new();
+                for attempt in 0..2 {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut request = [0; 4096];
+                    let size = stream.read(&mut request).await.unwrap();
+                    captured
+                        .lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&request[..size]).to_lowercase());
+                    if attempt == 0 {
+                        if !headers {
+                            stream
+                                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nabcdef")
+                                .await
+                                .unwrap();
+                        }
+                        held.push(stream); // Keep TCP open indefinitely, like a stalled CDN stream.
+                    } else if headers {
+                        stream
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\nabcdefghi")
+                            .await
+                            .unwrap();
+                    } else {
+                        stream.write_all(b"HTTP/1.1 206 Partial Content\r\nContent-Length: 3\r\nContent-Range: bytes 6-8/9\r\n\r\nghi").await.unwrap();
+                    }
+                }
+                let _ = wait.await;
+            });
+            let mut d = Downloader::new(
+                temp.path(),
+                Settings {
+                    proxy_mode: "none".into(),
+                    retries: 1,
+                    ..Settings::default()
+                },
+            )
+            .unwrap();
+            d.stall_policy = crate::download_stall::StallPolicy {
+                idle: Duration::from_millis(150),
+                headers: Duration::from_millis(200),
+                ceiling: Duration::from_secs(1),
+            };
+            let file = FileSpec {
+                url,
+                path: temp.path().join("game/example.jar"),
+                hash: hex::encode(Sha1::digest(b"abcdefghi")),
+                sha256: false,
+                size: 9,
+            };
+            let events = Arc::new(std::sync::Mutex::new(Vec::<Event>::new()));
+            let captured = events.clone();
+            let sink: EventSink = Arc::new(move |e| captured.lock().unwrap().push(e));
+            tokio::time::timeout(
+                Duration::from_secs(4),
+                d.file(&file, &CancellationToken::new(), &sink),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            release.send(()).unwrap();
+            server.await.unwrap();
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[1].contains("range: bytes=6-"), !headers);
+            assert_eq!(fs::read(&file.path).unwrap(), b"abcdefghi");
+            assert_eq!(
+                d.metrics.retries.load(Ordering::Relaxed),
+                0,
+                "one stalled connection must not halve healthy global concurrency"
+            );
+            assert!(
+                fs::read_to_string(temp.path().join("logs/launcher.log"))
+                    .unwrap()
+                    .contains("download_recovery")
+            );
+            if !headers {
+                let events = events.lock().unwrap();
+                let retained = events
+                    .iter()
+                    .flat_map(|e| &e.files)
+                    .skip_while(|f| f.downloaded < 6);
+                assert!(
+                    retained.into_iter().all(|f| f.downloaded >= 6),
+                    "reconnect must preserve progress"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn slow_but_progressing_download_is_not_restarted() {
+        let temp = tempfile::tempdir().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let mut chunk = [0; 1024];
+                let count = stream.read(&mut chunk).await.unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&chunk[..count]);
+                assert!(request.len() <= 16 * 1024);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 9\r\n\r\n")
+                .await
+                .unwrap();
+            for byte in b"abcdefghi" {
+                tokio::time::sleep(Duration::from_millis(70)).await;
+                stream.write_all(&[*byte]).await.unwrap();
+            }
+        });
+        let mut d = Downloader::new(
+            temp.path(),
+            Settings {
+                proxy_mode: "none".into(),
+                retries: 0,
+                ..Settings::default()
+            },
+        )
+        .unwrap();
+        d.stall_policy = crate::download_stall::StallPolicy {
+            idle: Duration::from_millis(200),
+            headers: Duration::from_secs(1),
+            ceiling: Duration::from_secs(1),
+        };
+        let file = FileSpec {
+            url,
+            path: temp.path().join("game/slow.jar"),
+            hash: hex::encode(Sha1::digest(b"abcdefghi")),
+            sha256: false,
+            size: 9,
+        };
+        let sink: EventSink = Arc::new(|e| assert_ne!(e.kind, "retry"));
+        d.file(&file, &CancellationToken::new(), &sink)
+            .await
+            .unwrap();
+        server.await.unwrap();
+        assert_eq!(fs::read(&file.path).unwrap(), b"abcdefghi");
+    }
+
+    #[tokio::test]
+    async fn consumed_installer_removes_both_copies_and_receipts_only() {
+        let root = tempfile::tempdir().unwrap();
+        let (url, server) = crate::test_http::serve(vec![
+            (200, "installer-fixture".into()),
+            (200, "library-fixture".into()),
+        ])
+        .await;
+        let downloader = Downloader::new(
+            root.path(),
+            Settings {
+                proxy_mode: "none".into(),
+                download_source: "official".into(),
+                retries: 0,
+                ..Settings::default()
+            },
+        )
+        .unwrap();
+        let spec = |body: &str, path: &str| FileSpec {
+            url: format!("{url}/{path}"),
+            path: root.path().join(path),
+            hash: hex::encode(ring::digest::digest(&ring::digest::SHA256, body.as_bytes())),
+            sha256: true,
+            size: body.len() as u64,
+        };
+        let installer = spec("installer-fixture", "cache/java/fixture.zip");
+        let library = spec("library-fixture", "libraries/keep.jar");
+        let cancel = CancellationToken::new();
+        let sink: EventSink = Arc::new(|_| {});
+        for file in [&installer, &library] {
+            downloader.file(file, &cancel, &sink).await.unwrap();
+        }
+        server.await.unwrap();
+        let cache = downloader.cache_path(&installer).unwrap();
+        assert!(cache.is_file());
+        let partial = cache.with_extension("part");
+        std::fs::write(&partial, b"resume").unwrap();
+        downloader.discard_installer(&installer).await.unwrap();
+        assert!(!installer.path.exists());
+        assert!(!cache.exists());
+        assert!(partial.is_file());
+        assert!(library.path.is_file());
+        assert!(downloader.cache_path(&library).unwrap().is_file());
+        let index: serde_json::Value =
+            crate::storage::read_json(&root.path().join("cache/verified-files.json")).unwrap();
+        for path in [&installer.path, &cache] {
+            assert!(index["entries"].get(path.to_str().unwrap()).is_none());
+        }
+        assert!(
+            index["entries"]
+                .get(library.path.to_str().unwrap())
+                .is_some()
+        );
+        downloader.discard_installer(&installer).await.unwrap();
+    }
     use sha1::{Digest, Sha1};
     use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn failed_file_does_not_abort_neighbors_and_retry_only_fetches_that_file() {
+        use sha1::{Digest, Sha1};
+        let root = tempfile::tempdir().unwrap();
+        let (url, server) = crate::test_http::serve(vec![
+            (500, "failed".into()),
+            (200, "good".into()),
+            (200, "fixed".into()),
+        ])
+        .await;
+        let d = Downloader::new(
+            root.path(),
+            Settings {
+                proxy_mode: "none".into(),
+                concurrency: 1,
+                adaptive_concurrency: false,
+                retries: 0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let failed = FileSpec {
+            url: format!("{url}/failed"),
+            path: root.path().join("a.jar"),
+            hash: hex::encode(Sha1::digest(b"fixed")),
+            sha256: false,
+            size: 5,
+        };
+        let good = FileSpec {
+            url: format!("{url}/good"),
+            path: root.path().join("b.jar"),
+            hash: hex::encode(Sha1::digest(b"good")),
+            sha256: false,
+            size: 4,
+        };
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let output = events.clone();
+        let sink: EventSink = Arc::new(move |e| output.lock().unwrap().push(e));
+        let error = d
+            .batch(
+                vec![failed.clone(), good.clone()],
+                &CancellationToken::new(),
+                &sink,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(std::fs::read(&good.path).unwrap(), b"good");
+        let failure = error.downcast_ref::<DownloadFailures>().unwrap();
+        assert_eq!(failure.files.len(), 1);
+        assert_eq!(failure.files[0].id(), failed.path.to_string_lossy());
+        failure.files[0]
+            .run(&CancellationToken::new(), &sink)
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&failed.path).unwrap(), b"fixed");
+        let requests = server.await.unwrap();
+        assert!(requests[0].starts_with("GET /failed "));
+        assert!(requests[1].starts_with("GET /good "));
+        assert!(requests[2].starts_with("GET /failed "));
+        let events = events.lock().unwrap();
+        assert!(
+            events
+                .iter()
+                .flat_map(|e| &e.files)
+                .any(|f| f.status == "error" && f.retryable && f.error.is_some())
+        );
+        assert!(
+            events
+                .iter()
+                .flat_map(|e| &e.files)
+                .any(|f| f.status == "installing")
+        );
+    }
 
     #[tokio::test]
     async fn curseforge_download_auth_is_not_sent_to_unrelated_hosts_and_keeps_ranges() {
@@ -1316,7 +1924,7 @@ mod tests {
 
     #[tokio::test]
     async fn batch_honors_manual_concurrency_and_adaptive_ignores_the_disabled_slider() {
-        for adaptive in [false, true] {
+        for (adaptive, configured) in [(false, 1), (false, 64), (true, 1)] {
             let temp = tempfile::tempdir().unwrap();
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = format!("http://{}", listener.local_addr().unwrap());
@@ -1324,13 +1932,13 @@ mod tests {
                 temp.path(),
                 Settings {
                     proxy_mode: "none".into(),
-                    concurrency: 1,
+                    concurrency: configured,
                     adaptive_concurrency: adaptive,
                     ..Settings::default()
                 },
             )
             .unwrap();
-            let files = (0..6)
+            let files = (0..if adaptive { 6 } else { configured + 2 })
                 .map(|i| FileSpec {
                     url: format!("{address}/{i}"),
                     path: temp.path().join(format!("{i}.jar")),
@@ -1347,7 +1955,7 @@ mod tests {
             });
             let inspect = async {
                 let mut connections = Vec::new();
-                for _ in 0..if adaptive { 4 } else { 1 } {
+                for _ in 0..if adaptive { 4 } else { configured } {
                     connections.push(listener.accept().await.unwrap().0);
                 }
                 assert!(
@@ -1358,7 +1966,7 @@ mod tests {
                 cancel.cancel();
                 connections
             };
-            let (result, _connections) = tokio::time::timeout(Duration::from_secs(2), async {
+            let (result, _connections) = tokio::time::timeout(Duration::from_secs(5), async {
                 tokio::join!(d.batch(files, &cancel, &sink), inspect)
             })
             .await
@@ -1739,7 +2347,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             (initial.bytes, initial.total_bytes, initial.completed),
-            (9, 9, 0)
+            (9, 9, 2)
         );
         let files: Vec<_> = events.iter().flat_map(|event| &event.files).collect();
         assert!(files.iter().all(|file| file.downloaded == file.total));
@@ -1748,7 +2356,9 @@ mod tests {
             files
                 .iter()
                 .filter(|file| file.status == "done" && file.cached)
-                .count(),
+                .map(|file| &file.id)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
             2
         );
     }

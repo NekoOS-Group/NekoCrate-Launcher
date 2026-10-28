@@ -1,0 +1,10 @@
+{
+  "asset": "heart-particle.png",
+  "version": "Minecraft Java Edition 1.21.4",
+  "source": "https://piston-data.mojang.com/v1/objects/a7e5a6024bfd3cd614625aa05629adf760020304/client.jar",
+  "client_sha1": "a7e5a6024bfd3cd614625aa05629adf760020304",
+  "archive_entry": "assets/minecraft/textures/particle/heart.png",
+  "asset_sha256": "351e76662421bfd9285429847568b93046cd26100acc3f53550c663234bbde7b",
+  "copyright": "Mojang Studios / Microsoft. Unmodified Minecraft game texture; not covered by this repository code license.",
+  "usage": "Nearest-neighbor billboard particles emitted on head pats."
+}

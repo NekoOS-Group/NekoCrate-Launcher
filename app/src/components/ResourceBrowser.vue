@@ -49,6 +49,8 @@ const props = defineProps<{
   busy: boolean;
   task?: Task;
   controlPending?: boolean;
+  retrying?: string;
+  retryEnabled?: boolean;
   rpc: <T>(op: string, data?: Record<string, unknown>) => Promise<T>;
   prepare: (
     op: string,
@@ -63,6 +65,8 @@ const emit = defineEmits<{
   pause: [];
   resume: [];
   cancel: [];
+  retry: [file: string];
+  continue: [];
   installed: [];
 }>();
 const categories = [
@@ -281,6 +285,22 @@ async function install() {
     installing.value = false;
   }
 }
+watch(
+  () => props.task?.status,
+  (status) => {
+    if (
+      status !== "done" ||
+      installing.value ||
+      complete.value ||
+      !plan.value ||
+      props.task?.resource_task !== plan.value.id
+    )
+      return;
+    complete.value = true;
+    pending.value = pending.value.filter((p) => p.id !== plan.value!.id);
+    emit("installed");
+  },
+);
 watch([kind, platform, local], () => {
   searchRequest++;
   versionRequest++;
@@ -353,6 +373,10 @@ onBeforeUnmount(() => {
           :name="t('添加资源')"
           :version="versionTitle"
           :control-pending="controlPending"
+          :retrying="retrying"
+          :retry-enabled="retryEnabled"
+          @retry="emit('retry', $event)"
+          @continue="emit('continue')"
           @close="emit('close')"
           @pause="emit('pause')"
           @resume="emit('resume')"
@@ -367,7 +391,12 @@ onBeforeUnmount(() => {
           <span v-if="complete" class="resource-success"
             ><Check :size="16" />{{ t("资源安装完成") }}</span
           >
-          <button v-else class="text-button" :disabled="busy" @click="install">
+          <button
+            v-else-if="!task.operation"
+            class="text-button"
+            :disabled="busy"
+            @click="install"
+          >
             <Download :size="15" />{{ t("继续安装") }}
           </button>
           <button

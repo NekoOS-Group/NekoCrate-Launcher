@@ -17,6 +17,8 @@ pub(crate) struct Declaration {
     pub file: Option<u64>,
     pub size: u64,
     pub sha1: String,
+    pub sha512: String,
+    pub urls: Vec<String>,
     pub optional: bool,
     pub selected: bool,
     pub manual: bool,
@@ -107,6 +109,13 @@ pub(crate) fn from_manifest(value: &Value) -> Vec<Declaration> {
                 file: id,
                 size: file["fileSize"].as_u64().unwrap_or(0),
                 sha1: file["hashes"]["sha1"].as_str().unwrap_or_default().into(),
+                sha512: file["hashes"]["sha512"].as_str().unwrap_or_default().into(),
+                urls: file["downloads"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|url| url.as_str().map(str::to_owned))
+                    .collect(),
                 optional: file["required"] == false || file["env"]["client"] == "optional",
                 selected: true,
                 manual: false,
@@ -137,6 +146,8 @@ pub(crate) fn from_pack(pack: &modpack::Pack) -> Vec<Declaration> {
             .unwrap_or_else(|| declaration.name.clone());
         declaration.size = file.size;
         declaration.sha1 = file.sha1.clone();
+        declaration.sha512 = file.sha512.clone();
+        declaration.urls = file.urls.clone();
         declaration.manual =
             file.path.is_some() && file.urls.is_empty() && pack.format == "curseforge";
     }

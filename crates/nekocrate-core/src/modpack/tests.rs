@@ -344,7 +344,9 @@ async fn identical_pack_names_in_different_game_directories_have_independent_job
     assert_ne!(a.archive, b.archive);
     assert!(a.pack.files.is_empty());
     assert_eq!(b.pack.files.len(), 1);
-    launcher.delete_version(&first.id, "Same name").unwrap();
+    launcher
+        .delete_version_with_recycle(&first.id, "Same name", crate::recycle::discard_test_fixture)
+        .unwrap();
     launcher
         .prepare_modpack(&first.id, &path, "Same name", &[])
         .await
@@ -847,6 +849,10 @@ async fn offline_install_resumes_after_overrides_and_keeps_user_configuration_on
         b"overridden"
     );
     fs::write(directory.join("config/options.txt"), b"my settings").unwrap();
+    assert!(
+        directory.join(".nekocrate/source.zip").is_file(),
+        "interrupted install keeps its archive"
+    );
     let sink: EventSink = Arc::new(|_| {});
     launcher
         .install(&instance.id, &CancellationToken::new(), &sink)
@@ -861,6 +867,19 @@ async fn offline_install_resumes_after_overrides_and_keeps_user_configuration_on
             .installed
     );
     let resolved = version::resolve(&root, &game, &id).unwrap();
+    assert!(
+        !directory.join(".nekocrate/source.zip").exists(),
+        "successful installation releases its archive"
+    );
+    assert!(source.is_file(), "the user's import is never deleted");
+    assert!(
+        launcher
+            .modpack_status(&instance.id, &id)
+            .await
+            .unwrap()
+            .missing
+            .is_empty()
+    );
     assert_eq!(
         version::working_directory(&game, &resolved.version).unwrap(),
         directory
@@ -877,4 +896,23 @@ async fn offline_install_resumes_after_overrides_and_keeps_user_configuration_on
         fs::read(directory.join("config/options.txt")).unwrap(),
         b"my settings"
     );
+}
+
+#[test]
+fn repair_targets_disabled_mods_without_reenabling_them() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(temp.path().join("mods")).unwrap();
+    let disabled = temp.path().join("mods/example.jar.disabled");
+    std::fs::write(&disabled, b"disabled mod").unwrap();
+    assert_eq!(
+        archive::installed_destination(temp.path(), "mods/example.jar").unwrap(),
+        disabled
+    );
+    let active = temp.path().join("mods/example.jar");
+    std::fs::write(&active, b"active mod").unwrap();
+    assert_eq!(
+        archive::installed_destination(temp.path(), "mods/example.jar").unwrap(),
+        active
+    );
+    assert!(archive::installed_destination(temp.path(), "../outside.jar").is_err());
 }

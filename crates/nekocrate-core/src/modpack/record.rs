@@ -202,7 +202,7 @@ impl Launcher {
             let (Some(path), Some(url)) = (&file.path, file.urls.first()) else {
                 continue;
             };
-            let destination = archive::destination(directory, path)?;
+            let destination = archive::installed_destination(directory, path)?;
             if destination.is_file() {
                 continue;
             }

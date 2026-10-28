@@ -2450,6 +2450,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
+name = "mime_guess"
+version = "2.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7c44f8e672c00fe5308fa235f821cb4198414e1c77935c1ab6948d3fd78550e"
+dependencies = [
+ "mime",
+ "unicase",
+]
+
+[[package]]
 name = "minisign-verify"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2539,7 +2549,7 @@ dependencies = [
 
 [[package]]
 name = "nekocrate-cli"
-version = "0.8.0-dev.1"
+version = "0.9.0-dev.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2551,7 +2561,7 @@ dependencies = [
 
 [[package]]
 name = "nekocrate-core"
-version = "0.8.0-dev.1"
+version = "0.9.0-dev.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2566,6 +2576,7 @@ dependencies = [
  "reqwest",
  "ring",
  "rustls",
+ "security-framework 3.7.0",
  "semver",
  "serde",
  "serde_json",
@@ -2578,6 +2589,7 @@ dependencies = [
  "tokio-rustls",
  "tokio-util",
  "toml 1.1.8+spec-1.1.0",
+ "trash",
  "uuid",
  "walkdir",
  "windows-sys 0.61.2",
@@ -2586,7 +2598,7 @@ dependencies = [
 
 [[package]]
 name = "nekocrate-desktop"
-version = "0.8.0-dev.1"
+version = "0.9.0-dev.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2609,7 +2621,10 @@ dependencies = [
 
 [[package]]
 name = "nekocrate-dev"
-version = "0.8.0-dev.1"
+version = "0.9.0-dev.1"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "new_debug_unreachable"
@@ -3543,6 +3558,7 @@ dependencies = [
  "hyper-util",
  "js-sys",
  "log",
+ "mime_guess",
  "percent-encoding",
  "pin-project-lite",
  "rustls",
@@ -5084,6 +5100,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "trash"
+version = "5.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be89b3fe156965d29ac4f8522f3a640c655affdd9f21cb4f36857f0c92c00317"
+dependencies = [
+ "chrono",
+ "libc",
+ "log",
+ "objc2",
+ "objc2-foundation",
+ "once_cell",
+ "percent-encoding",
+ "scopeguard",
+ "urlencoding",
+ "windows",
+]
+
+[[package]]
 name = "tray-icon"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5146,6 +5180,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "unicase"
+version = "2.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "357cc3acc6a036009fd6c973ed009037c732d60d0b4f6c673e9041497482a28f"
+
+[[package]]
 name = "unicode-ident"
 version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5175,6 +5215,12 @@ dependencies = [
  "serde",
  "serde_derive",
 ]
+
+[[package]]
+name = "urlencoding"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 
 [[package]]
 name = "urlpattern"

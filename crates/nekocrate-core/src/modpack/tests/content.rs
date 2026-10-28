@@ -254,3 +254,119 @@ async fn modrinth_pending_files_are_categorized_without_network_or_local_archive
         "skipped"
     );
 }
+
+fn seed_mod_cache(launcher: &Launcher) {
+    let hash = hex::encode(Sha1::digest(b"mod"));
+    let cached = launcher
+        .root()
+        .join("cache/objects/sha1")
+        .join(&hash[..2])
+        .join(hash);
+    fs::create_dir_all(cached.parent().unwrap()).unwrap();
+    fs::write(cached, b"mod").unwrap();
+}
+
+#[tokio::test]
+async fn individual_mod_download_only_installs_selected_file_and_preserves_pack_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let launcher = Launcher::open(Some(temp.path().join("launcher"))).unwrap();
+    let instance = launcher.create_instance("Games", "").unwrap();
+    let game = instance.game_dir(launcher.root());
+    let source = temp.path().join("pack.mrpack");
+    archive(
+        &source,
+        "modrinth.index.json",
+        &mr(vec![
+            pack_file("mods/one.jar", "optional"),
+            pack_file("mods/two.jar", "required"),
+        ]),
+        &[],
+    );
+    launcher
+        .prepare_modpack(&instance.id, &source, "Pack", &[])
+        .await
+        .unwrap();
+    seed_mod_cache(&launcher);
+    let sink: EventSink = Arc::new(|_| {});
+    let output = launcher
+        .download_declared_mod(
+            &instance.id,
+            "Pack",
+            "mods/one.jar",
+            &CancellationToken::new(),
+            &sink,
+        )
+        .await
+        .unwrap();
+    let target = game.join("versions/Pack");
+    assert_eq!(output, "one.jar");
+    assert_eq!(fs::read(target.join("mods/one.jar")).unwrap(), b"mod");
+    assert!(!target.join("mods/two.jar").exists());
+    assert!(!target.join("Pack.json").exists());
+    let job = launcher.pack_job(&instance.id, "Pack").unwrap();
+    assert!(!job.completed);
+    assert!(job.pack.files.iter().any(|f| f.key == "mods/one.jar"));
+    assert!(!launcher.instance(&instance.id).unwrap().versions[0].installed);
+    fs::rename(
+        target.join("mods/one.jar"),
+        target.join("mods/one.jar.disabled"),
+    )
+    .unwrap();
+    let output = launcher
+        .download_declared_mod(
+            &instance.id,
+            "Pack",
+            "mods/one.jar",
+            &CancellationToken::new(),
+            &sink,
+        )
+        .await
+        .unwrap();
+    assert_eq!(output, "one.jar.disabled");
+    assert!(!target.join("mods/one.jar").exists());
+}
+
+#[tokio::test]
+async fn individual_external_mod_checks_hashes_and_never_overwrites_conflicts() {
+    let temp = tempfile::tempdir().unwrap();
+    let launcher = Launcher::open(Some(temp.path().join("launcher"))).unwrap();
+    let instance = launcher.create_instance("Games", "1.20.1").unwrap();
+    let game = instance.game_dir(launcher.root());
+    let mut manifest = mr(vec![pack_file("mods/one.jar", "required")]);
+    manifest["files"][0]["hashes"]["sha512"] = json!("0".repeat(128));
+    storage::write_json(&game.join("modrinth.index.json"), &manifest).unwrap();
+    seed_mod_cache(&launcher);
+    let cancel = CancellationToken::new();
+    let sink: EventSink = Arc::new(|_| {});
+    let error = launcher
+        .download_declared_mod(&instance.id, "1.20.1", "mods/one.jar", &cancel, &sink)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("SHA-512"));
+    assert!(!game.join("mods/one.jar").exists());
+    manifest["files"][0] = pack_file("mods/one.jar", "required");
+    storage::write_json(&game.join("modrinth.index.json"), &manifest).unwrap();
+    fs::create_dir_all(game.join("mods")).unwrap();
+    fs::write(game.join("mods/one.jar"), b"user-file").unwrap();
+    assert!(
+        launcher
+            .download_declared_mod(&instance.id, "1.20.1", "mods/one.jar", &cancel, &sink)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("未覆盖")
+    );
+    assert_eq!(fs::read(game.join("mods/one.jar")).unwrap(), b"user-file");
+    fs::remove_file(game.join("mods/one.jar")).unwrap();
+    launcher
+        .download_declared_mod(&instance.id, "1.20.1", "mods/one.jar", &cancel, &sink)
+        .await
+        .unwrap();
+    assert_eq!(fs::read(game.join("mods/one.jar")).unwrap(), b"mod");
+    assert!(
+        launcher
+            .download_declared_mod(&instance.id, "1.20.1", "../../outside.jar", &cancel, &sink)
+            .await
+            .is_err()
+    );
+}

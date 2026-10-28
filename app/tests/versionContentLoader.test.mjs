@@ -245,3 +245,183 @@ test("clicking during prefetch shares the pending index instead of scanning twic
   pending.resolve({ directory: "/mods", files: [], pending: [] });
   await Promise.all([prepare, ready]);
 });
+
+test("enable and disable keep the current visible order even when the next-visit cache is sorted differently", async () => {
+  let files = [
+    file("a.jar", "Zulu"),
+    file("b.jar", "Alpha"),
+    file("c.jar", "Beta"),
+  ];
+  const load = createVersionContentLoader(async () => ({
+    directory: "/mods",
+    files,
+    pending: [],
+  }));
+  const first = await load("a", "v", "mods");
+  assert.deepEqual(
+    first.files.map((f) => f.file_name),
+    ["a.jar", "b.jar", "c.jar"],
+  );
+  files = [
+    file("b.jar", "Alpha"),
+    file("c.jar", "Beta"),
+    { ...file("a.jar.disabled", "Zulu"), enabled: false },
+  ];
+  const shown = [];
+  const disabled = await load("a", "v", "mods", {
+    fresh: true,
+    onProgress: (value) => shown.push(value),
+  });
+  for (const view of [...shown, disabled])
+    assert.deepEqual(
+      view.files.map((f) => f.file_name),
+      ["a.jar.disabled", "b.jar", "c.jar"],
+    );
+  files = [
+    file("b.jar", "Alpha"),
+    file("c.jar", "Beta"),
+    file("a.jar", "Zulu"),
+  ];
+  const enabled = await load("a", "v", "mods", { fresh: true });
+  assert.deepEqual(
+    enabled.files.map((f) => f.file_name),
+    ["a.jar", "b.jar", "c.jar"],
+  );
+});
+
+test("disabled and enabled copies keep distinct identities without stealing each other's position", async () => {
+  const { anchorModFiles, modRowKeys } =
+    await import("../src/contentIdentity.ts");
+  const original = [file("a.jar"), file("a.jar.disabled"), file("b.jar")];
+  const keys = modRowKeys(original);
+  assert.equal(new Set(keys.values()).size, 3);
+  assert.equal(
+    modRowKeys([file("a.jar")]).get("a.jar"),
+    modRowKeys([file("a.jar.disabled")]).get("a.jar.disabled"),
+  );
+  assert.deepEqual(
+    anchorModFiles(original, [file("b.jar"), file("a.jar.disabled")]).map(
+      (f) => f.file_name,
+    ),
+    ["a.jar.disabled", "b.jar"],
+  );
+});
+
+test("disabled rename keeps the displayed name and version until replacement metadata arrives", async () => {
+  const summary = deferred();
+  let changed = false;
+  const original = {
+    ...file("cat.jar", "猫咪 Mod"),
+    version: "1.2.3",
+    mod_ids: ["cat"],
+  };
+  const load = createVersionContentLoader(async (op) => {
+    if (op === "version_content_index")
+      return changed
+        ? {
+            directory: "/mods",
+            files: [{ ...file("cat.jar.disabled"), enabled: false }],
+            pending: ["cat.jar.disabled"],
+          }
+        : { directory: "/mods", files: [original], pending: [] };
+    return summary.promise;
+  });
+  await load("a", "v", "mods");
+  changed = true;
+  const shown = [];
+  const updating = load("a", "v", "mods", {
+    fresh: true,
+    onProgress: (result) => shown.push(result),
+  });
+  await flush();
+  assert.equal(shown[0].files[0].name, "猫咪 Mod");
+  assert.equal(shown[0].files[0].version, "1.2.3");
+  assert.equal(shown[0].files[0].file_name, "cat.jar.disabled");
+  assert.equal(shown[0].files[0].enabled, false);
+  summary.resolve([
+    {
+      ...original,
+      name: "猫咪 Mod（新名称）",
+      file_name: "cat.jar.disabled",
+      enabled: false,
+    },
+  ]);
+  const result = await updating;
+  assert.equal(result.files[0].name, "猫咪 Mod（新名称）");
+});
+
+test("refresh after a mutation does not reuse an index started before the mutation", async () => {
+  const oldIndex = deferred();
+  let calls = 0;
+  const load = createVersionContentLoader(async () =>
+    ++calls === 1
+      ? oldIndex.promise
+      : {
+          directory: "/mods",
+          files: [{ ...file("cat.jar.disabled", "Cat"), enabled: false }],
+          pending: [],
+        },
+  );
+  const preload = load.preload("a", "v");
+  const fresh = await load("a", "v", "mods", { fresh: true });
+  assert.equal(calls, 2);
+  assert.equal(fresh.files[0].file_name, "cat.jar.disabled");
+  oldIndex.resolve({
+    directory: "/mods",
+    files: [file("cat.jar")],
+    pending: [],
+  });
+  await preload;
+});
+
+test("one config snapshot serves all summary batches and updates after removal without per-Mod RPC", async () => {
+  let config_ids = ["actual_id", "actual_id.toml", "legacy", "legacy.toml"];
+  const files = [
+    {
+      ...file("different-name.jar"),
+      has_metadata: true,
+      mod_ids: ["actual_id"],
+    },
+    { ...file("legacy-2.jar.disabled"), has_metadata: false, enabled: false },
+    { ...file("none.jar"), has_metadata: false, mod_ids: ["none"] },
+    {
+      ...file("download.jar"),
+      declaration: { status: "pending" },
+      mod_ids: ["actual_id"],
+    },
+  ];
+  const calls = [];
+  let pending = [];
+  const load = createVersionContentLoader(async (op) => {
+    calls.push(op);
+    if (op === "version_content_index")
+      return { directory: "/mods", files, pending, config_ids };
+    assert.equal(op, "version_content_summaries");
+    return [files[0]];
+  });
+  await load.preload("a", "v");
+  const shown = [];
+  const first = await load("a", "v", "mods", {
+    onProgress: (value) => shown.push(value),
+  });
+  assert.deepEqual(
+    shown[0].files.map((f) => f.has_config),
+    [true, true, false, false],
+  );
+  assert.deepEqual(
+    first.files.map((f) => f.has_config),
+    [true, true, false, false],
+  );
+  pending = ["different-name.jar"];
+  const enriched = await load("a", "v", "mods", { fresh: true });
+  assert.equal(enriched.files[0].has_config, true);
+  config_ids = [];
+  pending = [];
+  const removed = await load("a", "v", "mods", { fresh: true });
+  assert.ok(removed.files.every((f) => !f.has_config));
+  assert.ok(
+    calls.every((op) =>
+      ["version_content_index", "version_content_summaries"].includes(op),
+    ),
+  );
+});

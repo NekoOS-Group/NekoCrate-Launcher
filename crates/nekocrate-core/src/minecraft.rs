@@ -448,10 +448,14 @@ pub struct LaunchSession {
 }
 impl LaunchSession {
     pub fn guest() -> Self {
+        Self::guest_named("Player")
+    }
+    pub fn guest_named(name: &str) -> Self {
         Self {
-            username: "Player".into(),
+            username: name.into(),
             // Java UUID.nameUUIDFromBytes("OfflinePlayer:Player".getBytes(UTF_8)).
-            // Stable across launches and instances; no account or token is invented.
+            // Keep this original local identity when renaming too, so existing
+            // player data still belongs to the same guest. No account/token is invented.
             uuid: "a01e3843e5213998958af459800e4d11".into(),
             access_token: "0".into(),
             auth_session: "-".into(),
@@ -1170,6 +1174,7 @@ mod tests {
                 access_token: "fixture-token".into(),
                 refresh_token: "fixture-refresh".into(),
                 xuid: "0".into(),
+                valid_until: std::time::Instant::now(),
             }
             .into();
             let mut launch_args = vec![];

@@ -14,6 +14,7 @@ use std::{
 };
 use tokio_util::sync::CancellationToken;
 mod archive;
+mod content_download;
 
 mod provider;
 mod record;
@@ -66,6 +67,16 @@ struct Job {
     files_done: bool,
     #[serde(default)]
     completed: bool,
+    #[serde(default)]
+    overridden: Option<std::collections::HashSet<String>>,
+}
+impl Job {
+    fn override_paths(&self) -> Result<std::collections::HashSet<String>> {
+        self.overridden
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(|| archive::override_paths(&self.archive, &self.pack))
+    }
 }
 #[derive(Serialize)]
 pub struct PackStatus {
@@ -234,6 +245,7 @@ impl Launcher {
             overrides_done: false,
             files_done: false,
             completed: false,
+            overridden: Some(overrides),
         };
         std::fs::create_dir_all(dir.join("mods"))?;
         std::fs::create_dir_all(dir.join("config"))?;
@@ -258,6 +270,37 @@ impl Launcher {
             Ok(instance.clone())
         });
         preparation.committed = result.is_ok();
+        if preparation.committed && path.starts_with(self.root().join("cache/modpacks")) {
+            // The managed online archive has now been copied into this version.
+            // Associate both copies with the installation; never delete user imports.
+            let hash = path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            if hash.len() == 40 && hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+                let task = crate::download_tasks::DownloadTask::new(
+                    self.root(),
+                    id,
+                    &game,
+                    &job.version,
+                    "game",
+                )?;
+                task.track(
+                    &self.root().join("cache/objects"),
+                    &[FileSpec {
+                        url: String::new(),
+                        path: path.to_owned(),
+                        hash,
+                        sha256: false,
+                        size: size.len(),
+                    }],
+                )
+                .await?;
+                task.track_extra(vec![path.to_owned(), job.archive.clone()])
+                    .await?;
+            }
+        }
         result
     }
     fn pack_job(&self, id: &str, version: &str) -> Result<Job> {
@@ -291,7 +334,7 @@ impl Launcher {
         let job = self.pack_job(id, version)?;
         let game = self.available_game_dir(id)?.join("versions").join(version);
         let overridden = if job.overrides_done {
-            archive::override_paths(&job.archive, &job.pack)?
+            job.override_paths()?
         } else {
             std::collections::HashSet::new()
         };
@@ -300,7 +343,7 @@ impl Launcher {
             if file.urls.is_empty() {
                 let valid = match &file.path {
                     Some(path) => {
-                        let destination = archive::destination(&game, path)?;
+                        let destination = archive::installed_destination(&game, path)?;
                         if overridden.contains(&path.to_lowercase()) && destination.is_file() {
                             true
                         } else {
@@ -345,7 +388,8 @@ impl Launcher {
                 .filter(|f| f.urls.is_empty() && f.path.is_some())
             {
                 if Downloader::verified(&path, &file.sha1, false, file.size).await? {
-                    let out = archive::destination(&target, file.path.as_deref().unwrap())?;
+                    let out =
+                        archive::installed_destination(&target, file.path.as_deref().unwrap())?;
                     tokio::fs::create_dir_all(out.parent().unwrap()).await?;
                     if path != out {
                         tokio::fs::copy(&path, &out).await?;
@@ -376,9 +420,20 @@ impl Launcher {
         let instance = self.instance(id)?;
         crate::download::check_cancel(cancel)?;
         let sink = Event::scoped(sink, id, None);
-        let overridden = archive::override_paths(&job.archive, &job.pack)?;
+        let overridden = job.override_paths()?;
+        job.overridden = Some(overridden.clone());
+        record::write_job(&game, selected, &job)?;
         let settings = self.settings();
-        let downloader = Downloader::new(self.root(), settings.clone())?;
+        let downloader = Downloader::new(self.root(), settings.clone())?.for_installation(
+            self.root(),
+            id,
+            &game,
+            selected,
+            "game",
+        )?;
+        downloader
+            .retain_until_installed(vec![job.archive.clone()])
+            .await?;
         let downloader = if repair {
             downloader.with_full_verification()
         } else {
@@ -426,7 +481,7 @@ impl Launcher {
             job.files_done = job.pack.files.iter().all(|file| {
                 file.path.as_ref().is_some_and(|path| {
                     overridden.contains(&path.to_lowercase())
-                        || archive::destination(&target, path).is_ok_and(|p| p.is_file())
+                        || archive::installed_destination(&target, path).is_ok_and(|p| p.is_file())
                 })
             });
         }
@@ -443,7 +498,7 @@ impl Launcher {
                 {
                     continue;
                 }
-                let path = archive::destination(
+                let path = archive::installed_destination(
                     &target,
                     file.path.as_deref().context("整合包文件尚未解析")?,
                 )?;
@@ -503,7 +558,7 @@ impl Launcher {
                 }
                 if !file.sha512.is_empty() {
                     verify_sha512(
-                        &archive::destination(&target, file.path.as_deref().unwrap())?,
+                        &archive::installed_destination(&target, file.path.as_deref().unwrap())?,
                         &file.sha512,
                         cancel,
                     )
@@ -554,6 +609,7 @@ impl Launcher {
         job.completed = true;
         record::write_job(&game, selected, &job)?;
         self.set_installed(id, selected, true)?;
+        downloader.finish_installation(&sink).await;
         sink(Event::new("complete", "整合包已安装"));
         Ok(())
     }

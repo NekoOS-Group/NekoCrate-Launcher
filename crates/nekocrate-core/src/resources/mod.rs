@@ -10,7 +10,7 @@ use std::{
 };
 
 mod imports;
-pub use imports::{DetectedResource, LocalImport};
+pub use imports::{DetectedResource, LocalImport, ResourceCopySource};
 mod install;
 mod modpacks;
 mod provider;
@@ -270,7 +270,38 @@ fn task_dir(target: &ResourceTarget, id: &str) -> Result<PathBuf> {
         &format!(".nekocrate/resource-tasks/{id}"),
     )
 }
-fn records(root: &Path) -> Result<Records> {
+
+/// Shared game directories can contain tasks belonging to different profiles.
+/// Remove only the deleted profile's plans/staging, never published resources.
+pub(crate) fn remove_version_tasks(
+    game: &Path,
+    instance: &str,
+    version: Option<&str>,
+) -> Result<()> {
+    let directory = safe_join(game, ".nekocrate/resource-tasks")?;
+    if !directory.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let id = entry.file_name().to_string_lossy().into_owned();
+        if uuid::Uuid::parse_str(&id).is_err() {
+            continue;
+        }
+        let plan: ResourcePlan = storage::read_json(&safe_join(&entry.path(), "plan.json")?)?;
+        if plan.id == id
+            && plan.target.instance == instance
+            && version.is_none_or(|v| plan.target.version == v)
+        {
+            fs::remove_dir_all(entry.path())?;
+        }
+    }
+    Ok(())
+}
+pub(crate) fn records(root: &Path) -> Result<Records> {
     let path = safe_join(root, ".nekocrate/resources.json")?;
     if path.exists() {
         storage::read_json(&path)

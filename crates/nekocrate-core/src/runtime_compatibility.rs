@@ -7,6 +7,9 @@ use anyhow::{Context, Result, bail};
 use std::path::Path;
 use tokio_util::sync::CancellationToken;
 
+mod legacy_colors;
+pub(crate) use legacy_colors::prepare as prepare_legacy_colors;
+
 pub async fn prepare(
     game: &Path,
     version: &mut Version,

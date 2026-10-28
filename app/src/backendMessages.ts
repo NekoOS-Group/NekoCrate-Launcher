@@ -1,5 +1,97 @@
 /** Launcher-owned messages only. Game output and user-supplied values are never translated. */
 export const backendEnglish: Readonly<Record<string, string>> = {
+  "Java 版玩家名称须为 3–16 位英文字母、数字或下划线":
+    "Use 3–16 letters, numbers or underscores for your Java Edition name",
+  "改名请求未完成，请刷新账户确认结果后再试":
+    "The name change request did not complete; refresh the account to confirm the result before retrying",
+  "无法检查玩家名称，请检查网络后重试":
+    "Could not check the player name; check your connection and retry",
+  "Minecraft 未接受此名称，请检查名称是否可用及账户改名限制":
+    "Minecraft rejected this name; check availability and account name change restrictions",
+  "此账户暂时无法改名，请检查官方改名冷却期或账户权限":
+    "This account cannot change its name right now; check the official cooldown or account permissions",
+  "此玩家名称已被使用，请换一个名称":
+    "This player name is already in use; choose another name",
+  "改名请求过于频繁，请稍后重试":
+    "Too many name change requests; try again later",
+  "玩家改名服务请求失败（HTTP {status}）":
+    "Player name service request failed (HTTP {status})",
+  玩家改名服务响应过大: "The player name service response is too large",
+  玩家改名服务返回了无法解析的响应:
+    "The player name service returned an invalid response",
+  "此账户尚未到可改名时间，Java 版每 30 天可改名一次":
+    "This account is still in its name change cooldown; Java Edition names can be changed once every 30 days",
+  玩家改名服务未返回改名资格:
+    "The player name service did not return name change eligibility",
+  "Minecraft 不允许使用此玩家名称，请换一个名称":
+    "Minecraft does not allow this player name; choose another name",
+  "无法确认此玩家名称是否可用，请稍后重试":
+    "Could not confirm name availability; try again later",
+  玩家改名服务未返回账户信息:
+    "The player name service did not return an account",
+  玩家改名服务返回的账户不匹配:
+    "The player name service returned a different account",
+  玩家改名服务未返回新名称:
+    "The player name service did not return the new name",
+  "玩家改名服务返回的名称不匹配，请刷新账户确认结果":
+    "The player name service returned a different name; refresh the account to confirm the result",
+  "登录凭据已失效，请重新登录后修改玩家名称":
+    "Your session is no longer valid; sign in again to change your player name",
+  "正版账户皮肤须为 64×64 或 64×32 的 PNG":
+    "Account skins must be 64×64 or 64×32 PNG images",
+  "无法上传皮肤，请检查网络后重试":
+    "Could not upload the skin; check your connection and retry",
+  "Minecraft 未接受此皮肤，请检查 PNG 文件和手臂模型":
+    "Minecraft rejected the skin; check the PNG file and arm model",
+  "Minecraft 拒绝更换皮肤，请检查账户权限或重新登录":
+    "Minecraft denied the skin change; check account permissions or sign in again",
+  "皮肤切换过于频繁，请稍后重试":
+    "Too many skin changes; please try again later",
+  "皮肤上传失败（HTTP {status}），请稍后重试":
+    "Skin upload failed (HTTP {status}); please try again later",
+  "登录凭据已失效，请重新登录后更换皮肤":
+    "Your session is no longer valid; sign in again to change skins",
+  皮肤服务响应过大: "The skin service response is too large",
+  皮肤服务返回了无法解析的响应: "The skin service returned an invalid response",
+  皮肤服务未返回账户信息: "The skin service did not return an account",
+  皮肤服务返回的账户不匹配: "The skin service returned a different account",
+  皮肤服务未返回已应用的皮肤:
+    "The skin service did not return the applied skin",
+  "以游客身份 {name} 启动": "Launching as guest {name}",
+  "游客名称须为 1–16 位英文字母、数字或下划线":
+    "Use 1–16 letters, numbers or underscores for the guest name",
+  此资源类型不支持跨版本复制:
+    "This resource type cannot be copied between versions",
+  "下载连接连续 {seconds} 秒未收到数据":
+    "No data received for {seconds} seconds",
+  "下载连接连续 {seconds} 秒未收到数据；保留 {bytes} 字节并重新连接：{file}":
+    "No data received for {seconds} seconds; reconnecting with {bytes} bytes retained: {file}",
+  "未找到对应的 Mod 下载声明，请刷新列表":
+    "Mod download declaration not found; refresh the list",
+  "此声明对应的文件不是 Mod": "This declaration does not refer to a mod",
+  "此 Mod 没有可自动下载的地址，请从作者页面下载后拖入此版本":
+    "This mod has no automatic download URL; download it from the project page and drop it into this version",
+  "Mod 下载声明缺少有效校验值或文件大小超限":
+    "The mod declaration has an invalid hash or exceeds the file size limit",
+  "Mod 文件路径缺失": "Mod file path is missing",
+  "Mod 下载目标必须是 mods 目录内的 JAR 文件":
+    "The mod destination must be a JAR inside the mods directory",
+  "同名 Mod 文件已存在且内容不同，未覆盖":
+    "A different mod file already has this name; it was not overwritten",
+  "无法写入 Mod 文件，已有文件未被覆盖":
+    "Unable to publish the mod file; existing files were not overwritten",
+
+  "JSON 配置格式错误": "Invalid JSON configuration",
+  "TOML 配置格式错误": "Invalid TOML configuration",
+  "配置不是 UTF-8 文本，请使用外部编辑器":
+    "Configuration is not UTF-8 text. Use an external editor",
+  "文件任务正在运行，请完成后修改 Mod":
+    "Wait for the file task to finish before modifying mods",
+  "文件任务正在运行，请完成后保存配置":
+    "Wait for the file task to finish before saving configuration",
+  来源备份不能是符号链接: "The provenance backup must not be a symbolic link",
+  "{count} 个文件下载失败，其余文件已保留。{cause}":
+    "{count} files failed. Other completed files were retained. {cause}",
   目录尚不存在: "The directory does not exist yet",
   此项目不是整合包: "This project is not a modpack",
   "作者未允许通过第三方启动器下载，请在项目主页下载后导入":
@@ -161,6 +253,10 @@ export const backendEnglish: Readonly<Record<string, string>> = {
     "Could not move the version directory. Close programs using its files",
   "保存删除结果失败，版本文件保留在：{path}":
     "Could not save the deletion. Version files remain at: {path}",
+  "无法移入系统回收站，请检查权限或关闭占用文件的程序":
+    "Could not move files to the system Trash / Recycle Bin. Check permissions or close programs using the files",
+  "回收失败且无法恢复列表记录，原文件位于：{path}；{error}":
+    "Recycling failed and the list record could not be restored. Original files remain at: {path}; {error}",
   无法读取游戏内容目录: "Could not read the game content directory",
   "无法读取 Mod 目录": "Could not read the mods directory",
   请选择外部文件夹: "Choose an external folder",
@@ -183,6 +279,14 @@ export const backendEnglish: Readonly<Record<string, string>> = {
     "Selected Java {major} exceeds {component}'s bytecode support (up to Java {maximum}). Select Auto or a compatible Java version.",
   "应用 macOS JNA 兼容修复": "Applying the macOS JNA compatibility fix",
   "应用 macOS OpenAL 兼容修复": "Applying the macOS OpenAL compatibility fix",
+  "准备旧版 Minecraft 颜色兼容补丁":
+    "Preparing the legacy Minecraft color compatibility patch",
+  "无法准备旧版 Minecraft 颜色兼容补丁":
+    "Could not prepare the legacy Minecraft color compatibility patch",
+  无法检查旧版游戏的窗口兼容性:
+    "Could not inspect legacy game window compatibility",
+  "已启用旧版 Minecraft 颜色兼容补丁：{patch}":
+    "Legacy Minecraft color compatibility patch enabled: {patch}",
   "Java 自动匹配范围：{runtime}": "Automatic Java compatibility: {runtime}",
   "版本配置明确声明了 Java 兼容列表":
     "The version profile explicitly declares compatible Java versions",
@@ -389,6 +493,7 @@ export const backendEnglish: Readonly<Record<string, string>> = {
   无法移除系统钥匙串凭据:
     "Could not remove credentials from the system keychain",
   皮肤地址无效: "Invalid skin URL",
+  此账户没有自定义皮肤: "This account has no custom skin",
   "皮肤地址不是 Minecraft 纹理服务":
     "Skin URL is not hosted by the Minecraft texture service",
   皮肤纹理路径无效: "Invalid skin texture path",
@@ -477,8 +582,8 @@ export const backendEnglish: Readonly<Record<string, string>> = {
   实例中不存在该版本: "Version not found in this instance",
   "有任务正在运行，请完成后修改设置":
     "A task is running. Change settings when it finishes",
-  "并发应为 1–32，重试次数应为 0–5":
-    "Parallel downloads must be 1–32; retry attempts must be 0–5",
+  "并发应为 1–256，重试次数应为 0–5":
+    "Parallel downloads must be 1–256; retry attempts must be 0–5",
   未知下载源: "Unknown download source",
   不支持的语言选项: "Unsupported language preference",
   "Client ID 应为 UUID": "Client ID must be a UUID",
@@ -513,8 +618,11 @@ export const backendEnglish: Readonly<Record<string, string>> = {
   "刷新后账户发生变化，请重新登录":
     "Account changed after refreshing. Sign in again",
   "以未登录身份 Player 启动": "Launching as Player without signing in",
-  "刷新登录并验证 Java 版权益":
-    "Refreshing sign-in and verifying Java Edition ownership",
+  准备登录会话: "Preparing sign-in session",
+  "Minecraft 返回的令牌有效期无效":
+    "Minecraft returned an invalid token lifetime",
+  系统钥匙串返回了无效凭据引用:
+    "The system keychain returned an invalid credential reference",
   请先选择游戏版本: "Choose a game version first",
   请先安装或修复所选版本: "Install or repair the selected version first",
   "版本元数据与所选版本不一致，请修复该版本":

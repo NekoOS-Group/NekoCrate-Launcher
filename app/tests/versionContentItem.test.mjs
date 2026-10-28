@@ -28,13 +28,27 @@ async function compileItem(inlineTemplate = false) {
   code = code.replace(
     /from ["']([^"']+)["']/g,
     (_, name) =>
-      `from ${JSON.stringify(name.startsWith(".") ? new URL(`${name}.ts`, file).href : import.meta.resolve(name))}`,
+      `from ${JSON.stringify(name.endsWith(".vue") ? moduleUrl("export default {setup:()=>()=>null}") : name.startsWith(".") ? new URL(`${name}.ts`, file).href : import.meta.resolve(name))}`,
   );
   return (await import(moduleUrl(code))).default;
 }
 const Item = await compileItem();
 const RenderedItem = await compileItem(true);
-const details = (path) => ({ path, size: 123, sources: [] });
+const details = (path) => ({
+  path,
+  size: 123,
+  sources: [
+    {
+      source: "fabric.mod.json",
+      revealable: false,
+      title: null,
+      description: null,
+      fields: [],
+      dependencies: [],
+      issue: null,
+    },
+  ],
+});
 function item(options = {}, component = Item) {
   const events = [];
   const props = reactive({
@@ -55,6 +69,7 @@ function item(options = {}, component = Item) {
     dependencyTargets: new Map(),
     ...options,
   });
+  props.file = { has_metadata: true, ...props.file };
   let ui;
   const renderer = createRenderer({
     createComment: () => ({}),
@@ -454,6 +469,7 @@ test("revealing a dependency expands it, focuses and scrolls to it without locat
 });
 
 const declaredFile = (status = "pending", downloaded = 0) => ({
+  has_metadata: true,
   file_name: "example.jar",
   name: "Example",
   size: 100,
@@ -539,5 +555,408 @@ test("unresolved rows display project and file IDs; partial rows render progress
     } finally {
       h.dispose();
     }
+  }
+});
+
+test("mod controls preserve config drafts across closing and respect write locks", async () => {
+  const { configDrafts } = await import("../src/modManagement.ts");
+  configDrafts.clear();
+  const calls = [];
+  const doc = {
+    path: "config/cat.toml",
+    text: "# comment\nvalue=1",
+    revision: "original",
+    format: "toml",
+  };
+  const actions = {
+    setEnabled: async (...args) => {
+      calls.push(["toggle", ...args]);
+      return "example.jar.disabled";
+    },
+    list: async () => [{ path: doc.path, size: 20 }],
+    read: async () => ({ ...doc }),
+    save: async (...args) => {
+      calls.push(["save", ...args]);
+      return { ...doc, text: args[5], revision: "saved" };
+    },
+  };
+  let h = item({ modActions: actions });
+  await h.ui.showConfig();
+  h.ui.configText.value = "# comment\nvalue=2";
+  h.ui.rememberDraft();
+  h.dispose();
+  h = item({ modActions: actions });
+  try {
+    await h.ui.showConfig();
+    assert.equal(h.ui.configText.value, "# comment\nvalue=2");
+    h.props.locked = true;
+    await h.ui.saveConfig();
+    await h.ui.changeEnabled();
+    assert.equal(calls.length, 0);
+    h.props.locked = false;
+    await h.ui.saveConfig();
+    assert.deepEqual(calls[0], [
+      "save",
+      "a",
+      "pack",
+      "example.jar",
+      "config/cat.toml",
+      "original",
+      "# comment\nvalue=2",
+    ]);
+    assert.equal(h.ui.configDirty.value, false);
+    assert.equal(configDrafts.size, 0);
+    await h.ui.changeEnabled();
+    assert.ok(
+      h.events.some(
+        ([name, file]) => name === "changed" && file === "example.jar.disabled",
+      ),
+    );
+    const pending = deferred();
+    h.props.modActions = { ...actions, read: () => pending.promise };
+    const request = h.ui.chooseConfig("config/another.toml");
+    h.props.instanceId = "other";
+    await flush();
+    pending.resolve({ ...doc, path: "config/another.toml" });
+    await request;
+    assert.equal(h.ui.configDocument.value, null);
+  } finally {
+    h.dispose();
+    configDrafts.clear();
+  }
+});
+
+test("failed config save retains the editable draft and original revision", async () => {
+  const doc = {
+    path: "config/cat.json",
+    text: "{}",
+    revision: "old",
+    format: "json",
+  };
+  const h = item({
+    modActions: {
+      list: async () => [{ path: doc.path, size: 2 }],
+      read: async () => doc,
+      save: async () => {
+        throw new Error("changed externally");
+      },
+      setEnabled: async () => "",
+    },
+  });
+  try {
+    await h.ui.showConfig();
+    h.ui.configText.value = '{"value":2}';
+    h.ui.rememberDraft();
+    await h.ui.saveConfig();
+    assert.equal(h.ui.configDirty.value, true);
+    assert.equal(h.ui.configDocument.value.revision, "old");
+    assert.ok(
+      h.events.some(
+        ([event, error]) =>
+          event === "error" && error.message === "changed externally",
+      ),
+    );
+    h.ui.configText.value = "{}";
+    h.ui.rememberDraft();
+  } finally {
+    h.dispose();
+  }
+});
+
+test("mod state icon toggles without opening details and preserves state on failure", async () => {
+  const calls = [];
+  const h = item(
+    {
+      modActions: {
+        setEnabled: async (...args) => {
+          calls.push(args);
+          return "example.jar.disabled";
+        },
+      },
+    },
+    RenderedItem,
+  );
+  try {
+    const state = () =>
+      nodes(h.render()).find((n) =>
+        n.props?.class?.includes?.("content-state-button"),
+      );
+    assert.equal(state().props["data-state"], "enabled");
+    assert.equal(
+      nodes(h.render()).some((n) => n.props?.role === "switch"),
+      false,
+    );
+    let stopped = false;
+    await state().props.onClick({
+      stopPropagation() {
+        stopped = true;
+      },
+    });
+    assert.equal(stopped, true);
+    assert.deepEqual(calls, [["a", "pack", "example.jar", false]]);
+    assert.equal(state().props["data-state"], "disabled");
+    assert.equal(
+      nodes(h.render()).some((n) => n.props?.class === "content-item-expanded"),
+      false,
+    );
+    h.props.modActions.setEnabled = async () => {
+      throw new Error("busy");
+    };
+    await state().props.onClick({ stopPropagation() {} });
+    assert.equal(state().props["data-state"], "disabled");
+    assert.ok(h.events.some(([kind]) => kind === "error"));
+  } finally {
+    h.dispose();
+  }
+});
+
+test("missing mod icon downloads only its declaration, suppresses duplicate clicks, and does not toggle", async () => {
+  const pending = deferred();
+  const calls = [];
+  const h = item({
+    file: declaredFile(),
+    modActions: {
+      download: (...args) => {
+        calls.push(args);
+        return pending.promise;
+      },
+      setEnabled: async () => {
+        throw new Error("must not toggle an undownloaded file");
+      },
+    },
+  });
+  try {
+    h.props.locked = true;
+    await h.ui.activateMod();
+    assert.equal(calls.length, 0);
+    h.props.locked = false;
+    const result = h.ui.activateMod();
+    await h.ui.activateMod();
+    assert.equal(h.ui.modSaving.value, true);
+    assert.deepEqual(calls, [["a", "pack", "12:34"]]);
+    assert.equal(h.ui.expanded.value, false);
+    pending.resolve("example.jar");
+    await result;
+    assert.equal(h.ui.modSaving.value, false);
+    assert.ok(h.events.some(([kind]) => kind === "changed"));
+  } finally {
+    pending.resolve();
+    h.dispose();
+  }
+});
+
+test("renaming a Mod to its disabled form keeps its expanded details mounted", async () => {
+  const h = item();
+  try {
+    await h.ui.toggle();
+    const details = h.ui.metadata.value;
+    h.props.file = {
+      ...h.props.file,
+      file_name: "example.jar.disabled",
+      enabled: false,
+    };
+    await flush();
+    assert.equal(h.ui.expanded.value, true);
+    assert.equal(h.ui.metadata.value, details);
+    assert.equal(h.ui.modState.value, "disabled");
+    h.props.file = { ...h.props.file, file_name: "other.jar" };
+    await flush();
+    assert.equal(h.ui.expanded.value, false);
+  } finally {
+    h.dispose();
+  }
+});
+
+test("disabled file suffix is presented as a localized status without changing the actual file identity", async () => {
+  const { setLanguage, languagePreference, locale } =
+    await import("../src/i18n.ts");
+  const previous = [languagePreference.value, locale.value];
+  setLanguage("zh-CN", "zh-CN");
+  const h = item(
+    {
+      file: {
+        file_name: "cat.jar.disabled",
+        name: "猫咪 Mod",
+        enabled: false,
+        size: 123,
+        version: "1.0",
+      },
+    },
+    RenderedItem,
+  );
+  try {
+    const all = nodes(h.render());
+    const filename = all.find((n) => n.props?.class === "content-file-name");
+    assert.equal(filename.children.trim(), "cat.jar");
+    assert.equal(filename.props.title, "cat.jar · 已禁用");
+    assert.equal(
+      all.find((n) => n.props?.class === "content-disabled-label").children,
+      "已禁用",
+    );
+    assert.equal(h.props.file.file_name, "cat.jar.disabled");
+    setLanguage("en-US", "zh-CN");
+    const translated = nodes(h.render());
+    assert.equal(
+      translated.find((n) => n.props?.class === "content-file-name").props
+        .title,
+      "cat.jar · Disabled",
+    );
+    assert.equal(
+      translated.find((n) => n.props?.class === "content-disabled-label")
+        .children,
+      "Disabled",
+    );
+  } finally {
+    h.dispose();
+    setLanguage(...previous);
+  }
+});
+
+test("empty rows hide expansion and config controls without eager reads; state actions still work", async () => {
+  for (const kind of [
+    "mods",
+    "resourcepacks",
+    "datapacks",
+    "shaderpacks",
+    "saves",
+  ]) {
+    let reads = 0;
+    const h = item(
+      {
+        kind,
+        file: {
+          file_name: "empty.jar",
+          name: "Empty",
+          enabled: true,
+          size: 5,
+          has_metadata: false,
+          has_config: false,
+        },
+        loadMetadata: async () => {
+          reads++;
+          return { ...details("empty"), sources: [] };
+        },
+        modActions: {
+          list: async () => {
+            throw new Error("must stay lazy");
+          },
+          setEnabled: async () => "empty.jar.disabled",
+        },
+      },
+      RenderedItem,
+    );
+    try {
+      await flush();
+      const all = () => nodes(h.render());
+      assert.equal(
+        all().some((n) => n.props?.class === "content-item-expand"),
+        false,
+      );
+      const title = all().find((n) => n.props?.class === "content-item-toggle");
+      assert.equal(title.type, "span");
+      assert.equal(title.props["aria-expanded"], undefined);
+      await all()
+        .find((n) => n.props?.class?.includes?.("content-item-heading"))
+        .props.onClick();
+      await title.props.onClick({ stopPropagation() {} });
+      assert.equal(
+        all().some((n) => n.props?.class === "content-item-expanded"),
+        false,
+      );
+      assert.equal(reads, 0);
+      if (kind === "mods") {
+        await all()
+          .find((n) => n.props?.class?.includes?.("content-state-button"))
+          .props.onClick({ stopPropagation() {} });
+        assert.ok(
+          h.events.some(
+            ([event, file]) =>
+              event === "changed" && file === "empty.jar.disabled",
+          ),
+        );
+      }
+    } finally {
+      h.dispose();
+    }
+  }
+});
+
+test("configuration-only Mods keep the editor without a metadata arrow, and a missing config closes cleanly", async () => {
+  const doc = {
+    path: "config/example.toml",
+    text: "x=1",
+    revision: "a",
+    format: "toml",
+  };
+  const h = item(
+    {
+      file: {
+        file_name: "example.jar",
+        name: "Example",
+        enabled: true,
+        size: 5,
+        has_metadata: false,
+        has_config: true,
+      },
+      modActions: {
+        list: async () => [{ path: doc.path, size: 3 }],
+        read: async () => doc,
+      },
+      loadMetadata: async () => {
+        throw new Error("no metadata");
+      },
+    },
+    RenderedItem,
+  );
+  try {
+    const buttons = () =>
+      nodes(h.render()).filter((n) => n.props?.class === "content-item-expand");
+    assert.equal(buttons().length, 1);
+    await buttons()[0].props.onClick({ stopPropagation() {} });
+    assert.ok(nodes(h.render()).some((n) => n.props?.class === "mod-config"));
+    await buttons()[0].props.onClick({ stopPropagation() {} });
+    assert.equal(
+      nodes(h.render()).some((n) => n.props?.class === "content-item-expanded"),
+      false,
+    );
+    h.props.modActions.list = async () => [];
+    await buttons()[0].props.onClick({ stopPropagation() {} });
+    assert.equal(
+      nodes(h.render()).some((n) => n.props?.class === "content-item-expanded"),
+      false,
+    );
+    assert.deepEqual(h.events, [["changed", "example.jar"]]);
+    h.props.file.has_config = false;
+    assert.equal(buttons().length, 0);
+  } finally {
+    h.dispose();
+  }
+});
+
+test("empty metadata results close the panel, while refresh can expose metadata again", async () => {
+  const h = item({
+    loadMetadata: async () => ({ ...details("empty"), sources: [] }),
+  });
+  try {
+    await h.ui.toggle();
+    await flush();
+    assert.equal(h.ui.canExpand.value, false);
+    assert.equal(h.ui.expanded.value, false);
+    await h.ui.toggle();
+    assert.equal(h.ui.expanded.value, false);
+    await h.ui.reveal();
+    assert.equal(h.ui.highlighted.value, true);
+    assert.equal(h.ui.expanded.value, false);
+    // A new file identity resets the absence result.
+    h.props.file = { ...h.props.file, file_name: "with-metadata.jar" };
+    h.props.loadMetadata = async () => details("with-metadata");
+    await flush();
+    await h.ui.toggle();
+    assert.equal(h.ui.expanded.value, true);
+    h.props.file.has_metadata = false;
+    await flush();
+    assert.equal(h.ui.expanded.value, false);
+  } finally {
+    h.dispose();
   }
 });

@@ -9,6 +9,7 @@
     "core:default",
     "core:window:allow-set-title",
     "dialog:allow-open",
+    "dialog:allow-save",
     {
       "identifier": "opener:allow-open-url",
       "allow": [

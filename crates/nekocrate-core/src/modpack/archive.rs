@@ -220,6 +220,22 @@ pub(super) fn destination(root: &Path, relative_path: &str) -> Result<PathBuf> {
     content_path(relative_path)?;
     managed_destination(root, relative_path)
 }
+/// Keep a user's disabled mod disabled when repairing/resuming a pack.
+pub(super) fn installed_destination(root: &Path, relative_path: &str) -> Result<PathBuf> {
+    let original = destination(root, relative_path)?;
+    if !original.exists()
+        && relative_path.starts_with("mods/")
+        && relative_path.to_ascii_lowercase().ends_with(".jar")
+    {
+        for suffix in [".disabled", ".off"] {
+            let candidate = destination(root, &format!("{relative_path}{suffix}"))?;
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
+        }
+    }
+    Ok(original)
+}
 pub(super) fn managed_destination(root: &Path, relative_path: &str) -> Result<PathBuf> {
     let relative = relative(relative_path)?;
     let mut path = root.to_path_buf();

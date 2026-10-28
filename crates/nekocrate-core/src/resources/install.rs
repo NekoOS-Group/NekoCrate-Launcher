@@ -185,12 +185,9 @@ fn check_mods(plan: &ResourcePlan, directory: Option<&Path>) -> Result<()> {
             }
         }
     }
-    for (index, entry) in plan
-        .entries
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| e.kind == ResourceKind::Mods)
-    {
+    for (index, entry) in plan.entries.iter().enumerate().filter(|(_, e)| {
+        e.kind == ResourceKind::Mods && e.destination.to_ascii_lowercase().ends_with(".jar")
+    }) {
         let path = if entry.reuse {
             valid_destination(entry, &plan.target)?
         } else if let Some(directory) = directory {
@@ -235,7 +232,17 @@ impl Launcher {
         {
             bail!("目标版本已变化，请重新生成资源安装计划");
         }
+        let game = self.available_game_dir(id)?;
+        let mut downloader = Downloader::new(self.root(), self.settings())?.for_installation(
+            self.root(),
+            id,
+            &game,
+            version,
+            &format!("resource:{task}"),
+        )?;
         if plan.complete {
+            index_plan(&downloader, &plan).await?;
+            downloader.finish_installation(sink).await;
             return Ok(());
         }
         if !plan.conflicts.is_empty() {
@@ -255,7 +262,6 @@ impl Launcher {
         if !plan.conflicts.is_empty() {
             bail!("{}", plan.conflicts.join("\n"));
         }
-        let mut downloader = Downloader::new(self.root(), self.settings())?;
         if plan
             .entries
             .iter()
@@ -303,6 +309,8 @@ impl Launcher {
                     let emit_file = move |status: &str, bytes: u64, total: u64| {
                         files(Event {
                             files: vec![crate::model::FileProgress {
+                                error: None,
+                                retryable: false,
                                 id: file_id.clone(),
                                 name: name.clone(),
                                 downloaded: bytes,
@@ -317,7 +325,7 @@ impl Launcher {
                     tokio::task::spawn_blocking(move || {
                         remove_staged(&output)?;
                         let result = imports::stage(&entry, &output, &token, &|bytes, total| {
-                            emit_file("downloading", bytes, total)
+                            emit_file("installing", bytes, total)
                         });
                         match result {
                             Ok(total) => {
@@ -348,10 +356,44 @@ impl Launcher {
         // Once publication begins, finish this short transaction even if cancellation arrives.
         // Staging and plans remain on failure so a restart can reuse verified downloads.
         let token = cancel.clone();
-        tokio::task::spawn_blocking(move || commit(plan, &directory, token)).await??;
+        let plan = tokio::task::spawn_blocking(move || {
+            commit(plan, &directory, token)?;
+            storage::read_json::<ResourcePlan>(&safe_join(&directory, "plan.json")?)
+        })
+        .await??;
+        index_plan(&downloader, &plan).await?;
+        downloader.finish_installation(&sink).await;
         sink(Event::workflow("finalize", "资源安装完成"));
         Ok(())
     }
+}
+async fn index_plan(downloader: &Downloader, plan: &ResourcePlan) -> Result<()> {
+    for entry in &plan.entries {
+        let path = valid_destination(entry, &plan.target)?;
+        if !path.is_file() {
+            continue;
+        }
+        let (hash, sha256) = match &entry.input {
+            Input::Remote { file } => (file.sha1.clone(), false),
+            Input::Local { .. } => {
+                downloader.index_local(&path).await?;
+                continue;
+            }
+        };
+        downloader
+            .index_installed(&FileSpec {
+                path,
+                hash,
+                sha256,
+                size: 0,
+                url: String::new(),
+            })
+            .await?;
+    }
+    downloader
+        .forget_staging(&task_dir(&plan.target, &plan.id)?.join("stage"))
+        .await;
+    Ok(())
 }
 fn commit(mut plan: ResourcePlan, directory: &Path, cancel: CancellationToken) -> Result<()> {
     check_mods(&plan, Some(directory))?;

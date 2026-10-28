@@ -585,3 +585,110 @@ fn raw_metadata_reads_original_text_without_extraction_and_only_reveals_real_fil
         );
     }
 }
+
+#[test]
+fn list_capabilities_distinguish_missing_descriptors_from_invalid_ones_and_keep_provenance() {
+    use std::sync::atomic::Ordering;
+    let (_temp, launcher, id, game) = fixture();
+    archive(
+        &game.join("mods/empty.jar"),
+        &[("example.class", "bytecode")],
+    );
+    archive(
+        &game.join("mods/broken.jar"),
+        &[("fabric.mod.json", "invalid")],
+    );
+    let cold = launcher.version_content_index(&id, "pack").unwrap();
+    assert!(cold.content.files.iter().all(|f| f.has_metadata.is_none()));
+    assert_eq!(launcher.0.mod_summaries.reads.load(Ordering::Relaxed), 0);
+    let batch = launcher
+        .version_content_summaries(&id, "pack", &cold.pending)
+        .unwrap();
+    assert_eq!(
+        batch
+            .iter()
+            .find(|f| f.file_name == "empty.jar")
+            .unwrap()
+            .has_metadata,
+        Some(false)
+    );
+    assert_eq!(
+        batch
+            .iter()
+            .find(|f| f.file_name == "broken.jar")
+            .unwrap()
+            .has_metadata,
+        Some(true)
+    );
+    let warm = launcher.version_content_index(&id, "pack").unwrap();
+    assert!(warm.pending.is_empty());
+    assert_eq!(launcher.0.mod_summaries.reads.load(Ordering::Relaxed), 2);
+    archive(
+        &game.join("resourcepacks/empty.zip"),
+        &[("assets/cat.txt", "cat")],
+    );
+    archive(
+        &game.join("resourcepacks/cat.zip"),
+        &[("pack.mcmeta", r#"{"pack":{}}"#)],
+    );
+    let packs = launcher
+        .version_content(&id, "pack", ContentKind::Resourcepacks)
+        .unwrap();
+    assert_eq!(
+        packs
+            .files
+            .iter()
+            .find(|f| f.file_name == "empty.zip")
+            .unwrap()
+            .has_metadata,
+        Some(false)
+    );
+    assert_eq!(
+        packs
+            .files
+            .iter()
+            .find(|f| f.file_name == "cat.zip")
+            .unwrap()
+            .has_metadata,
+        Some(true)
+    );
+    archive(
+        &game.join("shaderpacks/cat.zip"),
+        &[("shaders/cat.glsl", "shader")],
+    );
+    assert_eq!(
+        launcher
+            .version_content(&id, "pack", ContentKind::Shaderpacks)
+            .unwrap()
+            .files[0]
+            .has_metadata,
+        Some(false)
+    );
+    storage::write_json(
+        &game.join(".nekocrate/resources.json"),
+        &json!({
+            "shaderpacks/cat.zip": {
+                "kind":"shaderpacks", "origin": { "platform":"local", "project":null,
+                    "version":null, "name":"Cat shaders", "dependencies":[] },
+                "sha256":"hash", "sha1":null, "installed_at":0
+            }
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        launcher
+            .version_content(&id, "pack", ContentKind::Shaderpacks)
+            .unwrap()
+            .files[0]
+            .has_metadata,
+        Some(true)
+    );
+    assert_eq!(
+        launcher
+            .version_content_metadata(&id, "pack", ContentKind::Shaderpacks, "cat.zip")
+            .unwrap()
+            .sources
+            .len(),
+        1
+    );
+}

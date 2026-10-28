@@ -7,7 +7,6 @@ import {
   finishWorkflow,
   fileWindow,
   filePercent,
-  activeFilesFirst,
 } from "../src/downloadWorkflow.ts";
 import { activeDialog, registerDialog } from "../src/dialogSurface.ts";
 import {
@@ -128,33 +127,6 @@ test("续传列表初始化已有字节，校验时保留进度但不提前标�
   );
   assert.equal(state.steps[1].filesDone, 1);
   assert.equal(state.files.get("cached").cached, true);
-});
-
-test("下载中的文件稳定置顶，字节变化不触发排序，其余文件保留原顺序", () => {
-  const rows = reactive([
-    file("a", "done", 100),
-    file("b", "downloading", 40),
-    file("c"),
-    file("d", "downloading", 20),
-  ]);
-  let evaluations = 0;
-  const ordered = computed(() => {
-    evaluations++;
-    return activeFilesFirst(rows);
-  });
-  assert.deepEqual(
-    ordered.value.map((file) => file.id),
-    ["b", "d", "a", "c"],
-  );
-  rows[1].downloaded = 70;
-  assert.equal(ordered.value[0].downloaded, 70);
-  assert.equal(evaluations, 1);
-  rows[1].status = "done";
-  assert.deepEqual(
-    ordered.value.map((file) => file.id),
-    ["d", "a", "b", "c"],
-  );
-  assert.equal(evaluations, 2);
 });
 
 test("暂停和继续保留同一任务与进度，完成后仍执行原来的启动请求", async () => {
@@ -360,5 +332,160 @@ test("IPC 文件事件只更新所属任务，失败统一提供给角落通知�
     download.resolve(true);
     await installing;
     dispose();
+  }
+});
+
+test("retry updates the original file stage and clears stale failure state", () => {
+  const state = createWorkflow("install", "");
+  applyWorkflowEvent(state, event("workflow", "files"));
+  applyWorkflowEvent(
+    state,
+    event("file", "files", [
+      { ...file("bad", "error", 60), retryable: true, error: "network" },
+    ]),
+  );
+  applyWorkflowEvent(state, event("workflow", "java"));
+  applyWorkflowEvent(
+    state,
+    event("file", "java", [file("java", "downloading", 20)]),
+  );
+  applyWorkflowEvent(
+    state,
+    event("file", "java", [{ ...file("bad", "done", 100), cached: true }]),
+  );
+  assert.equal(state.steps.find((s) => s.id === "files").filesDone, 1);
+  assert.equal(state.steps.find((s) => s.id === "java").filesDone, 0);
+  assert.equal(state.steps.find((s) => s.id === "files").activity.reused, 1);
+  assert.equal(state.files.get("bad").retryable, false);
+  assert.equal(state.files.get("bad").error, undefined);
+  finishWorkflow(state, "error");
+  assert.equal(
+    state.steps.find((s) => s.id === "java").activity.downloading,
+    undefined,
+  );
+  assert.equal(state.steps.find((s) => s.id === "java").activity.cancelled, 1);
+});
+
+test("continuing a failed install retains completed files and partial bytes", async () => {
+  const { fixture, context: ui, dispose } = await settingsFixture();
+  const pending = deferred();
+  fixture.handlers.install = () => pending.promise;
+  const instance = fixture.state.database.instances[0];
+  try {
+    const installing = ui.install(instance);
+    await flush();
+    fixture.event({ payload: event("workflow", "files") });
+    fixture.event({
+      payload: event("file_plan", "files", [
+        file("cached", "done", 100),
+        file("bad", "downloading", 50),
+      ]),
+    });
+    pending.reject(new Error("network unavailable"));
+    await installing;
+    assert.equal(ui.tasks.value[0].workflow.files.get("cached").status, "done");
+    const continuing = deferred();
+    fixture.handlers.install = () => continuing.promise;
+    const resumed = ui.install(instance);
+    await flush();
+    assert.equal(ui.current.value.workflow.files.get("cached").status, "done");
+    assert.equal(ui.current.value.workflow.files.get("bad").downloaded, 50);
+    fixture.event({
+      payload: event("file_plan", "files", [
+        file("cached", "queued", 0),
+        file("bad", "queued", 0),
+      ]),
+    });
+    assert.equal(ui.current.value.workflow.files.get("cached").downloaded, 100);
+    assert.equal(ui.current.value.workflow.files.get("bad").downloaded, 50);
+    continuing.resolve(true);
+    await resumed;
+  } finally {
+    dispose();
+  }
+});
+
+test("single-file retry stays on the requested task and does not replace whole-task progress", async () => {
+  const f = await settingsFixture();
+  try {
+    const workflow = createWorkflow("install", "安装游戏");
+    applyWorkflowEvent(workflow, event("workflow", "files"));
+    applyWorkflowEvent(
+      workflow,
+      event("file_plan", "files", [
+        { ...file("failed", "error", 40), retryable: true, error: "HTTP 503" },
+        { ...file("cached", "done", 100), cached: true },
+      ]),
+    );
+    finishWorkflow(workflow, "error");
+    f.context.tasks.value = [
+      {
+        id: 1,
+        instance_id: "instance-a",
+        version_id: "1.21.1",
+        status: "error",
+        progress: 70,
+        download_progress: 70,
+        workflow,
+      },
+    ];
+    const task = f.context.tasks.value[0];
+    f.context.tasks.value.unshift({
+      id: 2,
+      status: "done",
+      workflow: createWorkflow("versions", "同步版本目录"),
+    });
+    f.handlers.retry_download_file = ({ file: id }) => {
+      assert.equal(id, "failed");
+      f.fixture.event({
+        payload: {
+          ...event("progress", "files"),
+          completed: 1,
+          total: 1,
+          overall_progress: 100,
+        },
+      });
+      f.fixture.event({
+        payload: event("file", "files", [file("failed", "done", 100)]),
+      });
+      return true;
+    };
+    await f.context.retryDownloadFile("failed", task);
+    assert.equal(task.progress, 70);
+    assert.equal(task.download_progress, 70);
+    assert.equal(task.workflow.files.get("failed").status, "done");
+    assert.equal(task.workflow.files.get("cached").cached, true);
+    assert.equal(
+      task.workflow.steps.find((s) => s.id === "files").status,
+      "done",
+    );
+    assert.equal(task.status, "error"); // Remaining installation still needs Continue.
+    assert.equal(f.context.current.value, null);
+    assert.equal(f.context.busy.value, false);
+  } finally {
+    f.dispose();
+  }
+});
+
+test("unexpected game exit opens its evidence report, and a new launch clears the previous report", async () => {
+  const f = await settingsFixture();
+  try {
+    const report = {
+      version: "1.21.1",
+      time: 1,
+      exit: "1",
+      sources: ["game.log"],
+      findings: [],
+    };
+    f.fixture.event({ payload: { ...event("game_crash"), crash: report } });
+    await flush();
+    assert.equal(f.context.showLogs.value, true);
+    assert.equal(f.context.logScope.value, "instance-a");
+    assert.deepEqual(await f.context.loadDiagnosis("instance-a"), report);
+    f.fixture.event({ payload: event("game_started") });
+    await flush();
+    assert.equal(await f.context.loadDiagnosis("instance-a"), null);
+  } finally {
+    f.dispose();
   }
 });

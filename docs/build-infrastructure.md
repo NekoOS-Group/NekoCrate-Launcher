@@ -91,6 +91,49 @@ Fork PR 在普通 Ubuntu runner 上安装依赖，避免依赖外部贡献者没
 jq -r '.files[] | "\(.sha256)  \(.name)"' BUILDINFO.json | shasum -a 256 --check
 ```
 
+## 签名与密钥管理
+
+更新包签名、操作系统的发布者签名、玩家登录凭据是三套独立机制。
+
+| 用途 | 当前存放位置与状态 | 构建时的处理 |
+| --- | --- | --- |
+| 三平台自动更新签名 | 固定公钥在 `tauri.conf.json`；私钥为 Actions Secret `TAURI_SIGNING_PRIVATE_KEY`，密码为 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | 仅发布构建步骤注入，内嵌签名进入 `latest.json`；私钥不进入安装包、缓存或 artifacts |
+| macOS 本机开发签名 | `NekoCrate Local Development` 自签身份，私钥在本机用户钥匙串且不可导出 | `cargo ui` 编译完成后签名再执行；重载继续使用相同身份 |
+| macOS 公开发布者签名 | 尚未配置，现有 Release 仍为 ad hoc | 后续使用独立的 Developer ID Application 身份和公证配置，不上传本机开发私钥 |
+| Windows 公开发布者签名 | 尚未配置 Authenticode；现有更新包已有上面的更新签名 | 后续通过 Tauri `signCommand` 接入云签名或硬件密钥；CI 获得签名权限，私钥留在服务/HSM 中 |
+| Linux 包/仓库签名 | 当前 AppImage 使用上面的更新签名；DEB 用于手动安装 | 若增加 AppImage GPG 或 APT 仓库，使用独立、持久的 GPG 签名密钥；不每次构建重新生成 |
+
+Windows 的发布者证书与更新包签名不同。自签证书可以用于本机测试，但不能让其他
+用户的 Windows 自动信任发布者或保证消除 SmartScreen 提示。正式发布可使用
+[Tauri 支持的云签名/硬件密钥方式](https://v2.tauri.app/distribute/sign/windows/)。
+Linux 没有要求普通应用持有类似 macOS 的本机签名证书；可按分发渠道增加
+[AppImage GPG 签名](https://v2.tauri.app/distribute/sign/linux/)，但 AppImage
+本身不会自动验证该签名，不能替代启动器现有的更新签名验证。
+
+固定更新私钥应在仓库外保留加密备份。更换该密钥需要处理已安装客户端内置公钥的
+迁移，不能简单重生成。签名 Secrets 只供受信任的发布工作流使用，PR 测试不需要，
+也不应通过缓存传递；现有 Linux 构建镜像不含任何签名密钥。
+
+### 本机 macOS 自签身份
+
+`scripts/macos_sign.py ensure` 在当前用户默认钥匙串中创建一次 RSA 3072 位、
+有效期十年的代码签名证书；仅添加当前用户域的代码签名信任，不改变 HTTPS 信任。
+私钥只授权 `/usr/bin/codesign` 使用，不使用允许任意应用访问的 `security import -A`。
+创建时的私钥暂存于权限为 0700 的临时目录，导入后删除；钥匙串内私钥不可导出。
+`~/Library/Application Support/NekoCrate/signing/` 只保存公证书和指纹，不能据此签名。
+若重装系统或删除钥匙串导致私钥丢失，需要明确重新配置身份并重新授权凭据访问。
+
+开发工具通过 Cargo 的 target runner 在构建与执行之间调用签名脚本，保留 Tauri 的
+监听、参数传递与退出逻辑。已经满足固定签名要求的文件不重复改写；签名或身份
+验证失败时停止执行，不退回临时签名。Windows/Linux 的 `cargo ui` 路径不执行该脚本。
+`tauri.local.conf.json` 提供本机 `.app` 打包覆盖配置，不由 Release 工作流加载。
+
+玩家的微软刷新令牌始终留在玩家自己的系统凭据库：macOS Keychain、Windows
+[Credential Manager](https://learn.microsoft.com/en-us/windows/win32/secauthn/credentials-management)、
+Linux [Secret Service](https://specifications.freedesktop.org/secret-service/latest/)。
+它们不是构建签名密钥；Linux 密钥库锁定时可能要求解锁，没有可用服务时明确报错，
+不回退到明文保存。
+
 ## Cargo 安装
 
 CLI 已有独立二进制 crate，可通过 Git 安装指定版本：

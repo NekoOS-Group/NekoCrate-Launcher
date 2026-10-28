@@ -200,11 +200,9 @@ async fn modern_processors_resume_repair_and_publish_only_after_success() {
         archive.write_all(&data).unwrap();
     }
     archive.finish().unwrap();
-    storage::write_json(
-        &cache.join("installer.sha1.json"),
-        &hash(&fs::read(&jar).unwrap()),
-    )
-    .unwrap();
+    let installer_bytes = fs::read(&jar).unwrap();
+    let installer_hash = hash(&installer_bytes);
+    storage::write_json(&cache.join("installer.sha1.json"), &installer_hash).unwrap();
     let java = temp.path().join("java");
     fs::write(
         &java,
@@ -246,8 +244,16 @@ printf 'generated' > "$target"
     );
     assert!(!version::metadata_path(&game, &id).unwrap().exists());
     assert!(!read_record(&game, &id).unwrap().completed);
+    assert!(jar.is_file(), "failed installation retains its installer");
     fs::remove_file(game.join("fail-processor")).unwrap();
     launcher.install(&instance.id, &token, &sink).await.unwrap();
+    let installer_object = launcher
+        .root()
+        .join("cache/objects/sha1")
+        .join(&installer_hash[..2])
+        .join(&installer_hash);
+    assert!(!jar.exists());
+    assert!(!installer_object.exists());
     assert!(read_record(&game, &id).unwrap().completed);
     assert_eq!(
         version::resolve(launcher.root(), &game, &id)
@@ -256,14 +262,23 @@ printf 'generated' > "$target"
         "1.20.1"
     );
     let runs = fs::read_to_string(game.join("processor-runs.txt")).unwrap();
+    // A later install/repair needs the installer again. Supply the fixture as a
+    // freshly available download object, never reach the public Forge service.
+    fs::create_dir_all(installer_object.parent().unwrap()).unwrap();
+    fs::write(&installer_object, &installer_bytes).unwrap();
     launcher.install(&instance.id, &token, &sink).await.unwrap();
+    assert!(!jar.exists());
+    assert!(!installer_object.exists());
     assert_eq!(
         fs::read_to_string(game.join("processor-runs.txt")).unwrap(),
         runs,
         "completed processors must not run again"
     );
     fs::write(game.join("libraries").join(generated_path), b"corrupted").unwrap();
+    fs::write(&installer_object, &installer_bytes).unwrap();
     launcher.repair(&instance.id, &token, &sink).await.unwrap();
+    assert!(!jar.exists());
+    assert!(!installer_object.exists());
     assert_eq!(
         fs::read(game.join("libraries").join(generated_path)).unwrap(),
         b"generated"

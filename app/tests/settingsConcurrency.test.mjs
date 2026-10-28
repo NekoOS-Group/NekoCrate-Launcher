@@ -6,6 +6,30 @@ import {
   flush,
 } from "./helpers/appSettingsFixture.mjs";
 
+test("manual concurrency accepts and persists 256 while rejecting out-of-range drafts", async () => {
+  const { fixture, context: ui, dispose } = await settingsFixture();
+  try {
+    ui.toggleUtility("settings");
+    await flush();
+    ui.settings.concurrency = 256;
+    await flush();
+    assert.equal(fixture.state.database.settings.concurrency, 256);
+    for (const invalid of [0, 257, 1.5]) {
+      ui.settings.concurrency = invalid;
+      await flush();
+      assert.equal(fixture.state.database.settings.concurrency, 256);
+    }
+    ui.settings.concurrency = 128;
+    await flush();
+    assert.equal(fixture.state.database.settings.concurrency, 128);
+    ui.toggleUtility("settings");
+    ui.toggleUtility("settings");
+    assert.equal(ui.settings.concurrency, 128);
+  } finally {
+    dispose();
+  }
+});
+
 test("手动并发数与自适应开关独立保存，代理开关与协议切换保留地址且成组生效", async () => {
   const { fixture, context: ui, dispose } = await settingsFixture();
   try {

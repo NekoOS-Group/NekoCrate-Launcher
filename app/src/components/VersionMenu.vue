@@ -8,17 +8,24 @@ import {
   ref,
   watch,
 } from "vue";
-import { ChevronUp, Plus, SlidersHorizontal } from "lucide-vue-next";
+import { ChevronUp, Plus, SlidersHorizontal, Trash2 } from "lucide-vue-next";
 import type { Instance, Task } from "../types";
 import VersionStatusIcon from "./VersionStatusIcon.vue";
 import { versionDownloadState } from "../versionProgress";
 import { versionDescription, versionName } from "../versionDescription";
+import { useVersionSorting } from "../useVersionSorting";
 
 const props = defineProps<{
   instance?: Instance;
   disabled: boolean;
   locked: boolean;
   tasks: readonly Task[];
+  moveVersion: (
+    id: string,
+    version: string,
+    before: string | null,
+  ) => Promise<boolean>;
+  removeVersion: (id: string, version: string) => Promise<boolean>;
 }>();
 const versions = computed(
   () =>
@@ -43,6 +50,24 @@ const root = ref<HTMLElement>();
 const trigger = ref<HTMLButtonElement>();
 const menu = ref<HTMLElement>();
 const expanded = ref(false);
+let reorderingFocus = false;
+const {
+  list: versionList,
+  ghost: versionGhost,
+  trash: versionTrash,
+  dragged: draggedVersion,
+  displayItems: sortedVersions,
+  settling: versionSettling,
+  removing: versionRemoving,
+  hovered: versionTrashHovered,
+  position: versionGhostPosition,
+  ...versionSort
+} = useVersionSorting(
+  versions,
+  computed(() => props.locked || props.disabled || !expanded.value),
+  (version, before) => props.moveVersion(props.instance!.id, version, before),
+  (version) => props.removeVersion(props.instance!.id, version),
+);
 
 function items() {
   return Array.from(
@@ -56,6 +81,7 @@ function focusItem(index: number) {
   button?.scrollIntoView({ block: "nearest" });
 }
 function close(restoreFocus = false) {
+  versionSort.cancel();
   expanded.value = false;
   if (restoreFocus) trigger.value?.focus({ preventScroll: true });
 }
@@ -76,7 +102,41 @@ async function open(position: "selected" | "first" | "last" = "selected") {
         : Math.max(0, selected),
   );
 }
-function navigate(event: KeyboardEvent) {
+async function navigate(event: KeyboardEvent) {
+  if (event.altKey && ["ArrowUp", "ArrowDown"].includes(event.key)) {
+    event.preventDefault();
+    if (props.locked || draggedVersion.value) return;
+    const id = (document.activeElement as HTMLElement)?.dataset.versionId;
+    const index = versions.value.findIndex((version) => version.id === id);
+    const direction = event.key === "ArrowUp" ? -1 : 1;
+    if (
+      index < 0 ||
+      index + direction < 0 ||
+      index + direction >= versions.value.length
+    )
+      return;
+    // Moving a focused DOM node can blur it; keep the menu and focus stable.
+    reorderingFocus = true;
+    try {
+      await props.moveVersion(
+        props.instance!.id,
+        id!,
+        direction < 0
+          ? versions.value[index - 1].id
+          : (versions.value[index + 2]?.id ?? null),
+      );
+      await nextTick();
+      if (expanded.value) {
+        const target = items().findIndex(
+          (item) => item.dataset.versionId === id,
+        );
+        if (target >= 0) focusItem(target);
+      }
+    } finally {
+      reorderingFocus = false;
+    }
+    return;
+  }
   const index = items().indexOf(document.activeElement as HTMLButtonElement);
   let next: number;
   switch (event.key) {
@@ -99,7 +159,7 @@ function navigate(event: KeyboardEvent) {
   focusItem(next);
 }
 function choose(version: string) {
-  if (props.locked) return;
+  if (props.locked || draggedVersion.value) return;
   close(true);
   emit("select", version);
 }
@@ -111,12 +171,14 @@ function download() {
 function outside(event: PointerEvent) {
   if (
     expanded.value &&
+    !draggedVersion.value &&
     event.target instanceof Node &&
     !root.value?.contains(event.target)
   )
     close();
 }
 function leave(event: FocusEvent) {
+  if (draggedVersion.value || (reorderingFocus && !event.relatedTarget)) return;
   if (
     !(event.relatedTarget instanceof Node) ||
     !root.value?.contains(event.relatedTarget)
@@ -183,44 +245,57 @@ defineExpose({
         :aria-label="t('游戏版本')"
         @keydown="navigate"
       >
-        <div class="version-menu-list" role="none">
+        <div
+          ref="versionList"
+          class="version-menu-list"
+          role="none"
+          @lostpointercapture="versionSort.lostCapture"
+        >
           <p v-if="!instance?.versions.length" class="version-menu-empty">
             {{ t("暂无游戏版本") }}
           </p>
-          <button
-            v-for="version in versions"
-            :key="version.id"
-            class="version-menu-item"
-            :data-resource-instance="instance?.id"
-            :data-resource-version="version.id"
-            role="menuitemradio"
-            :aria-checked="version.selected"
-            :aria-disabled="locked"
-            :title="
-              version.installed
-                ? versionName(version)
-                : `${versionName(version)} · ${t('已下载约 {progress}%', { progress: Math.round(version.download.progress) })}`
-            "
-            tabindex="-1"
-            data-menu-item
-            @click="choose(version.id)"
-          >
-            <VersionStatusIcon
-              :selected="version.selected"
-              :installed="version.installed"
-              :progress="version.download.progress"
-              :indeterminate="version.download.indeterminate"
-            />
-            <span class="version-menu-label">
-              <span class="version-menu-name">{{ versionName(version) }}</span>
-              <small class="version-menu-detail">{{
-                versionDescription(version)
+          <TransitionGroup name="version-sort" tag="div" role="none">
+            <button
+              v-for="version in sortedVersions"
+              :key="version.id"
+              class="version-menu-item"
+              :class="{ 'version-dragging': draggedVersion?.id === version.id }"
+              :data-version-id="version.id"
+              :data-resource-instance="instance?.id"
+              :data-resource-version="version.id"
+              role="menuitemradio"
+              :aria-checked="version.selected"
+              :aria-disabled="locked"
+              :title="
+                version.installed
+                  ? versionName(version)
+                  : `${versionName(version)} · ${t('已下载约 {progress}%', { progress: Math.round(version.download.progress) })}`
+              "
+              tabindex="-1"
+              data-menu-item
+              @pointerdown="versionSort.start($event, version.id)"
+              @dragstart.prevent
+              @click="choose(version.id)"
+            >
+              <VersionStatusIcon
+                :selected="version.selected"
+                :installed="version.installed"
+                :progress="version.download.progress"
+                :indeterminate="version.download.indeterminate"
+              />
+              <span class="version-menu-label">
+                <span class="version-menu-name">{{
+                  versionName(version)
+                }}</span>
+                <small class="version-menu-detail">{{
+                  versionDescription(version)
+                }}</small>
+              </span>
+              <small v-if="!version.installed" class="version-menu-state">{{
+                t("待下载")
               }}</small>
-            </span>
-            <small v-if="!version.installed" class="version-menu-state">{{
-              t("待下载")
-            }}</small>
-          </button>
+            </button>
+          </TransitionGroup>
         </div>
         <div
           v-if="instance?.versions.length"
@@ -255,5 +330,45 @@ defineExpose({
         </div>
       </div>
     </Transition>
+    <Teleport to="body">
+      <Transition name="instance-trash">
+        <div
+          v-if="draggedVersion && (!versionSettling || versionRemoving)"
+          ref="versionTrash"
+          class="instance-trash-target version-trash-target"
+          :class="{ active: versionTrashHovered }"
+          role="img"
+          :aria-label="t('拖到此处删除版本')"
+        >
+          <Trash2 :size="28" />
+        </div>
+      </Transition>
+      <div
+        v-if="draggedVersion"
+        ref="versionGhost"
+        class="version-menu-item version-drag-ghost glass-surface"
+        :style="versionGhostPosition"
+        :aria-checked="draggedVersion.selected"
+        aria-hidden="true"
+      >
+        <VersionStatusIcon
+          :selected="draggedVersion.selected"
+          :installed="draggedVersion.installed"
+          :progress="draggedVersion.download.progress"
+          :indeterminate="draggedVersion.download.indeterminate"
+        />
+        <span class="version-menu-label"
+          ><span class="version-menu-name">{{
+            versionName(draggedVersion)
+          }}</span
+          ><small class="version-menu-detail">{{
+            versionDescription(draggedVersion)
+          }}</small></span
+        >
+        <small v-if="!draggedVersion.installed" class="version-menu-state">{{
+          t("待下载")
+        }}</small>
+      </div>
+    </Teleport>
   </div>
 </template>

@@ -2,6 +2,7 @@
 import { t, locale, setLanguage, translateMessage } from "./i18n";
 import {
   computed,
+  defineAsyncComponent,
   nextTick,
   onMounted,
   onUnmounted,
@@ -17,8 +18,10 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Plus,
+  Boxes,
   Settings2,
   UsersRound,
+  UserRound,
   FolderOpen,
   Play,
   Download,
@@ -33,6 +36,7 @@ import {
   ExternalLink,
   LoaderCircle,
   CheckCircle2,
+  Check,
 } from "lucide-vue-next";
 import { backdropThemes } from "./backdropThemes";
 import { resolveInstanceIcon } from "./instanceIcons";
@@ -56,6 +60,8 @@ import {
 } from "./loaderCatalog";
 import { signInWithMicrosoft } from "./login";
 import { createAccountSkinLoader } from "./accountSkins";
+import { builtinSkins } from "./builtinSkins";
+import type { SavedSkin } from "./skinLibrary";
 import type { LogLine } from "./logPresentation";
 import { createLogStore } from "./logStore";
 import LogPanel from "./components/LogPanel.vue";
@@ -67,6 +73,7 @@ import { useFolderDrop } from "./useFolderDrop";
 import {
   createWorkflow,
   applyWorkflowEvent,
+  resumeWorkflow,
   finishWorkflow,
   setWorkflowPaused,
   clearWorkflowFiles,
@@ -89,7 +96,16 @@ import ModpackMissing from "./components/ModpackMissing.vue";
 import CurseForgeKey from "./components/CurseForgeKey.vue";
 import type { ModpackPreview, ModpackStatus } from "./types";
 import VersionManager from "./components/VersionManager.vue";
+import ResourceTransferOverlay from "./components/ResourceTransferOverlay.vue";
+import {
+  useResourceTransfer,
+  type ResourceCopySource,
+  type ResourceDestination,
+} from "./useResourceTransfer";
 import ResourceBrowser from "./components/ResourceBrowser.vue";
+const ResourceManager = defineAsyncComponent(
+  () => import("./components/ResourceManager.vue"),
+);
 import ContentSwitch from "./components/ContentSwitch.vue";
 import { listRevealStyle } from "./listMotion";
 import ModpackBrowser from "./components/ModpackBrowser.vue";
@@ -160,6 +176,8 @@ const snapshot = ref<Snapshot>({
     instances: [],
     accounts: [],
     selected_account: null,
+    guest_name: "Player",
+    guest_skin: "builtin:steve",
   },
   running: [],
 });
@@ -258,7 +276,7 @@ function validSetting(key: EditableSetting) {
     return (
       Number.isInteger(settings.concurrency) &&
       settings.concurrency >= 1 &&
-      settings.concurrency <= 32
+      settings.concurrency <= 256
     );
   if (key === "retries")
     return (
@@ -493,11 +511,17 @@ function notifyLoaderUnavailable(kind: string) {
   loaderNoticeTimer = setTimeout(clearLoaderNotice, 2000);
 }
 const error = ref("");
+const accountNameError = ref("");
 const visibleError = computed(
-  () => error.value || settingsSaveError.value || proxyPasswordError.value,
+  () =>
+    error.value ||
+    accountNameError.value ||
+    settingsSaveError.value ||
+    proxyPasswordError.value,
 );
 function dismissError() {
   error.value = "";
+  accountNameError.value = "";
   settingsSaveError.value = "";
   proxyPasswordError.value = "";
 }
@@ -516,7 +540,7 @@ function openLogs(scope = "all") {
   showLogs.value = true;
 }
 const modal = ref<
-  "add" | "create" | "edit" | "delete" | "version" | "manage" | null
+  "add" | "create" | "edit" | "delete" | "version" | "manage" | "library" | null
 >(null);
 watch(modal, () => modalSession++, { flush: "sync" });
 const modalTitles = {
@@ -526,6 +550,7 @@ const modalTitles = {
   delete: "移除实例",
   version: "添加新的版本",
   manage: "管理版本",
+  library: "资源管理",
 };
 const suggestedInstances = ref<SuggestedInstance[]>([]);
 const discoveringInstances = ref(false);
@@ -916,6 +941,7 @@ let unlisten: UnlistenFn | undefined;
 let unlistenUpdate: UnlistenFn | undefined;
 const instances = computed(() => snapshot.value.database.instances);
 const instanceOrderSaving = ref(false);
+const versionOrderSaving = ref(false);
 const {
   strip: instanceStrip,
   toggle: instanceOverflowToggle,
@@ -968,13 +994,148 @@ const selectedAccount = computed(() =>
     (a) => a.id === snapshot.value.database.selected_account,
   ),
 );
-const loadAccountTexture = createAccountSkinLoader(async (id) => {
-  const bytes = await rpc<number[] | null>("account_skin", { id });
+const guestName = computed(
+  () => snapshot.value.database.guest_name || "Player",
+);
+const guestSkinId = computed(
+  () => snapshot.value.database.guest_skin || "builtin:steve",
+);
+const guestTexture = ref<string | null>(null);
+const guestSlim = ref(false);
+const guestTextureLoading = ref(false);
+const guestTextureError = ref("");
+let guestTextureGeneration = 0;
+function textureFromBytes(bytes: number[] | null): string | null {
   if (!bytes) return null;
   let binary = "";
   for (let i = 0; i < bytes.length; i += 8192)
     binary += String.fromCharCode(...bytes.slice(i, i + 8192));
   return `data:image/png;base64,${btoa(binary)}`;
+}
+async function loadGuestSkin() {
+  const generation = ++guestTextureGeneration;
+  const id = guestSkinId.value;
+  const builtin = builtinSkins.find((skin) => skin.id === id);
+  guestTextureError.value = "";
+  guestTextureLoading.value = false;
+  if (builtin) {
+    guestTexture.value =
+      builtin.id === "builtin:steve" ? null : builtin.texture;
+    guestSlim.value = builtin.slim;
+    return;
+  }
+  guestTextureLoading.value = true;
+  try {
+    const result = await rpc<{ skin: SavedSkin; bytes: number[] | null }>(
+      "resource_manager",
+      {
+        action: { kind: "guest_skin" },
+      },
+    );
+    if (generation !== guestTextureGeneration || result.skin.id !== id) return;
+    guestTexture.value = textureFromBytes(result.bytes);
+    guestSlim.value = result.skin.slim;
+  } catch (error) {
+    if (generation === guestTextureGeneration) {
+      guestTexture.value = null;
+      guestSlim.value = false;
+      guestTextureError.value = message(error);
+    }
+  } finally {
+    if (generation === guestTextureGeneration)
+      guestTextureLoading.value = false;
+  }
+}
+watch(
+  () =>
+    JSON.stringify([
+      guestSkinId.value,
+      snapshot.value.database.accounts.find(
+        (account) => `account:${account.id}` === guestSkinId.value,
+      )?.skin,
+    ]),
+  loadGuestSkin,
+  { immediate: true },
+);
+let guestSkinWrite: Promise<void> = Promise.resolve();
+let accountProfileWrite: Promise<unknown> = Promise.resolve();
+function changeAccountProfile(
+  account: string,
+  request: () => Promise<Account>,
+): Promise<Account> {
+  const write = accountProfileWrite
+    .catch(() => {})
+    .then(async () => {
+      const updated = await request();
+      const index = snapshot.value.database.accounts.findIndex(
+        (item) => item.id === account,
+      );
+      if (index >= 0 && updated.id === account) {
+        accountRevision++;
+        snapshot.value.database.accounts[index] = updated;
+      }
+      return updated;
+    });
+  accountProfileWrite = write;
+  return write;
+}
+function chooseSkin(id: string): Promise<Account | null> {
+  const account = snapshot.value.database.selected_account;
+  if (!account) return chooseGuestSkin(id).then(() => null);
+  return changeAccountProfile(account, () =>
+    rpc<Account>("resource_manager", {
+      action: { kind: "apply_account_skin", account, id },
+    }),
+  );
+}
+function chooseGuestSkin(id: string): Promise<void> {
+  const write = guestSkinWrite
+    .catch(() => {})
+    .then(async () => {
+      const saved = await rpc<string>("resource_manager", {
+        action: { kind: "set_guest_skin", id },
+      });
+      accountRevision++;
+      snapshot.value.database.guest_skin = saved;
+    });
+  guestSkinWrite = write;
+  return write;
+}
+async function refreshGuestSkin() {
+  try {
+    await sync();
+    await loadGuestSkin();
+  } catch (e) {
+    error.value = message(e);
+  }
+}
+const guestNameDraft = ref(guestName.value);
+const guestNameSaving = ref(false);
+const guestNameEditing = ref(false);
+const guestNameInput = ref<HTMLInputElement>();
+const accountNameEditing = ref<string | null>(null);
+const accountNameDraft = ref("");
+const accountNameSaving = ref(false);
+const accountNameInputs = ref<HTMLInputElement[]>([]);
+let accountNameWrite: Promise<void> | null = null;
+const skinDirection = ref(1);
+watch(
+  () => snapshot.value.database.selected_account,
+  (id, previous) => {
+    const order = [
+      null,
+      ...snapshot.value.database.accounts.map((account) => account.id),
+    ];
+    skinDirection.value = order.indexOf(id) >= order.indexOf(previous) ? 1 : -1;
+  },
+);
+let guestNameWrite: Promise<void> | null = null;
+watch(guestName, (name) => {
+  guestNameDraft.value = name;
+});
+const loadAccountTexture = createAccountSkinLoader(async (id) => {
+  const bytes = await rpc<number[] | null>("account_skin", { id });
+  return textureFromBytes(bytes);
 });
 function fetchAccountSkin(id: string): Promise<string | null> {
   const account = snapshot.value.database.accounts.find((a) => a.id === id);
@@ -989,13 +1150,20 @@ let skinAccountId: string | undefined;
 async function loadAccountSkin() {
   const generation = ++skinGeneration;
   const account = selectedAccount.value;
-  if (skinAccountId !== account?.id || !account?.skin) {
+  const identity = account?.id || `guest:${guestSkinId.value}`;
+  if (skinAccountId !== identity || (account && !account.skin)) {
     if (skinTexture.value) avatar.value = "";
     skinTexture.value = null;
   }
-  skinAccountId = account?.id;
+  skinAccountId = identity;
   skinError.value = "";
   skinLoading.value = false;
+  if (!account) {
+    skinTexture.value = guestTexture.value;
+    skinLoading.value = guestTextureLoading.value;
+    skinError.value = guestTextureError.value;
+    return;
+  }
   if (!account?.skin) return;
   skinLoading.value = true;
   try {
@@ -1018,8 +1186,23 @@ watch(
       selectedAccount.value?.id,
       selectedAccount.value?.skin?.url,
       selectedAccount.value?.skin?.slim,
+      ...(!selectedAccount.value
+        ? [
+            guestTexture.value,
+            guestTextureLoading.value,
+            guestTextureError.value,
+          ]
+        : []),
     ].join("|"),
   loadAccountSkin,
+  { immediate: true },
+);
+const skinSlim = computed(
+  () =>
+    !!skinTexture.value &&
+    (selectedAccount.value
+      ? !!selectedAccount.value.skin?.slim
+      : guestSlim.value),
 );
 const skinCaption = computed(() =>
   skinError.value
@@ -1163,6 +1346,79 @@ async function reorderInstance(id: string, beforeId: string | null) {
     instanceOrderSaving.value = false;
   }
 }
+async function reorderVersion(
+  id: string,
+  version: string,
+  beforeId: string | null,
+): Promise<boolean> {
+  if (versionOrderSaving.value) return false;
+  const instance = instances.value.find((instance) => instance.id === id);
+  if (!instance) return false;
+  const previous = instance.versions;
+  const reordered = moveInstanceBefore(previous, version, beforeId);
+  if (reordered.every((item, index) => item.id === previous[index]?.id))
+    return true;
+  instance.versions = reordered;
+  versionOrderSaving.value = true;
+  let saved = false;
+  try {
+    await rpc("move_version", { id, version, before_id: beforeId });
+    saved = true;
+    await sync();
+  } catch (e) {
+    if (!saved) {
+      const current = instances.value.find((item) => item.id === id);
+      const positions = new Map(
+        previous.map((item, index) => [item.id, index]),
+      );
+      if (current)
+        current.versions = [...current.versions].sort(
+          (a, b) =>
+            (positions.get(a.id) ?? Infinity) -
+            (positions.get(b.id) ?? Infinity),
+        );
+    }
+    error.value = message(e);
+    appendLog({ time: stamp(), kind: "error", message: error.value });
+  } finally {
+    versionOrderSaving.value = false;
+  }
+  return saved;
+}
+async function removeDraggedVersion(
+  id: string,
+  version: string,
+): Promise<boolean> {
+  if (
+    busy.value ||
+    versionOrderSaving.value ||
+    snapshot.value.running.includes(id) ||
+    hasInstanceTask(id)
+  )
+    return false;
+  const instance = instances.value.find((item) => item.id === id);
+  if (!instance?.versions.some((item) => item.id === version)) return false;
+  busy.value = true;
+  error.value = "";
+  let removed = false;
+  try {
+    await endLogin();
+    const result = await rpc<Instance>("delete_version", { id, version });
+    removed = true;
+    const current = instances.value.find((item) => item.id === id);
+    if (current) {
+      current.versions = result.versions;
+      current.selected_version = result.selected_version;
+    }
+    await sync();
+  } catch (e) {
+    error.value = message(e);
+    appendLog({ time: stamp(), kind: "error", message: error.value });
+  } finally {
+    busy.value = false;
+  }
+  return removed;
+}
 const stamp = () =>
   new Date().toLocaleTimeString(locale.value, { hour12: false });
 async function rpc<T = unknown>(
@@ -1187,6 +1443,73 @@ const resourceDragging = ref(false);
 const dropVersionMenu = ref<{ revealForDrop: () => void }>();
 const resourceSession = ref<ResourceSession>();
 const versionManager = ref<{ refresh: () => Promise<void> }>();
+const resourceManager = ref<{
+  drop: (paths: string[]) => Promise<void>;
+  refresh: () => Promise<void>;
+}>();
+const libraryBusy = ref(false);
+const librarySkinPreview = ref(false);
+const resourceTransfer = useResourceTransfer({
+  instances: () => instances.value,
+  running: () => snapshot.value.running,
+  busy: () => busy.value || libraryBusy.value || managing.value,
+  copy: copyDraggedResource,
+});
+async function copyDraggedResource(
+  source: ResourceCopySource,
+  target: ResourceDestination,
+) {
+  const copied = await action<boolean>("复制资源", "copy_resource", {
+    source: {
+      kind: source.kind,
+      instance: source.instance,
+      version: source.version,
+      file: source.file,
+    },
+    id: target.instance,
+    version: target.version,
+  });
+  if (copied === undefined) return;
+  notify(
+    copied
+      ? t("已复制 {name} 到 {version}", {
+          name: source.name,
+          version: target.version,
+        })
+      : t("目标版本已有此资源"),
+  );
+  if (copied) {
+    await Promise.all([
+      versionManager.value?.refresh(),
+      resourceManager.value?.refresh(),
+    ]);
+  }
+}
+const managedInitialVersion = ref<string>();
+const managedInitialTab = ref<ContentKind>();
+function openResourceManager() {
+  utility.value = null;
+  showLogs.value = false;
+  error.value = "";
+  libraryBusy.value = false;
+  librarySkinPreview.value = false;
+  modal.value = "library";
+}
+function manageResourceVersion(id: string, version: string, kind: ContentKind) {
+  const instance = instances.value.find((i) => i.id === id);
+  if (!instance) return;
+  manageVersions(instance);
+  managedInitialVersion.value = version;
+  managedInitialTab.value = kind;
+}
+function installGlobalJava(major: number) {
+  return action(
+    "获取 Java",
+    "resource_manager",
+    { action: { kind: "install_java", major } },
+    true,
+  );
+}
 const resourceTask = computed(() =>
   tasks.value.find(
     (task) =>
@@ -1278,6 +1601,11 @@ async function listenForFolders() {
   try {
     const stop = await getCurrentWindow().onDragDropEvent((e) => {
       const payload = e.payload;
+      if (modal.value === "library" && !resourceSession.value) {
+        if (payload.type === "drop")
+          void resourceManager.value?.drop(payload.paths);
+        return;
+      }
       if (
         (payload.type === "enter" || payload.type === "over") &&
         payload.position
@@ -1350,6 +1678,8 @@ async function sync() {
     response.state.database.accounts = snapshot.value.database.accounts;
     response.state.database.selected_account =
       snapshot.value.database.selected_account;
+    response.state.database.guest_name = snapshot.value.database.guest_name;
+    response.state.database.guest_skin = snapshot.value.database.guest_skin;
   }
   // Keep edits made while this snapshot was in flight; still accept game state.
   for (const key of pendingSettings.keys()) {
@@ -1396,6 +1726,13 @@ async function action<T>(
             (version) => version.id === instance.selected_version,
           )
         : undefined;
+    const previousTask = tasks.value.find(
+      (previous) =>
+        previous.operation === op &&
+        previous.version_id === (version?.id ?? null) &&
+        JSON.stringify(previous.arguments) === JSON.stringify(data) &&
+        ["error", "cancelled"].includes(previous.status),
+    );
     const savedProgress = version
       ? Math.max(
           tasks.value.find(
@@ -1405,12 +1742,16 @@ async function action<T>(
           )?.download_progress ?? 0,
           version.download_progress ?? 0,
         )
-      : 0;
+      : (previousTask?.download_progress ?? 0);
     // Only the current workflow needs its detailed file list. Keep compact
     // history for per-version resume progress without retaining old file maps.
-    for (const previous of tasks.value) clearWorkflowFiles(previous.workflow);
+    for (const previous of tasks.value)
+      if (previous !== previousTask) clearWorkflowFiles(previous.workflow);
+    if (previousTask) resumeWorkflow(previousTask.workflow);
     entry = reactive<Task>({
       id: Date.now(),
+      operation: op,
+      arguments: { ...data },
       instance_id: typeof data.id === "string" ? data.id : null,
       version_id: version?.id ?? null,
       resource_task: op === "install_resources" ? String(data.task) : undefined,
@@ -1423,6 +1764,8 @@ async function action<T>(
         "launch",
         "install_resources",
         "download_modpack",
+        "download_declared_mod",
+        "resource_manager",
       ].includes(op),
       title,
       status: "running",
@@ -1430,17 +1773,21 @@ async function action<T>(
       progress: Math.min(99, savedProgress),
       indeterminate: savedProgress <= 0,
       started: stamp(),
-      workflow: createWorkflow(
-        op === "install"
-          ? version?.modpack
-            ? "modpack"
-            : version?.loader
-              ? "loader"
-              : op
-          : op,
-        title,
-      ),
+      workflow:
+        previousTask?.workflow ||
+        createWorkflow(
+          op === "install"
+            ? version?.modpack
+              ? "modpack"
+              : version?.loader
+                ? "loader"
+                : op
+            : op,
+          title,
+        ),
     });
+    if (previousTask)
+      tasks.value = tasks.value.filter((task) => task !== previousTask);
     tasks.value.unshift(entry);
     current.value = entry;
   }
@@ -1935,6 +2282,73 @@ function packNetworkSettings() {
 async function saveCurseforgeKey(key: string) {
   await rpc("save_curseforge_key", { key });
 }
+const retryingFile = ref("");
+async function retryDownloadFile(
+  file: string,
+  task: Task | null | undefined = displayedTask.value,
+) {
+  if (
+    !task ||
+    busy.value ||
+    task.status !== "error" ||
+    !task.workflow.files.get(file)?.retryable
+  )
+    return;
+  busy.value = true;
+  retryingFile.value = file;
+  current.value = task;
+  try {
+    await endLogin();
+    await rpc("retry_download_file", { file });
+    for (const step of task.workflow.steps)
+      if (step.fileCount && step.filesDone === step.fileCount)
+        step.status = "done";
+    task.message = "文件已恢复，点击继续任务完成后续安装";
+  } catch (e) {
+    task.message = message(e);
+    error.value = task.message;
+  } finally {
+    current.value = null;
+    retryingFile.value = "";
+    busy.value = false;
+  }
+}
+async function continueDownloadTask(
+  task: Task | null | undefined = displayedTask.value,
+) {
+  if (
+    !task?.operation ||
+    !task.arguments ||
+    busy.value ||
+    downloadControlBusy.value
+  )
+    return;
+  downloadControlBusy.value = true;
+  try {
+    if (task.operation === "install" && task.instance_id && task.version_id) {
+      await rpc("select_version", {
+        id: task.instance_id,
+        version: task.version_id,
+      });
+      await sync();
+    }
+    downloadControlBusy.value = false;
+    const result = await action<{ path?: string }>(
+      task.title,
+      task.operation,
+      task.arguments,
+      true,
+      task.resource_pausable,
+    );
+    if (result?.path && task.operation === "download_modpack")
+      await openModpack(result.path);
+  } catch (e) {
+    error.value = message(e);
+  } finally {
+    downloadControlBusy.value = false;
+  }
+}
+
 async function supplyPackFiles() {
   const task = displayedTask.value;
   if (!task?.instance_id || !task.version_id || busy.value) return;
@@ -1986,6 +2400,8 @@ function newVersion(instance: Instance) {
   if (!manifest.value && desktop) void loadVersions();
 }
 function manageVersions(instance: Instance) {
+  managedInitialVersion.value = undefined;
+  managedInitialTab.value = undefined;
   error.value = "";
   utility.value = null;
   editing.value = instance;
@@ -1997,6 +2413,8 @@ function switchManagedInstance(id: string) {
   const instance = instances.value.find((item) => item.id === id);
   if (!instance) return;
   error.value = "";
+  managedInitialVersion.value = undefined;
+  managedInitialTab.value = undefined;
   editing.value = instance;
 }
 async function readVersionContentCounts(version: string) {
@@ -2005,6 +2423,53 @@ async function readVersionContentCounts(version: string) {
     version,
   });
 }
+const modActions = {
+  download: (id: string, version: string, key: string) =>
+    action<string>(
+      "下载 Mod",
+      "download_declared_mod",
+      { id, version, key },
+      true,
+      true,
+    ),
+  downloading: (id: string, version: string, key: string) =>
+    current.value?.operation === "download_declared_mod" &&
+    current.value.arguments?.id === id &&
+    current.value.arguments?.version === version &&
+    current.value.arguments?.key === key,
+
+  setEnabled: (id: string, version: string, file: string, enabled: boolean) =>
+    rpc<string>("set_mod_enabled", { id, version, file, enabled }),
+  list: (id: string, version: string, file: string) =>
+    rpc<import("./modManagement").ModConfigFile[]>("mod_config_files", {
+      id,
+      version,
+      file,
+    }),
+  read: (id: string, version: string, file: string, config: string) =>
+    rpc<import("./modManagement").ModConfigDocument>("read_mod_config", {
+      id,
+      version,
+      file,
+      config,
+    }),
+  save: (
+    id: string,
+    version: string,
+    file: string,
+    config: string,
+    revision: string,
+    text: string,
+  ) =>
+    rpc<import("./modManagement").ModConfigDocument>("save_mod_config", {
+      id,
+      version,
+      file,
+      config,
+      revision,
+      text,
+    }),
+};
 const loadVersionContent = createVersionContentLoader(rpc);
 async function prefetchVersionContent(version: string, signal: AbortSignal) {
   return loadVersionContent.preload(editing.value!.id, version, signal);
@@ -2106,6 +2571,8 @@ async function startGame() {
   await prepareAndLaunch(selectedInstance.value, { install, launch });
 }
 async function launch(i: Instance) {
+  if (guestNameWrite) await guestNameWrite;
+  if (accountNameWrite) await accountNameWrite;
   await action("启动游戏", "launch", { id: i.id }, true);
 }
 async function setDownloadPaused(paused: boolean) {
@@ -2210,23 +2677,140 @@ async function login() {
   }
 }
 async function chooseAccount(account: Account) {
+  return chooseIdentity(account.id);
+}
+async function editAccountName(account: Account) {
+  if (busy.value || loginBusy.value || accountNameSaving.value) return;
+  accountNameEditing.value = account.id;
+  accountNameDraft.value = account.username;
+  await nextTick();
+  accountNameInputs.value[0]?.focus();
+  accountNameInputs.value[0]?.select();
+}
+function cancelAccountNameEdit() {
+  accountNameEditing.value = null;
+  accountNameDraft.value = "";
+}
+function blurAccountName(event: FocusEvent) {
+  if (
+    !accountNameSaving.value &&
+    !accountNameError.value &&
+    !(event.currentTarget as HTMLElement).contains(
+      event.relatedTarget as Node | null,
+    )
+  )
+    cancelAccountNameEdit();
+}
+function saveAccountName(): Promise<void> {
+  if (accountNameWrite) return accountNameWrite;
+  const id = accountNameEditing.value;
+  const account = snapshot.value.database.accounts.find(
+    (item) => item.id === id,
+  );
+  if (!id || !account || busy.value || loginBusy.value)
+    return Promise.resolve();
+  const name = accountNameDraft.value.trim();
+  if (name === account.username) {
+    cancelAccountNameEdit();
+    return Promise.resolve();
+  }
+  if (!/^[A-Za-z0-9_]{3,16}$/.test(name)) {
+    error.value = "";
+    accountNameError.value = t(
+      "Java 版玩家名称须为 3–16 位英文字母、数字或下划线",
+    );
+    return Promise.resolve();
+  }
+  accountNameSaving.value = true;
+  error.value = "";
+  accountNameWrite = changeAccountProfile(id, () =>
+    rpc<Account>("rename_account", { id, name }),
+  )
+    .then(() => {
+      accountNameError.value = "";
+      if (accountNameEditing.value === id) cancelAccountNameEdit();
+    })
+    .catch((e) => {
+      error.value = "";
+      accountNameError.value = message(e);
+    })
+    .finally(() => {
+      accountNameSaving.value = false;
+      accountNameWrite = null;
+    });
+  return accountNameWrite;
+}
+async function editGuestName() {
+  if (busy.value || loginBusy.value || guestNameSaving.value) return;
+  guestNameDraft.value = guestName.value;
+  guestNameEditing.value = true;
+  await nextTick();
+  guestNameInput.value?.focus();
+  guestNameInput.value?.select();
+}
+async function finishGuestNameEdit() {
+  await saveGuestName();
+  if (guestNameDraft.value.trim() === guestName.value)
+    guestNameEditing.value = false;
+}
+function cancelGuestNameEdit() {
+  guestNameDraft.value = guestName.value;
+  guestNameEditing.value = false;
+}
+watch(utility, (panel) => {
+  if (panel !== "accounts") {
+    guestNameEditing.value = false;
+    cancelAccountNameEdit();
+  }
+});
+async function chooseIdentity(id: string | null) {
   if (busy.value || loginBusy.value) return;
-  if (account.id === snapshot.value.database.selected_account) {
-    utility.value = null;
+  if (id === snapshot.value.database.selected_account) {
+    if (id !== null) utility.value = null;
     return;
   }
   busy.value = true;
   error.value = "";
   try {
-    await rpc("select_account", { id: account.id });
+    await rpc("select_account", { id });
     accountRevision++;
-    snapshot.value.database.selected_account = account.id;
-    utility.value = null;
+    snapshot.value.database.selected_account = id;
+    if (id !== null) utility.value = null;
   } catch (e) {
     error.value = message(e);
   } finally {
     busy.value = false;
   }
+}
+function saveGuestName(): Promise<void> {
+  if (guestNameWrite) return guestNameWrite;
+  if (busy.value || loginBusy.value) return Promise.resolve();
+  const name = guestNameDraft.value.trim();
+  if (name === guestName.value) {
+    guestNameDraft.value = name;
+    return Promise.resolve();
+  }
+  if (!/^[A-Za-z0-9_]{1,16}$/.test(name)) {
+    error.value = t("游客名称须为 1–16 位英文字母、数字或下划线");
+    return Promise.resolve();
+  }
+  guestNameSaving.value = true;
+  error.value = "";
+  // A blur save must not disable the account/avatar that the user just clicked.
+  guestNameWrite = (async () => {
+    try {
+      const saved = await rpc<string>("set_guest_name", { name });
+      accountRevision++;
+      snapshot.value.database.guest_name = saved;
+      guestNameDraft.value = saved;
+    } catch (e) {
+      error.value = message(e);
+    } finally {
+      guestNameSaving.value = false;
+      guestNameWrite = null;
+    }
+  })();
+  return guestNameWrite;
 }
 function persistSettings(): Promise<void> {
   if (settingsWrite) return settingsWrite;
@@ -2302,6 +2886,12 @@ async function copy(text: string) {
     error.value = "无法访问剪贴板，请手动选择并复制。";
   }
 }
+const crashReports = new Map<string, import("./types").CrashReport | null>();
+const diagnosisRevision = ref(0);
+async function loadDiagnosis(id: string) {
+  if (crashReports.has(id)) return crashReports.get(id) || null;
+  return rpc<import("./types").CrashReport | null>("crash_report", { id });
+}
 function onEvent(e: LauncherEvent) {
   if (e.kind === "download_progress_recovered") {
     void sync();
@@ -2314,13 +2904,14 @@ function onEvent(e: LauncherEvent) {
     applyWorkflowEvent(current.value.workflow, e);
     if (current.value.status === "paused")
       setWorkflowPaused(current.value.workflow, true);
-    if (e.kind === "stage" || e.kind === "workflow") {
+    if (!retryingFile.value && (e.kind === "stage" || e.kind === "workflow")) {
       current.value.progress = current.value.version_id
         ? current.value.download_progress
         : 0;
       current.value.indeterminate = current.value.progress <= 0;
     }
     if (
+      !retryingFile.value &&
       e.kind === "progress" &&
       e.total > 0 &&
       e.overall_progress === undefined
@@ -2363,6 +2954,7 @@ function onEvent(e: LauncherEvent) {
       }
     }
     if (
+      !retryingFile.value &&
       typeof e.overall_progress === "number" &&
       Number.isFinite(e.overall_progress)
     ) {
@@ -2384,7 +2976,17 @@ function onEvent(e: LauncherEvent) {
       instanceId: e.instance_id,
     });
   }
-  if (e.kind === "game_crash") openLogs(e.instance_id || "all");
+  if (e.kind === "game_started" && e.instance_id) {
+    crashReports.set(e.instance_id, null);
+    diagnosisRevision.value++;
+  }
+  if (e.kind === "game_crash") {
+    if (e.instance_id) {
+      crashReports.set(e.instance_id, e.crash || null);
+      diagnosisRevision.value++;
+    }
+    openLogs(e.instance_id || "all");
+  }
   if (["game_started", "game_exit", "game_crash"].includes(e.kind)) void sync();
 }
 onMounted(async () => {
@@ -2435,6 +3037,11 @@ onUnmounted(() => {
 
 <template>
   <div class="shell" :data-theme="theme">
+    <ResourceTransferOverlay
+      :drag="resourceTransfer"
+      :instances="instances"
+      :running="snapshot.running"
+    />
     <ErrorNotice
       :message="visibleError || loaderNotice"
       :informational="!visibleError && !!loaderNotice"
@@ -2459,10 +3066,14 @@ onUnmounted(() => {
         <span class="account-avatar"
           ><img v-if="avatar" :src="avatar" alt="" /><UsersRound
             v-else
-            :size="25"
+            :size="25" /><UserRound
+            v-if="!selectedAccount"
+            class="guest-avatar-mark"
+            :size="11"
+            aria-hidden="true"
         /></span>
         <span class="account-identity">
-          <strong>{{ selectedAccount?.username || "Player" }}</strong>
+          <strong>{{ selectedAccount?.username || guestName }}</strong>
           <span
             v-if="selectedAccount"
             class="account-status"
@@ -2473,7 +3084,7 @@ onUnmounted(() => {
                 : t("待刷新")
             }}</span
           >
-          <span v-else class="account-status"> {{ t("未登录") }} </span>
+          <span v-else class="account-status"> {{ t("游客") }} </span>
         </span>
         <ChevronDown class="account-chevron" :size="14" />
       </button>
@@ -2481,6 +3092,15 @@ onUnmounted(() => {
         <button
           class="icon-button ui-reveal-item"
           :style="listRevealStyle(1)"
+          :title="t('资源管理')"
+          :aria-label="t('资源管理')"
+          @click="openResourceManager"
+        >
+          <Boxes :size="20" />
+        </button>
+        <button
+          class="icon-button ui-reveal-item"
+          :style="listRevealStyle(2)"
           :title="t('全局设置')"
           :aria-label="t('全局设置')"
           @click="toggleUtility('settings')"
@@ -2489,7 +3109,7 @@ onUnmounted(() => {
         </button>
         <button
           class="icon-button ui-reveal-item"
-          :style="listRevealStyle(2)"
+          :style="listRevealStyle(3)"
           :title="t('运行日志')"
           :aria-label="t('运行日志')"
           @click="openLogs()"
@@ -2499,17 +3119,25 @@ onUnmounted(() => {
       </div>
     </header>
 
-    <main class="workspace" :aria-label="t('玩家皮肤预览')">
+    <main
+      class="workspace"
+      :style="{ opacity: modal === 'library' && librarySkinPreview ? 0 : 1 }"
+      :aria-label="t('玩家皮肤预览')"
+    >
       <SkinStage
+        idle
+        playful
+        :identity="selectedAccount?.id || `guest:${guestSkinId}`"
+        :direction="skinDirection"
         :texture="skinTexture"
-        :slim="!!skinTexture && !!selectedAccount?.skin?.slim"
+        :slim="skinSlim"
         :loading="skinLoading"
         :paused="!!modal || !!utility || showLogs"
         :caption="t(skinCaption)"
         :issue="translateMessage(skinError)"
         @avatar="updateAvatar"
         @failed="skinError = $event"
-        @retry="loadAccountSkin"
+        @retry="selectedAccount ? loadAccountSkin() : loadGuestSkin()"
       />
     </main>
 
@@ -2794,8 +3422,10 @@ onUnmounted(() => {
               v-if="selectedVersion"
               :instance="selectedInstance"
               :tasks="tasks"
-              :locked="busy || selectedRunning"
+              :locked="busy || selectedRunning || versionOrderSaving"
               :disabled="!selectedInstance || !!modal || !!utility || showLogs"
+              :move-version="reorderVersion"
+              :remove-version="removeDraggedVersion"
               @select="
                 selectedInstance && selectVersion(selectedInstance, $event)
               "
@@ -2996,10 +3626,66 @@ onUnmounted(() => {
                   :aria-label="t('选择启动账户')"
                 >
                   <div
+                    key="guest"
+                    class="account-choice account-guest list-reveal-item"
+                    :style="listRevealStyle(0)"
+                  >
+                    <button
+                      class="account-select"
+                      :class="{
+                        current: snapshot.database.selected_account === null,
+                      }"
+                      :disabled="busy || loginBusy"
+                      :aria-pressed="
+                        snapshot.database.selected_account === null
+                      "
+                      :aria-label="
+                        t('以游客身份启动 · {name}', { name: guestName })
+                      "
+                      @click="chooseIdentity(null)"
+                    >
+                      <span class="account-avatar-frame">
+                        <AccountAvatar
+                          :load-texture="fetchAccountSkin"
+                          :texture="guestTexture"
+                        />
+                        <UserRound
+                          class="guest-avatar-mark"
+                          :size="14"
+                          aria-hidden="true"
+                        />
+                      </span>
+                    </button>
+                    <input
+                      v-if="guestNameEditing"
+                      ref="guestNameInput"
+                      v-model="guestNameDraft"
+                      class="guest-name-input"
+                      :aria-label="t('游客名称')"
+                      :readonly="guestNameSaving"
+                      maxlength="16"
+                      autocomplete="off"
+                      autocapitalize="off"
+                      :spellcheck="false"
+                      @blur="finishGuestNameEdit"
+                      @keydown.enter.prevent="finishGuestNameEdit"
+                      @keydown.esc.stop.prevent="cancelGuestNameEdit"
+                    />
+                    <button
+                      v-else
+                      class="account-name guest-name-button"
+                      :disabled="busy || loginBusy || guestNameSaving"
+                      :aria-label="t('修改游客名称')"
+                      @click.stop="editGuestName"
+                    >
+                      {{ t("游客 · {name}", { name: guestName }) }}
+                    </button>
+                  </div>
+                  <div
                     v-for="(account, index) in snapshot.database.accounts"
                     :key="account.id"
                     class="account-choice list-reveal-item"
-                    :style="listRevealStyle(index)"
+                    :style="listRevealStyle(index + 1)"
                   >
                     <button
                       class="account-select"
@@ -3029,7 +3715,52 @@ onUnmounted(() => {
                           :load-texture="fetchAccountSkin"
                         />
                       </span>
-                      <span class="account-name">{{ account.username }}</span>
+                    </button>
+                    <div
+                      v-if="accountNameEditing === account.id"
+                      class="account-name-editor"
+                      :aria-busy="accountNameSaving"
+                      @focusout="blurAccountName"
+                      @keydown.esc.stop.prevent="cancelAccountNameEdit"
+                    >
+                      <input
+                        ref="accountNameInputs"
+                        v-model="accountNameDraft"
+                        :aria-label="t('Java 版玩家名称')"
+                        aria-describedby="account-name-hint"
+                        :readonly="accountNameSaving"
+                        maxlength="16"
+                        autocomplete="off"
+                        autocapitalize="off"
+                        :spellcheck="false"
+                        @keydown.enter.prevent="saveAccountName"
+                      />
+                      <button
+                        class="icon-button"
+                        :disabled="accountNameSaving"
+                        :title="t('确认改名')"
+                        :aria-label="t('确认改名')"
+                        @pointerdown.prevent
+                        @click.stop="saveAccountName"
+                      >
+                        <LoaderCircle
+                          v-if="accountNameSaving"
+                          :size="13"
+                          class="spin"
+                        />
+                        <Check v-else :size="13" />
+                      </button>
+                    </div>
+                    <button
+                      v-else
+                      class="account-name account-name-button"
+                      :disabled="busy || loginBusy || accountNameSaving"
+                      :aria-label="
+                        t('{name} · 点击修改名称', { name: account.username })
+                      "
+                      @click.stop="editAccountName(account)"
+                    >
+                      {{ account.username }}
                     </button>
                     <button
                       class="icon-button account-remove"
@@ -3048,7 +3779,9 @@ onUnmounted(() => {
                   <button
                     key="add-account"
                     class="account-add list-reveal-item"
-                    :style="listRevealStyle(snapshot.database.accounts.length)"
+                    :style="
+                      listRevealStyle(snapshot.database.accounts.length + 1)
+                    "
                     :disabled="busy || loginBusy"
                     :aria-busy="loginBusy"
                     :aria-label="t('添加微软账户')"
@@ -3063,6 +3796,15 @@ onUnmounted(() => {
                     /></span>
                   </button>
                 </TransitionGroup>
+                <Transition name="selection-text">
+                  <p
+                    v-if="accountNameEditing"
+                    id="account-name-hint"
+                    class="account-name-hint"
+                  >
+                    {{ t("30天可修改一次") }}
+                  </p>
+                </Transition>
               </template>
             </ContentSwitch>
 
@@ -3071,6 +3813,10 @@ onUnmounted(() => {
                 v-if="displayedTask"
                 :task="displayedTask"
                 :control-pending="downloadControlBusy"
+                :retrying="retryingFile"
+                :retry-enabled="!busy && !downloadControlBusy"
+                @retry="retryDownloadFile"
+                @continue="continueDownloadTask"
                 :name="taskInstance?.name || t(displayedTask.title)"
                 :version="
                   versionName(
@@ -3341,7 +4087,7 @@ onUnmounted(() => {
                         <span
                           class="network-range-fill"
                           :style="{
-                            width: `calc((100% - 12px) * ${(settings.concurrency - 1) / 31})`,
+                            width: `calc((100% - 12px) * ${(settings.concurrency - 1) / 255})`,
                           }"
                           aria-hidden="true"
                         />
@@ -3350,7 +4096,7 @@ onUnmounted(() => {
                           v-model.number="settings.concurrency"
                           type="range"
                           min="1"
-                          max="32"
+                          max="256"
                           step="1"
                           :disabled="settings.adaptive_concurrency"
                           :aria-valuetext="
@@ -3362,7 +4108,7 @@ onUnmounted(() => {
                         <output
                           for="settings-concurrency"
                           :style="{
-                            left: `calc(6px + (100% - 12px) * ${(settings.concurrency - 1) / 31})`,
+                            left: `calc(6px + (100% - 12px) * ${(settings.concurrency - 1) / 255})`,
                           }"
                           >{{ settings.concurrency }}</output
                         >
@@ -3496,6 +4242,8 @@ onUnmounted(() => {
       >
         <LogPanel
           :store="logStore"
+          :load-diagnosis="loadDiagnosis"
+          :diagnosis-revision="diagnosisRevision"
           :instances="snapshot.database.instances"
           :initial-scope="logScope"
           :session="logSession"
@@ -3521,17 +4269,42 @@ onUnmounted(() => {
         v-if="modal"
         :label="modal === 'edit' ? form.name : t(modalTitles[modal])"
         :locked="
-          modal === 'manage'
-            ? managing
-            : modal === 'version'
-              ? downloadSubmitting
-              : modal !== 'edit' && busy
+          modal === 'library'
+            ? libraryBusy
+            : modal === 'manage'
+              ? managing
+              : modal === 'version'
+                ? downloadSubmitting
+                : modal !== 'edit' && busy
         "
         @close="modal = null"
       >
+        <ResourceManager
+          v-if="modal === 'library'"
+          ref="resourceManager"
+          :rpc="rpc"
+          :busy="busy"
+          :running="snapshot.running"
+          :mod-actions="modActions"
+          :install-java="installGlobalJava"
+          :accounts="snapshot.database.accounts"
+          :selected-account="snapshot.database.selected_account"
+          :guest-skin="guestSkinId"
+          :guest-name="guestName"
+          :select-skin="chooseSkin"
+          :load-account-skin="fetchAccountSkin"
+          @busy="libraryBusy = $event"
+          @skin-preview="librarySkinPreview = $event"
+          @skin-changed="refreshGuestSkin"
+          @error="error = message($event)"
+          @close="modal = null"
+          @manage="manageResourceVersion"
+        />
         <VersionManager
           ref="versionManager"
-          v-if="modal === 'manage' && managedInstance"
+          v-else-if="modal === 'manage' && managedInstance"
+          :initial-version="managedInitialVersion"
+          :initial-tab="managedInitialTab"
           :instance="managedInstance"
           :instances="instances"
           :locked="busy || snapshot.running.includes(managedInstance.id)"
@@ -3540,7 +4313,13 @@ onUnmounted(() => {
             current?.instance_id === managedInstance.id &&
             current?.status === 'running'
           "
-          :download-version="current?.version_id || undefined"
+          :download-version="
+            current?.version_id ||
+            (current?.operation === 'download_declared_mod'
+              ? String(current.arguments?.version || '')
+              : undefined)
+          "
+          :mod-actions="modActions"
           :load-content="readVersionContent"
           :prefetch-content="prefetchVersionContent"
           :load-content-metadata="readContentMetadata"
@@ -3624,6 +4403,10 @@ onUnmounted(() => {
               @close="modal = null"
               :task="modpackDownloadTask"
               :control-pending="downloadControlBusy"
+              :retrying="retryingFile"
+              :retry-enabled="!busy && !downloadControlBusy"
+              @retry="retryDownloadFile($event, modpackDownloadTask)"
+              @continue="continueDownloadTask(modpackDownloadTask)"
               @error="error = message($event)"
               @link="openLink"
               @import="openModpack()"
@@ -3660,6 +4443,10 @@ onUnmounted(() => {
                 :install="installResources"
                 :task="additionResourceTask"
                 :control-pending="downloadControlBusy"
+                :retrying="retryingFile"
+                :retry-enabled="!busy && !downloadControlBusy"
+                @retry="retryDownloadFile($event, additionResourceTask)"
+                @continue="continueDownloadTask(additionResourceTask)"
                 @error="error = message($event)"
                 @link="openLink"
                 @installed="resourcesInstalled"
@@ -3737,7 +4524,7 @@ onUnmounted(() => {
                   ? t("仅从列表移除「{name}」，原目录和游戏文件保留在原处。", {
                       name: editing.name,
                     })
-                  : t("「{name}」将移至回收目录，游戏文件会保留。", {
+                  : t("「{name}」将移入系统回收站，可在其中恢复或清空。", {
                       name: editing?.name || "",
                     })
               }}
@@ -3922,6 +4709,10 @@ onUnmounted(() => {
           :busy="busy"
           :task="resourceTask"
           :control-pending="downloadControlBusy"
+          :retrying="retryingFile"
+          :retry-enabled="!busy && !downloadControlBusy"
+          @retry="retryDownloadFile($event, resourceTask)"
+          @continue="continueDownloadTask(resourceTask)"
           :rpc="rpc"
           :prepare="prepareResources"
           :install="installResources"

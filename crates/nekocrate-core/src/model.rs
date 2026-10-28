@@ -155,6 +155,10 @@ pub struct Database {
     pub instances: Vec<Instance>,
     pub accounts: Vec<Account>,
     pub selected_account: Option<String>,
+    /// Display name of the persistent local player; independent of Microsoft accounts.
+    pub guest_name: String,
+    /// Launcher preview only; separate from the Microsoft account and game identity.
+    pub guest_skin: String,
 }
 impl Default for Database {
     fn default() -> Self {
@@ -164,6 +168,8 @@ impl Default for Database {
             instances: vec![],
             accounts: vec![],
             selected_account: None,
+            guest_name: "Player".into(),
+            guest_skin: "builtin:steve".into(),
         }
     }
 }
@@ -301,6 +307,10 @@ pub struct AssetIndex {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct FileProgress {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "is_false")]
+    pub retryable: bool,
     pub id: String,
     pub name: String,
     pub downloaded: u64,
@@ -319,6 +329,8 @@ fn is_zero(value: &u64) -> bool {
 
 #[derive(Clone, Debug, Serialize)]
 pub struct Event {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub crash: Option<crate::crash::CrashReport>,
     pub kind: String,
     pub message: String,
     pub instance_id: Option<String>,
@@ -339,6 +351,7 @@ pub struct Event {
 impl Event {
     pub fn new(kind: &str, message: impl Into<String>) -> Self {
         Self {
+            crash: None,
             kind: kind.into(),
             message: message.into(),
             instance_id: None,

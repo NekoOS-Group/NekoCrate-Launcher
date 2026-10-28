@@ -93,6 +93,7 @@ pub(super) fn merge(
                 enabled: true,
                 size: declared.size,
                 mod_ids: vec![],
+                has_metadata: Some(false),
                 declaration: Some(declaration),
             });
         }
