@@ -179,13 +179,13 @@ Java 自动匹配考虑版本、架构与模组约束：旧 macOS Intel natives 
 
 `resources` 根据 `version_management::content_location` 使用真正的运行目录，兼容共享目录、HMCL 配置及隔离版本；界面提示共享关系。Mods、资源包、光影分别进入 `mods`、`resourcepacks`、`shaderpacks`。数据包必须选择当前运行目录中的现有存档，写入 `saves/<world>/datapacks`，不误放到不会自动加载的全局 datapacks。地图目录或 ZIP 写入 `saves/<name>`；单一外层包装目录会去掉。兼具 assets/data 的包要求选择类型。本地 Mod 检查加载器和重复 ID，但不声称能完整推断任意本地 JAR 的游戏兼容性、复杂版本范围或平台项目 ID。
 
-在线浏览按目标 Minecraft 版本和加载器过滤，提供平台、资源类型、文字搜索、分页和版本选择。Modrinth/CurseForge 返回统一项目、版本、文件和依赖结构。必要依赖递归展开、去重并限制规模；固定版本冲突、声明不兼容关系、已安装的其他版本和文件冲突会阻止安装。可选依赖只记录，不自动安装；已有受管理且兼容的必要前置优先复用。接口元数据按请求 URL 缓存十分钟，查询错误不缓存。CurseForge 需要网络设置中的 API Key；尊重作者的分发许可和缺失的下载地址。Key 只放敏感请求头，元数据接口禁止重定向；CDN 下载仅向明确允许的官方 HTTPS 主机发送，跳转时重新检查，不写入计划、来源记录或 URL。
+在线浏览按目标 Minecraft 版本和加载器过滤，提供平台、资源类型、文字搜索、分页和版本选择。Modrinth/CurseForge 返回统一项目、版本、文件和依赖结构。必要依赖递归展开、去重并限制规模；固定版本冲突、声明不兼容关系、已安装的其他版本和文件冲突会阻止安装。可选依赖只记录，不自动安装；已有受管理且兼容的必要前置优先复用。接口元数据按请求 URL 缓存十分钟，查询错误不缓存。CurseForge 使用发布时通过 `CURSEFORGE_API_KEY` 注入的应用凭据，无用户配置入口；尊重作者的分发许可和缺失的下载地址。Key 只放敏感请求头，元数据接口禁止重定向；CDN 下载仅向明确允许的官方 HTTPS 主机发送，跳转时重新检查，不写入计划、来源记录或 URL。
 
 预览清单保存在实际运行目录的 `.nekocrate/resource-tasks/<uuid>/plan.json`。点击安装后才计入未完成任务；失败、取消和重启后可以继续。远程文件复用下载器的并发、重试、暂停、断点、校验与对象缓存，本地复制支持取消和进度事件。全部内容先在同卷任务目录暂存，通过校验和 Mod ID 冲突检查后再发布；不会覆盖已有不同文件。发布前持久化内容哈希，进程中断后已发布且一致的文件可识别为复用；普通提交错误回退本次新建文件，保留下载缓存。ZIP 和目录拒绝越界路径、符号链接、大小写冲突及超限内容。源文件保持原位。
 
 `.nekocrate/resources.json` 按相对路径保存平台、项目 ID、版本 ID、依赖、SHA-256、可用的 SHA-1 与安装时间。记录随游戏目录移动，版本管理展开内容时显示安装来源。内容行文件名只展示，不打开文件管理器；底部实际内容目录带文件夹图标，点击按实例、版本和分类重新解析并打开目录，不创建缺失目录。该记录是后续更新和卸载的基础，本次没有自动升级、卸载或替换已有 Mod；本地导入不伪造在线来源。
 
-回归：`cargo test -p nekocrate-core resources:: --lib` 使用临时游戏目录与离线 API 缓存；公开接口联调单独运行 `cargo test -p nekocrate-core live_modrinth_search_versions_and_dependency_preview -- --ignored`。CurseForge 的解析与凭据隔离有离线覆盖，完整在线安装须在应用 Key 获批后验证。
+回归：`cargo test -p nekocrate-core resources:: --lib` 使用临时游戏目录与离线 API 缓存；公开接口联调单独运行 `cargo test -p nekocrate-core live_modrinth_search_versions_and_dependency_preview -- --ignored`。CurseForge 的解析与凭据隔离有离线覆盖；注入构建凭据后，`cargo test -p nekocrate-core live_curseforge_build_credential_search_and_files -- --ignored` 验证真实搜索和文件目录接口，不安装整合包。应用 Key 已获批并通过此联调，作者限制第三方分发的文件仍需手动补齐。
 
 来源调研（2026-10-23）：[Modrinth](https://docs.modrinth.com/api/) 提供公开搜索、版本与文件信息；[CurseForge](https://docs.curseforge.com/rest-api/) 提供 Mod 和文件接口，需应用 API Key，且[官方公告](https://blog.curseforge.com/introducing-api-key-authentication-for-curseforge-file-downloads/)要求 CDN 下载也使用有效 Key；[BBSMC](https://bbsmc.net/) 是中文资源社区，其[官方仓库](https://github.com/bbsmc/app/tree/main/apps/docs)提供开发者文档与 API 规范。MC 百科更适合中文资料检索；GitHub Releases 属于按项目发布的来源，暂不作为统一 Mod 平台选项。MCIM 的[现行仓库](https://github.com/mcmod-info-mirror/mcim-rust-api)标注服务暂停及文件下载不可用，未列入选项。
 

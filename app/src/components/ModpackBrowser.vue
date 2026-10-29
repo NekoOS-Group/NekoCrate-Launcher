@@ -47,7 +47,6 @@ const emit = defineEmits<{
   error: [value: unknown];
   link: [url: string];
   import: [];
-  settings: [];
   pause: [];
   resume: [];
   cancel: [];
@@ -274,14 +273,6 @@ onBeforeUnmount(() => {
                 search();
               "
           /></label>
-          <button
-            v-if="platform === 'curseforge'"
-            class="text-button pack-key"
-            :disabled="blocked"
-            @click="emit('settings')"
-          >
-            {{ t("网络设置") }}
-          </button>
         </div>
         <ContentSwitch
           class="pack-main"
@@ -480,11 +471,6 @@ onBeforeUnmount(() => {
   border-bottom: 1px solid var(--line);
   border-radius: 0;
   font-size: 13px;
-}
-.pack-key {
-  margin-left: auto;
-  font-size: 11px;
-  white-space: nowrap;
 }
 .pack-main {
   flex: 1;

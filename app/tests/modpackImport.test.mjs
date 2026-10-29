@@ -10,7 +10,6 @@ const preview = {
     loader: { kind: "fabric", version: "0.16.10" },
     files: [],
   },
-  curseforge_key_configured: true,
 };
 test("archive drop opens pack preview instead of recursively importing directories", async () => {
   const f = await settingsFixture();
@@ -26,12 +25,12 @@ test("archive drop opens pack preview instead of recursively importing directori
     f.dispose();
   }
 });
-test("missing CurseForge key creates a resumable version without attempting an install", async () => {
+test("CurseForge import installs immediately without a user credential gate", async () => {
   const f = await settingsFixture();
   try {
     f.handlers.preview_modpack = () => ({
       ...preview,
-      curseforge_key_configured: false,
+      pack: { ...preview.pack, format: "curseforge" },
     });
     f.handlers.prepare_modpack = (request) => {
       assert.equal(request.id, "instance-a");
@@ -48,7 +47,7 @@ test("missing CurseForge key creates a resumable version without attempting an i
     await f.context.openModpack("/packs/test.zip");
     await f.context.submitModpack("My pack", []);
     assert.equal(f.context.modal.value, null);
-    assert.equal(f.calls.filter((r) => r.op === "install").length, 0);
+    assert.equal(f.calls.filter((r) => r.op === "install").length, 1);
     assert.equal(f.state.database.instances[0].selected_version, "pack-test");
   } finally {
     f.dispose();

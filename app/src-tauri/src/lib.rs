@@ -168,10 +168,6 @@ enum Request {
         version: String,
         paths: Vec<PathBuf>,
     },
-    CurseforgeKeyStatus,
-    SaveCurseforgeKey {
-        key: ProxyPassword,
-    },
     Java,
     MemoryOptions {
         id: String,
@@ -513,8 +509,6 @@ fn dispatch<'a>(
             Request::PrepareModpack{id,path,name,optional}=>{let (_cancel,_guard)=state.job().await?;json!(launcher.prepare_modpack(&id,&path,&name,&optional).await?)},
             Request::ModpackStatus{id,version}=>json!(launcher.modpack_status(&id,&version).await?),
             Request::SupplyModpackFiles{id,version,paths}=>{let (_cancel,_guard)=state.job().await?;json!(launcher.supply_modpack_files(&id,&version,paths).await?)},
-            Request::CurseforgeKeyStatus=>json!(launcher.curseforge_key_configured()?),
-            Request::SaveCurseforgeKey{key}=>{ launcher.save_curseforge_key(&key.0)?; json!(true) },
             Request::Java=>json!(nekocrate_core::java::discover(launcher.root()).await),
             Request::MemoryOptions{id}=>{
                 let launcher = launcher.clone();

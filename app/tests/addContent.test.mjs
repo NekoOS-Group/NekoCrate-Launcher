@@ -17,7 +17,6 @@ const archive = {
       loader: null,
       files: [],
     },
-    curseforge_key_configured: true,
   },
 };
 

@@ -267,10 +267,8 @@ impl Launcher {
             .iter()
             .any(|e| e.origin.platform == Platform::Curseforge)
         {
-            let key = self
-                .curseforge_key()?
-                .context("需要配置 CurseForge API Key")?;
-            downloader = downloader.with_curseforge_key(self.root(), &self.settings(), &key)?;
+            let key = crate::curseforge::key()?;
+            downloader = downloader.with_curseforge_key(self.root(), &self.settings(), key)?;
         }
         sink(Event::workflow("resource_files", "下载与暂存资源"));
         let stage = safe_join(&directory, "stage")?;

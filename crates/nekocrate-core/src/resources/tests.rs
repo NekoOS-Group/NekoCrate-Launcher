@@ -878,6 +878,33 @@ async fn online_modpack_uses_verified_archive_cache_and_waits_for_installation_r
 }
 
 #[tokio::test]
+#[ignore = "requires a build-injected application credential and read-only CurseForge API access"]
+async fn live_curseforge_build_credential_search_and_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let launcher = Launcher::open(Some(temp.path().join("launcher"))).unwrap();
+    let cancel = CancellationToken::new();
+    let result = launcher
+        .search_modpacks(Platform::Curseforge, "", 0, &cancel)
+        .await
+        .unwrap();
+    let project = &result.hits.first().expect("Minecraft modpacks").id;
+    let provider = provider::Provider::new(&launcher, Platform::Curseforge).unwrap();
+    let files = provider
+        .get(
+            &format!("mods/{project}/files"),
+            &[("pageSize", "1".into())],
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert!(!files["data"].as_array().unwrap().is_empty());
+    let key = crate::curseforge::key().unwrap();
+    assert!(!serde_json::to_string(&result).unwrap().contains(key));
+    assert!(!serde_json::to_string(&files).unwrap().contains(key));
+    assert!(launcher.snapshot().database.instances.is_empty());
+}
+
+#[tokio::test]
 #[ignore = "requires public Modrinth APIs and downloads one archive into a temporary directory"]
 async fn live_online_modpack_search_download_and_preview() {
     let temp = tempfile::tempdir().unwrap();

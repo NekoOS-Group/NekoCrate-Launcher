@@ -25,7 +25,7 @@
 
 ## 支持边界
 
-- 普通游戏下载页可选择原版、Fabric、Forge、NeoForge；加载器版本目录缓存一小时，联网失败时复用已有目录。支持导入 Modrinth / CurseForge 整合包；不自动添加 Fabric API 或未声明的其他模组。CurseForge 文件解析仍需要配置应用 API Key。
+- 普通游戏下载页可选择原版、Fabric、Forge、NeoForge；加载器版本目录缓存一小时，联网失败时复用已有目录。支持导入 Modrinth / CurseForge 整合包；不自动添加 Fabric API 或未声明的其他模组。CurseForge 使用官方构建内置的应用凭据，无需用户填写密钥；作者限制第三方分发的文件仍需手动补齐。
 - 新建加载器版本使用 `versions/<版本>` 隔离 Mods、配置和存档，安装记录保存在其 `.nekocrate/loader.json`；暂停时终止正在运行的 Java 安装步骤，继续时重跑该步骤，已校验完成的步骤保留。支持修复本启动器安装的加载器；不原地升级或替换已有整合包加载器，不覆盖同名的外部版本。
 - Forge 安装支持含 `install_profile.json` 的新旧安装器格式，早于 1.6 的传统分发包不在选择列表中；没有逐个历史构建做实机验证。
 - 已有关联目录会在启动器启动时重新识别版本。支持 `inheritsFrom` 和 HMCL 合并配置；有隔离目录的整合包保留 `versions/<子实例>` 中的模组、配置和存档，原版及已有普通版本继续沿用原工作目录。
@@ -81,7 +81,7 @@ npm --prefix app run tauri build -- --config src-tauri/tauri.local.conf.json
 
 Linux CI 和发布构建使用固定 digest 的 Ubuntu 22.04 预装依赖镜像。镜像升级前在全新的 runner 上比较三次 apt 安装与三次冷拉取；构建缓存自动保留各平台最新代次，定期清理旧标签范围与重复代次。规则、实测数据、手动操作和发布文件说明见 [构建基础设施](docs/build-infrastructure.md)。
 
-开发版本发布由 `.github/workflows/release.yml` 管理：先将提交推送到 `neko_dev` / `main`，再推送 `dev*` 标签；标签任务将构建调度到默认分支，复用跨版本的 Rust 发布缓存（手动发布也选择默认分支），实际源码仍固定为标签提交；发布等待相同提交的 CI 成功，直接复用其前端产物，不再安装前端依赖、重跑检查或重建前端。三个原生 runner 仅安装锁定版本的 Tauri CLI，在编译前检查前端入口与资源，编译后执行实际二进制的 `--verify-frontend`，验证内嵌资源及 IPC 异步对象大小，不打开窗口或用户数据；分别编译并打包 macOS ARM64、Windows AMD64、Ubuntu 22.04 AMD64。全部成功后校验来源提交、架构与 SHA-256，上传 DMG、NSIS EXE、DEB / AppImage，再公开 GitHub 预发布版。若 CI 失败或产物已过期，需要先重跑对应提交的 CI，再重跑发布任务。构建使用 Rust 1.93.1、Node.js 22 和锁定依赖，`docs/releases/<标签>.md` 保存发布说明。`dev0.1` 对应应用版本 `0.1.0-dev.1`；`dev0.2` 对应 `0.2.0-dev.1`；`dev0.3` 对应 `0.3.0-dev.1`；`dev0.3.1` 对应 `0.3.1-dev.1`；`dev0.3.2` 对应 `0.3.2-dev.1`；`dev0.4` 对应 `0.4.0-dev.1`；`dev0.5` 对应 `0.5.0-dev.1`；`dev0.6` 对应 `0.6.0-dev.1`；`dev0.7` 对应 `0.7.0-dev.1`；`dev0.7.1` 对应 `0.7.1-dev.1`；`dev0.8` 对应 `0.8.0-dev.1`；`dev0.9` 对应 `0.9.0-dev.1`。
+开发版本发布由 `.github/workflows/release.yml` 管理：先将提交推送到 `neko_dev` / `main`，再推送 `dev*` 标签；标签任务将构建调度到默认分支，复用跨版本的 Rust 发布缓存（手动发布也选择默认分支），实际源码仍固定为标签提交；发布提前复用相同提交已检查的前端产物，并与剩余 CI 检查并行编译；公开发布仍须等待完整 CI 成功，不再安装前端依赖、重跑检查或重建前端。三个原生 runner 仅安装锁定版本的 Tauri CLI，在编译前检查前端入口与资源，编译后执行实际二进制的 `--verify-frontend`，验证内嵌资源及 IPC 异步对象大小，不打开窗口或用户数据；分别编译并打包 macOS ARM64、Windows AMD64、Ubuntu 22.04 AMD64。全部成功后校验来源提交、架构与 SHA-256，上传 DMG、NSIS EXE、DEB / AppImage，再公开 GitHub 预发布版。若 CI 失败或产物已过期，需要先重跑对应提交的 CI，再重跑发布任务。构建使用 Rust 1.93.1、Node.js 22 和锁定依赖，`docs/releases/<标签>.md` 保存发布说明。`dev0.1` 对应应用版本 `0.1.0-dev.1`；`dev0.2` 对应 `0.2.0-dev.1`；`dev0.3` 对应 `0.3.0-dev.1`；`dev0.3.1` 对应 `0.3.1-dev.1`；`dev0.3.2` 对应 `0.3.2-dev.1`；`dev0.4` 对应 `0.4.0-dev.1`；`dev0.5` 对应 `0.5.0-dev.1`；`dev0.6` 对应 `0.6.0-dev.1`；`dev0.7` 对应 `0.7.0-dev.1`；`dev0.7.1` 对应 `0.7.1-dev.1`；`dev0.8` 对应 `0.8.0-dev.1`；`dev0.9` 对应 `0.9.0-dev.1`；`dev0.9.1` 对应 `0.9.1-dev.1`。
 
 应用内更新使用 Tauri updater：macOS 安装后的 `.app`、Windows NSIS 安装版和 Linux AppImage 支持下载、签名验证、安装替换及重启；开发模式、未安装的 macOS 二进制和 Linux DEB 保留手动安装入口。下载可取消，游戏或下载任务运行时保留准备好的更新，任务结束后点击「安装并重启」。已发布的 dev0.4 及以前版本仍需手动安装一次带更新器的新版本。
 

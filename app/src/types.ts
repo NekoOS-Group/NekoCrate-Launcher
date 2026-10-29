@@ -312,11 +312,9 @@ export interface ModpackPreview {
     loader: { kind: string; version: string } | null;
     files: ModpackFile[];
   };
-  curseforge_key_configured: boolean;
 }
 export interface ModpackStatus {
   name: string;
   missing: ModpackFile[];
-  needs_key: boolean;
   completed: boolean;
 }

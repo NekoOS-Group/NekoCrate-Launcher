@@ -5,10 +5,10 @@
 `Maintain build caches` 在 CI、发布或镜像构建完成后运行，并在每天 UTC 20:17
 兜底运行。也可手动触发；手动默认只预览。
 
-- 仅管理本仓库约定的 `v0-rust-*` 与 `node-cache-*-npm-*` 缓存。
+- 仅管理本仓库约定的 `v0-rust-*`、`node-cache-*-npm-*` 与 `nekocrate-tools-v1-*` 缓存。
 - 清理 `refs/tags/dev*` 和旧 `refs/heads/refs/tags/dev*` 范围内的缓存。
   当前发布在默认分支执行、检出标签对应提交，因此不会再依赖这些旧范围。
-- 默认分支按构建任务、系统、架构分组：保留最近两代 Rust 缓存和一代 npm 缓存。
+- 默认分支按构建任务、系统、架构分组：保留最近两代 Rust 缓存、一代 npm 缓存及每个平台一代构建工具缓存。
 - 总量超过 8 GiB 时，按最近访问时间清理第二代缓存；每组最新一代始终保留。
   这是软上限，不能通过删除唯一缓存或未知缓存强行满足。
 - 其他工作流正在运行或排队时跳过；逐项删除前再次检查。清理开始后被访问过
@@ -93,6 +93,21 @@ jq -r '.files[] | "\(.sha256)  \(.name)"' BUILDINFO.json | shasum -a 256 --check
 
 ## 签名与密钥管理
 
+CurseForge 应用凭据保存在仓库 Actions Secret `CURSEFORGE_API_KEY`。发布前检查其存在，
+仅在三个平台的 Rust 构建步骤注入同名环境变量，由核心通过 `option_env!` 编译进程序。
+修改或移除环境变量会使 Cargo 重新编译受影响的代码，不会继续使用旧缓存中的凭据。
+设置页、IPC、数据库及玩家钥匙串均不再读取或保存 CurseForge Key。元数据解析和
+官方 CDN 下载使用同一凭据；请求头标记为敏感，禁止将它转发给非允许的下载主机。
+
+普通 CI 和外部贡献者的构建无需此 Secret，其余功能照常编译测试；未注入时访问
+CurseForge 会提示使用官方发行版。本地开发或自建发行版可在构建进程的环境中提供
+`CURSEFORGE_API_KEY`，不要写入源码、Tauri 前端变量或命令行参数。此应用凭据会随
+二进制分发，可从客户端提取；它与绝不进入安装包的更新签名私钥用途不同。
+
+`cargo ui` 也支持从仓库根目录 Git 已忽略的 `.env` 读取 `CURSEFORGE_API_KEY`，文件
+应仅允许当前用户读写。只读取此项，不执行 shell、不展开 `$`，已有进程环境优先。
+配置变更后重新运行 `cargo ui`；直接使用 Cargo / Tauri 构建时由调用方注入环境变量。
+
 更新包签名、操作系统的发布者签名、玩家登录凭据是三套独立机制。
 
 | 用途 | 当前存放位置与状态 | 构建时的处理 |
@@ -156,3 +171,28 @@ cargo install --git https://github.com/NekoOS-Group/NekoCrate-Launcher.git \
 Cargo 不会执行 Tauri CLI 的 `beforeBuildCommand`。需要将预构建前端包含进 desktop
 crate、配置对应资源路径，并明确系统依赖与安装方式。`cargo install` 安装二进制，
 不会自动制作 macOS `.app`、DMG 或系统开始菜单快捷方式。
+
+
+## dev0.9.1 发布流程优化
+
+前端测试、构建、产物校验和发布脚本测试通过后，CI 立即上传 `ci-frontend`；Rust
+全量测试、Clippy 与其他平台检查继续运行。发布准备只复用同一提交、同一仓库、
+受信任分支 CI 的产物。三个发布任务可提前进行编译；独立的 `checks` 发布门禁
+持续检查选定 CI run，只有其完整成功、且全部平台完成，发布任务才会执行。
+失败、取消或提交不匹配均禁止发布，不会把“前端产物存在”当成完整 CI 通过。
+
+`tauri build --no-bundle -- --locked --timings` 只编译一次，随后 `tauri bundle`
+打包并签名。两步使用相同目标、配置及默认 features。Cargo 的每个 crate 耗时保留
+在 `build-timings-<平台>` Actions artifact 中 14 天，不加入 Release 下载附件。
+
+已安装的 Tauri CLI 和 `target/.tauri` 工具按 OS / 架构 / Node 22 / CLI 版本独立缓存，
+不再随整个前端 lockfile 的变化重新下载安装。依赖编译缓存仍由 rust-cache 管理；
+发布任务关闭 workspace crate 缓存，因为每次发布的版本变化都会使这些 crate 重新
+编译。已有旧缓存可正常恢复，下一次需要保存缓存时才剔除这些项目产物，避免为了
+迁移缓存而强迫本次发布冷编译。CI 的测试缓存策略保持不变。
+
+作为基线，dev0.9 的 Rust 编译分别为 macOS 98 秒、Linux 75 秒、Windows 162 秒；
+打包约 8 / 31 / 13 秒，Rust 缓存恢复约 16 / 15 / 40 秒。Linux 另有约 50 秒容器初始化。
+这些是单次运行数据，包含当时依赖变动和 runner 差异；不能把不同提交之间的全部
+耗时变化归因于优化。此次保留现有编译优化等级、链接器、安装包压缩及 Linux 镜像，
+优先减少流程串行等待和重复工具准备，再用逐 crate 报告决定进一步调整。

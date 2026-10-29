@@ -26,6 +26,16 @@ class CachePolicyTests(unittest.TestCase):
                    cache(6, ref="refs/tags/v1.0")]
         self.assertEqual({c["id"] for c in plan(entries, "neko_dev")}, {1, 2})
 
+    def test_tool_cache_keeps_latest_per_platform_without_touching_other_scopes(self):
+        entries = [
+            dict(cache(1), key="nekocrate-tools-v1-Windows-X64-node22-2.10.0"),
+            dict(cache(2), key="nekocrate-tools-v1-Windows-X64-node22-2.10.1"),
+            dict(cache(3), key="nekocrate-tools-v1-macOS-ARM64-node22-2.10.0"),
+            dict(cache(4, ref="refs/pull/12/merge"), key="nekocrate-tools-v1-Windows-X64-node22-2.10.2"),
+            dict(cache(5), key="unrelated-tools-v1-Windows-X64-node22-2.10.0"),
+        ]
+        self.assertEqual({c["id"] for c in plan(entries, "neko_dev")}, {1})
+
     def test_budget_removes_spares_but_never_the_only_cache_of_a_family(self):
         entries = [cache(1, size=5 * GIB), cache(2, size=5 * GIB),
                    cache(3, "v0-rust-release-Windows-x64", size=5 * GIB)]

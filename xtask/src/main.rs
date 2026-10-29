@@ -65,6 +65,35 @@ fn add_signed_runner(args: &mut Vec<OsString>, executable: &Path) {
     args.splice(start..start, configs);
 }
 
+fn build_credential(contents: &str) -> Result<Option<&str>, &'static str> {
+    let mut value = None;
+    for line in contents.lines() {
+        let Some((name, raw)) = line.trim().split_once('=') else {
+            continue;
+        };
+        if name.trim() != "CURSEFORGE_API_KEY" {
+            continue;
+        }
+        let raw = raw.trim();
+        let key = raw
+            .strip_prefix('\'')
+            .and_then(|s| s.strip_suffix('\''))
+            .or_else(|| raw.strip_prefix('"').and_then(|s| s.strip_suffix('"')))
+            .unwrap_or(raw);
+        if value.is_some()
+            || key.is_empty()
+            || key.len() > 4096
+            || !key.bytes().all(|byte| byte.is_ascii_graphic())
+        {
+            return Err("本机构建凭据配置无效，请检查仓库根目录的 .env 文件");
+        }
+        // Read only this application credential, literally. Never evaluate
+        // shell syntax or expand the dollar signs used in CurseForge keys.
+        value = Some(key);
+    }
+    Ok(value)
+}
+
 fn main() {
     let mut args: Vec<_> = env::args_os().skip(1).collect();
     if args.first().is_some_and(|arg| arg == "--signed-run") {
@@ -95,7 +124,27 @@ fn main() {
         add_signed_runner(&mut args, &env::current_exe().expect("无法定位开发工具"));
     }
     let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
-    let result = Command::new(npm)
+    let mut command = Command::new(npm);
+    if !help && env::var_os("CURSEFORGE_API_KEY").is_none() {
+        match std::fs::read_to_string(app.parent().unwrap().join(".env")) {
+            Ok(contents) => match build_credential(&contents) {
+                Ok(Some(key)) => {
+                    command.env("CURSEFORGE_API_KEY", key);
+                }
+                Ok(None) => (),
+                Err(message) => {
+                    eprintln!("{message}");
+                    std::process::exit(1);
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => {
+                eprintln!("无法读取本机构建凭据：{error}");
+                std::process::exit(1);
+            }
+        }
+    }
+    let result = command
         .current_dir(app)
         .args(["run", "tauri", "--", "dev"])
         .args(args)
@@ -112,6 +161,25 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_build_credential_is_literal_and_does_not_import_other_environment() {
+        assert_eq!(build_credential("# note\nOTHER=ignored\n").unwrap(), None);
+        for raw in ["$2a$10$fixture", "'$2a$10$fixture'", "\"$2a$10$fixture\""] {
+            assert_eq!(
+                build_credential(&format!("CURSEFORGE_API_KEY = {raw}\nOTHER=ignored")).unwrap(),
+                Some("$2a$10$fixture")
+            );
+        }
+        for contents in [
+            "CURSEFORGE_API_KEY=",
+            "CURSEFORGE_API_KEY=private value",
+            "CURSEFORGE_API_KEY=private\nCURSEFORGE_API_KEY=other",
+        ] {
+            let message = build_credential(contents).unwrap_err();
+            assert!(!message.contains("private"));
+        }
+    }
 
     #[test]
     fn runner_config_preserves_tauri_cargo_and_application_arguments() {

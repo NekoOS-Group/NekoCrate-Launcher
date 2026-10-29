@@ -9,7 +9,7 @@ on:
       tag:
         description: Existing preview tag to build
         required: true
-        default: dev0.9
+        default: dev0.9.1
         type: string
 
 permissions:
@@ -73,7 +73,11 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: test -n "$TAURI_SIGNING_PRIVATE_KEY" || { echo "Configure TAURI_SIGNING_PRIVATE_KEY before publishing updater packages."; exit 1; }
-      - name: Wait for successful CI on this exact commit
+      - name: Check CurseForge build credential is configured
+        env:
+          CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
+        run: test -n "$CURSEFORGE_API_KEY" || { echo "Configure the repository build secret CURSEFORGE_API_KEY before publishing."; exit 1; }
+      - name: Reuse the checked frontend as soon as it is ready
         id: ci
         uses: actions/github-script@v7
         env:
@@ -91,8 +95,8 @@ jobs:
                 ((run.event === 'push' && ['neko_dev', 'main'].includes(run.head_branch)) ||
                   run.event === 'workflow_dispatch')
               ).sort((a, b) => b.id - a.id)[0];
-              if (run?.status === 'completed') {
-                if (run.conclusion !== 'success') {
+              if (run) {
+                if (run.status === 'completed' && run.conclusion !== 'success') {
                   throw new Error(`CI did not pass (${run.conclusion}): ${run.html_url}`);
                 }
                 const { data: { artifacts } } = await github.rest.actions.listWorkflowRunArtifacts({
@@ -101,13 +105,15 @@ jobs:
                 const artifact = artifacts.find(item =>
                   item.name === 'ci-frontend' && !item.expired && item.size_in_bytes > 0
                 );
-                if (!artifact) {
+                if (!artifact && run.status === 'completed') {
                   throw new Error(`Frontend artifact expired or missing; rerun CI: ${run.html_url}`);
                 }
-                core.setOutput('run', run.id);
-                core.setOutput('artifact', artifact.id);
-                core.info(`Reusing frontend checked at ${sha}: ${run.html_url}`);
-                return;
+                if (artifact) {
+                  core.setOutput('run', run.id);
+                  core.setOutput('artifact', artifact.id);
+                  core.info(`Reusing frontend checked at ${sha}: ${run.html_url}`);
+                  return;
+                }
               }
               if (!run && attempt >= 3) {
                 throw new Error(`No CI run for ${sha}; push this commit to neko_dev/main or run Check source on this ref.`);
@@ -115,7 +121,40 @@ jobs:
               core.info(`Waiting for CI at ${sha}: ${run?.status ?? 'not registered yet'}`);
               await new Promise(resolve => setTimeout(resolve, 15000));
             }
-            throw new Error('Timed out waiting for CI; rerun this release after CI passes.');
+            throw new Error('Timed out waiting for checked frontend; rerun this release after CI passes.');
+
+  checks:
+    name: Require complete CI before publishing
+    needs: prepare
+    runs-on: ubuntu-22.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          RELEASE_COMMIT: ${{ needs.prepare.outputs.commit }}
+          CI_RUN: ${{ needs.prepare.outputs.ci_run }}
+        with:
+          script: |
+            for (let attempt = 0; attempt < 120; attempt++) {
+              const { data: run } = await github.rest.actions.getWorkflowRun({
+                ...context.repo, run_id: Number(process.env.CI_RUN),
+              });
+              if (run.head_sha !== process.env.RELEASE_COMMIT ||
+                  run.head_repository?.full_name !== `${context.repo.owner}/${context.repo.repo}` ||
+                  run.path !== '.github/workflows/ci.yml') {
+                throw new Error('CI identity does not match the release commit.');
+              }
+              if (run.status === 'completed') {
+                if (run.conclusion !== 'success') {
+                  throw new Error(`CI did not pass (${run.conclusion}): ${run.html_url}`);
+                }
+                core.info(`All checks passed: ${run.html_url}`);
+                return;
+              }
+              core.info(`Waiting for all checks: ${run.status}`);
+              await new Promise(resolve => setTimeout(resolve, 15000));
+            }
+            throw new Error('Timed out waiting for full CI; publishing remains blocked.');
 
   build:
     name: Build ${{ matrix.platform }}
@@ -167,8 +206,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-          cache-dependency-path: app/package-lock.json
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -176,8 +213,23 @@ jobs:
         with:
           key: release-${{ matrix.target }}
           cache-on-failure: true
-          cache-workspace-crates: true
+          # Workspace versions change for every release and cannot be reused.
+          # Keep compiled dependencies, not obsolete application objects.
+          cache-workspace-crates: false
+      - name: Read the locked build tool version
+        id: tools
+        run: |
+          TAURI_CLI_VERSION=$(node -p 'require("./app/package-lock.json").packages["node_modules/@tauri-apps/cli"].version')
+          echo "version=$TAURI_CLI_VERSION" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        id: tools-cache
+        with:
+          path: |
+            ${{ runner.temp }}/tauri-cli
+            target/.tauri
+          key: nekocrate-tools-v1-${{ runner.os }}-${{ runner.arch }}-node22-${{ steps.tools.outputs.version }}
       - name: Install only the locked Tauri CLI
+        if: steps.tools-cache.outputs.cache-hit != 'true'
         run: |
           TAURI_CLI_VERSION=$(node -p 'require("./app/package-lock.json").packages["node_modules/@tauri-apps/cli"].version')
           npm install --prefix "$RUNNER_TEMP/tauri-cli" --no-audit --no-fund --package-lock=false "@tauri-apps/cli@$TAURI_CLI_VERSION"
@@ -193,8 +245,13 @@ jobs:
       - name: Ensure AppImage packaging tools
         if: runner.os == 'Linux'
         run: file --version
-      - name: Build release installers
-        run: node "$RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" build --verbose --config src-tauri/tauri.release.conf.json --target "${{ matrix.target }}" --bundles "${{ matrix.bundles }}" --ci -- --locked
+      - name: Compile the release executable
+        run: node "$RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" build --verbose --config src-tauri/tauri.release.conf.json --target "${{ matrix.target }}" --no-bundle --ci -- --locked --timings
+        working-directory: app
+        env:
+          CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
+      - name: Bundle and sign installers without recompiling
+        run: node "$RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" bundle --verbose --config src-tauri/tauri.release.conf.json --target "${{ matrix.target }}" --bundles "${{ matrix.bundles }}" --ci
         working-directory: app
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
@@ -211,10 +268,18 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
+      - name: Save per-crate compilation timings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-timings-${{ matrix.platform }}
+          path: target/cargo-timings/cargo-timing.html
+          if-no-files-found: ignore
+          retention-days: 14
 
   publish:
     name: Publish preview release
-    needs: [prepare, build]
+    needs: [prepare, checks, build]
     runs-on: ubuntu-22.04
     permissions:
       contents: write

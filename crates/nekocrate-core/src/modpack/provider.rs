@@ -1,35 +1,6 @@
 use super::*;
 use std::time::Duration;
 
-impl Launcher {
-    pub fn curseforge_key_configured(&self) -> Result<bool> {
-        Ok(self.curseforge_key()?.is_some())
-    }
-    pub fn save_curseforge_key(&self, key: &str) -> Result<()> {
-        let entry = crate::auth::secret_entry(self.root(), "curseforge-api-key")?;
-        if key.trim().is_empty() {
-            match entry.delete_credential() {
-                Ok(()) | Err(keyring::Error::NoEntry) => (),
-                Err(e) => return Err(e).context("无法清除 CurseForge API Key"),
-            }
-        } else {
-            if key.len() > 4096 || key.chars().any(char::is_control) {
-                bail!("CurseForge API Key 格式无效");
-            }
-            entry
-                .set_password(key.trim())
-                .context("无法保存 CurseForge API Key")?;
-        }
-        Ok(())
-    }
-    pub(crate) fn curseforge_key(&self) -> Result<Option<String>> {
-        match crate::auth::secret_entry(self.root(), "curseforge-api-key")?.get_password() {
-            Ok(key) => Ok(Some(key)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => Err(e).context("无法读取 CurseForge API Key"),
-        }
-    }
-}
 async fn request(
     client: &reqwest::Client,
     key: &str,
@@ -37,13 +8,13 @@ async fn request(
     cancel: &CancellationToken,
 ) -> Result<Value> {
     let mut header =
-        reqwest::header::HeaderValue::from_str(key).context("CurseForge API Key 格式无效")?;
+        reqwest::header::HeaderValue::from_str(key).context(crate::curseforge::UNAVAILABLE)?;
     header.set_sensitive(true);
     tokio::select! {
         _ = cancel.cancelled() => bail!("操作已取消"),
         response = async {
             let mut response = client.get(format!("https://api.curseforge.com/v1/{path}")).header("x-api-key", header).timeout(Duration::from_secs(30)).send().await?;
-            if matches!(response.status().as_u16(), 401 | 403) { bail!("CurseForge API Key 无效或没有访问权限，请在网络设置中更新"); }
+            if matches!(response.status().as_u16(), 401 | 403) { bail!(crate::curseforge::ACCESS_DENIED); }
             response = response.error_for_status()?;
             let mut data = Vec::new();
             while let Some(chunk) = response.chunk().await? {
@@ -64,7 +35,7 @@ pub(super) async fn resolve(
     if pack.format != "curseforge" || pack.files.iter().all(|f| f.path.is_some()) {
         return Ok(());
     }
-    let key = key.context("尚未配置 CurseForge API Key，请在网络设置中配置后继续导入")?;
+    let key = key.context(crate::curseforge::UNAVAILABLE)?;
     for index in 0..pack.files.len() {
         let mut item = pack.files[index].clone();
         if item.path.is_some() {

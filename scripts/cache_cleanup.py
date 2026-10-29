@@ -1,6 +1,6 @@
 """Prune obsolete Actions caches without dropping the newest build of a family.
 
-Only this repository's Rust/npm cache namespaces are managed. Unknown caches and
+Only this repository's Rust/npm/build-tool cache namespaces are managed. Unknown caches and
 feature/PR branch caches are left to GitHub's normal retention policy.
 """
 
@@ -26,11 +26,14 @@ def family(key):
     match = re.fullmatch(r"(node-cache-.+-npm)-[0-9a-f]{64}", key)
     if match:
         return match[1], 1
+    match = re.fullmatch(r"(nekocrate-tools-v1-(?:macOS|Linux|Windows)-(?:ARM64|X64)-node22)-\d+\.\d+\.\d+(?:[-+][\w.-]+)?", key)
+    if match:
+        return match[1], 1
     return None
 
 
 def plan(caches, default_branch, budget_bytes=8 * GIB):
-    """Keep two Rust generations / one npm generation; trim spares above 8 GiB."""
+    """Keep two Rust generations / one npm or tool generation; trim above 8 GiB."""
     groups, removal, protected = defaultdict(list), {}, set()
     for cache in caches:
         group = family(cache["key"])

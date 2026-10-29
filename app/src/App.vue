@@ -93,7 +93,6 @@ import VersionMenu from "./components/VersionMenu.vue";
 import VersionDownload from "./components/VersionDownload.vue";
 import ModpackImport from "./components/ModpackImport.vue";
 import ModpackMissing from "./components/ModpackMissing.vue";
-import CurseForgeKey from "./components/CurseForgeKey.vue";
 import type { ModpackPreview, ModpackStatus } from "./types";
 import VersionManager from "./components/VersionManager.vue";
 import ResourceTransferOverlay from "./components/ResourceTransferOverlay.vue";
@@ -2240,8 +2239,7 @@ async function downloadOnlineModpack(
 }
 async function submitModpack(name: string, optional: string[]) {
   if (!canSubmitPack.value || !packPreview.value) return;
-  const source = packPath.value,
-    configured = packPreview.value.curseforge_key_configured;
+  const source = packPath.value;
   const session = modalSession;
   downloadSubmitting.value = true;
   try {
@@ -2266,21 +2264,10 @@ async function submitModpack(name: string, optional: string[]) {
     if (!instance) return;
     selectInstance(instance.id);
     if (session === modalSession) modal.value = null;
-    if (configured) await install(instance);
-    else notify("整合包已添加，配置 CurseForge API Key 后可继续安装");
+    await install(instance);
   } finally {
     downloadSubmitting.value = false;
   }
-}
-function packNetworkSettings() {
-  modal.value = null;
-  utility.value = "settings";
-  void nextTick(() => {
-    settingsTab.value = "network";
-  });
-}
-async function saveCurseforgeKey(key: string) {
-  await rpc("save_curseforge_key", { key });
 }
 const retryingFile = ref("");
 async function retryDownloadFile(
@@ -3844,7 +3831,6 @@ onUnmounted(() => {
                     "
                     :status="displayedTask.modpack_status"
                     :disabled="busy"
-                    @settings="packNetworkSettings"
                     @supply="supplyPackFiles"
                     @resume="resumePack"
                     @link="openLink"
@@ -4066,16 +4052,9 @@ onUnmounted(() => {
                         v-model="settings.mod_download_source"
                       />
                     </div>
-                    <CurseForgeKey
-                      class="list-reveal-item"
-                      :style="listRevealStyle(2)"
-                      :load="() => rpc<boolean>('curseforge_key_status')"
-                      :save="saveCurseforgeKey"
-                      @error="error = message($event)"
-                    />
                     <div
                       class="network-concurrency network-control-heading list-reveal-item"
-                      :style="listRevealStyle(3)"
+                      :style="listRevealStyle(2)"
                     >
                       <label for="settings-concurrency">{{
                         t("并发数")
@@ -4127,7 +4106,7 @@ onUnmounted(() => {
                     </div>
                     <div
                       class="network-proxy list-reveal-item"
-                      :style="listRevealStyle(4)"
+                      :style="listRevealStyle(3)"
                     >
                       <div class="field network-proxy-toggle">
                         <span id="proxy-enabled-label">{{ t("代理") }}</span>
@@ -4360,7 +4339,6 @@ onUnmounted(() => {
           @browse="chooseCreationDirectory(true)"
           @submit="submitModpack"
           @choose="openModpack()"
-          @settings="packNetworkSettings"
           @close="modal = null"
         />
         <VersionDownload
@@ -4410,7 +4388,6 @@ onUnmounted(() => {
               @error="error = message($event)"
               @link="openLink"
               @import="openModpack()"
-              @settings="packNetworkSettings"
               @pause="setDownloadPaused(true)"
               @resume="setDownloadPaused(false)"
               @cancel="cancel"

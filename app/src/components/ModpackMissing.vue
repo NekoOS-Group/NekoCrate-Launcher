@@ -2,21 +2,11 @@
 import { t } from "../i18n";
 import type { ModpackStatus } from "../types";
 defineProps<{ status: ModpackStatus; disabled: boolean }>();
-defineEmits<{ supply: []; resume: []; settings: []; link: [url: string] }>();
+defineEmits<{ supply: []; resume: []; link: [url: string] }>();
 </script>
 <template>
   <div v-if="!status.completed" class="pack-missing">
-    <template v-if="status.needs_key"
-      ><p>{{ t("需要配置 CurseForge API Key 才能解析文件下载地址。") }}</p>
-      <button
-        class="text-button"
-        :disabled="disabled"
-        @click="$emit('settings')"
-      >
-        {{ t("网络设置") }}
-      </button></template
-    >
-    <template v-else-if="status.missing.length">
+    <template v-if="status.missing.length">
       <p>
         {{ t("这些文件需从作者页面下载，选择下载后的文件即可校验并补齐。") }}
       </p>

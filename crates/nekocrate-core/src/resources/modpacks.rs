@@ -223,10 +223,12 @@ impl Launcher {
             .join("cache/modpacks")
             .join(format!("{hash}.{extension}"));
         let mut downloader = Downloader::new(self.root(), self.settings())?;
-        if platform == Platform::Curseforge
-            && let Some(key) = self.curseforge_key()?
-        {
-            downloader = downloader.with_curseforge_key(self.root(), &self.settings(), &key)?;
+        if platform == Platform::Curseforge {
+            downloader = downloader.with_curseforge_key(
+                self.root(),
+                &self.settings(),
+                crate::curseforge::key()?,
+            )?;
         }
         sink(Event::workflow("pack_archive_files", "下载整合包文件"));
         downloader

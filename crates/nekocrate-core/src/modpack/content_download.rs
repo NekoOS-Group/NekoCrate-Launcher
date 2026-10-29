@@ -43,7 +43,7 @@ impl Launcher {
             &format!("mod:{key}"),
         )?;
         if declared.source == "CurseForge" {
-            let api_key = self.curseforge_key()?;
+            let api_key = Some(crate::curseforge::key()?.to_owned());
             if let Some(key) = &api_key {
                 downloader = downloader.with_curseforge_key(self.root(), &settings, key)?;
             }

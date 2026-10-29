@@ -4,6 +4,7 @@
     "beforeBuildCommand": ""
   },
   "bundle": {
+    "useLocalToolsDir": true,
     "createUpdaterArtifacts": true
   }
 }

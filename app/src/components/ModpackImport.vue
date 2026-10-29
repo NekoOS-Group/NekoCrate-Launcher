@@ -28,7 +28,6 @@ const emit = defineEmits<{
   submit: [name: string, optional: string[]];
   choose: [];
   close: [];
-  settings: [];
   back: [];
 }>();
 const destination = ref<InstanceType<typeof DownloadDestination>>();
@@ -125,14 +124,6 @@ function submit() {
         <p class="pack-description">
           {{ t("在所选游戏目录内新建独立版本，隔离 Mods、配置和存档。") }}
         </p>
-        <div v-if="!preview.curseforge_key_configured" class="pack-key-hint">
-          <span>{{
-            t("需要配置 CurseForge API Key 才能解析文件下载地址。")
-          }}</span
-          ><button type="button" class="text-button" @click="$emit('settings')">
-            {{ t("网络设置") }}
-          </button>
-        </div>
         <fieldset
           v-if="preview.pack.files.some((f) => f.optional)"
           class="pack-optional"
@@ -167,15 +158,7 @@ function submit() {
           <LoaderCircle v-if="disabled" class="spin" :size="16" /><Download
             v-else
             :size="16"
-          />{{
-            t(
-              preview.curseforge_key_configured
-                ? online
-                  ? "下载并安装"
-                  : "导入并安装"
-                : "添加并稍后安装",
-            )
-          }}
+          />{{ t(online ? "下载并安装" : "导入并安装") }}
         </button>
       </footer>
     </form>
@@ -226,17 +209,11 @@ function submit() {
   color: var(--muted);
   font: 11px/20px var(--mono);
 }
-.pack-description,
-.pack-key-hint {
+.pack-description {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.7;
   margin-top: 14px;
-}
-.pack-key-hint {
-  display: flex;
-  gap: 16px;
-  align-items: center;
 }
 .pack-optional {
   border: 0;

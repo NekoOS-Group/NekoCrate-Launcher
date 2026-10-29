@@ -51,7 +51,6 @@ pub struct Pack {
 #[derive(Serialize)]
 pub struct Preview {
     pub pack: Pack,
-    pub curseforge_key_configured: bool,
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Job {
@@ -82,7 +81,6 @@ impl Job {
 pub struct PackStatus {
     pub name: String,
     pub missing: Vec<PackFile>,
-    pub needs_key: bool,
     pub completed: bool,
 }
 fn job_path(game: &Path, version: &str) -> Result<PathBuf> {
@@ -165,12 +163,7 @@ impl Drop for Preparation {
 impl Launcher {
     pub fn preview_modpack(&self, path: &Path) -> Result<Preview> {
         let pack = archive::parse(path)?;
-        let configured =
-            pack.format != "curseforge" || self.curseforge_key_configured().unwrap_or(false);
-        Ok(Preview {
-            pack,
-            curseforge_key_configured: configured,
-        })
+        Ok(Preview { pack })
     }
     pub async fn prepare_modpack(
         &self,
@@ -340,7 +333,7 @@ impl Launcher {
         };
         let mut missing = vec![];
         for file in &job.pack.files {
-            if file.urls.is_empty() {
+            if file.urls.is_empty() && file.path.is_some() {
                 let valid = match &file.path {
                     Some(path) => {
                         let destination = archive::installed_destination(&game, path)?;
@@ -359,9 +352,6 @@ impl Launcher {
         }
         Ok(PackStatus {
             name: job.name,
-            needs_key: job.pack.format == "curseforge"
-                && job.pack.files.iter().any(|f| f.path.is_none())
-                && !self.curseforge_key_configured()?,
             missing,
             completed: job.completed,
         })
@@ -441,7 +431,7 @@ impl Launcher {
         };
         sink(Event::workflow("pack_resolve", "解析整合包依赖"));
         let key = if job.pack.format == "curseforge" {
-            self.curseforge_key()?
+            Some(crate::curseforge::key()?.to_owned())
         } else {
             None
         };

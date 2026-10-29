@@ -1,6 +1,7 @@
 mod archive_support;
 pub mod auth;
 pub mod crash;
+mod curseforge;
 pub mod diagnostics;
 pub mod download;
 mod download_concurrency;

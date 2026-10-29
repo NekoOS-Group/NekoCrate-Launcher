@@ -20,6 +20,14 @@ async fn unresolved_curseforge_files_are_visible_and_resolution_survives_interru
         .prepare_modpack(&instance.id, &path, "ATM9", &[])
         .await
         .unwrap();
+    let preview = serde_json::to_value(launcher.preview_modpack(&path).unwrap()).unwrap();
+    assert!(preview.get("curseforge_key_configured").is_none());
+    let status = launcher.modpack_status(&instance.id, "ATM9").await.unwrap();
+    assert!(
+        status.missing.is_empty(),
+        "Unresolved files are not manual downloads"
+    );
+    assert!(!status.completed);
     let counts = launcher
         .version_content_counts(&instance.id, "ATM9")
         .unwrap();
@@ -78,6 +86,18 @@ async fn unresolved_curseforge_files_are_visible_and_resolution_survives_interru
     job.pack.files[1].sha1 = "b".repeat(40);
     // An author-disabled distribution remains visible with a manual-download status.
     record::write_job(&game, "ATM9", &job).unwrap();
+    let status = launcher.modpack_status(&instance.id, "ATM9").await.unwrap();
+    assert_eq!(status.missing.len(), 1);
+    assert_eq!(
+        status.missing[0].path.as_deref(),
+        Some("resourcepacks/style.zip")
+    );
+    assert!(
+        serde_json::to_value(status)
+            .unwrap()
+            .get("needs_key")
+            .is_none()
+    );
     let counts = launcher
         .version_content_counts(&instance.id, "ATM9")
         .unwrap();

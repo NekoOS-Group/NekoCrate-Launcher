@@ -313,21 +313,14 @@ export const english: Readonly<Record<string, string>> = {
   拖拽导入整合包: "Drop to import modpack",
   版本名称: "Version name",
   "{count} 个文件": "{count} files",
-  "整合包已添加，配置 CurseForge API Key 后可继续安装":
-    "Modpack added. Configure a CurseForge API key to continue installation.",
   请一次选择一个整合包: "Please select one modpack at a time",
   "这些文件需从作者页面下载，选择下载后的文件即可校验并补齐。":
     "Download these files from their project pages, then select them to verify and continue.",
   继续安装: "Continue installation",
   选择已下载文件: "Select downloaded files",
   清除: "Clear",
-  未配置: "Not configured",
-  "已配置，输入以替换": "Configured; enter to replace",
-  "需要配置 CurseForge API Key 才能解析文件下载地址。":
-    "Configure a CurseForge API key to resolve file downloads.",
   "在所选游戏目录内新建独立版本，隔离 Mods、配置和存档。":
     "Create a separate version in the selected game directory, with isolated mods, configuration and saves.",
-  添加并稍后安装: "Add and install later",
   导入并安装: "Import and install",
   可选文件: "Optional files",
   更换文件: "Choose another file",

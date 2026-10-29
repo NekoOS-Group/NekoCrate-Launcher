@@ -112,10 +112,10 @@ export const backendEnglish: Readonly<Record<string, string>> = {
     "Import resources, modpacks and game directories separately",
   "请先选择目标游戏版本，或将资源拖到版本列表中的指定版本":
     "Select a game version first, or drop resources onto a specific version in the list",
-  "需要配置 CurseForge API Key，请前往网络设置":
-    "Configure a CurseForge API key in Network settings",
-  "CurseForge API Key 无效或没有访问权限":
-    "The CurseForge API key is invalid or lacks permission",
+  "此构建暂不支持 CurseForge，请使用官方发行版":
+    "CurseForge is unavailable in this build. Please use an official release",
+  "CurseForge 服务暂不可用，请稍后重试或更新启动器":
+    "CurseForge is currently unavailable. Try again later or update the launcher",
   "资源平台请求过于频繁，请稍后重试":
     "Too many requests to the resource platform. Try again later",
   "此版本尚未安装 Mod 加载器":
@@ -188,8 +188,6 @@ export const backendEnglish: Readonly<Record<string, string>> = {
   "此文件尚未下载，暂无本地元数据":
     "This file has not been downloaded; local metadata is unavailable",
   不支持此加载器安装器格式: "This loader installer format is not supported",
-  "无法读取 CurseForge API Key": "Could not read the CurseForge API key",
-  "无法保存 CurseForge API Key": "Could not save the CurseForge API key",
   "暂不支持整合包加载器：{loader}": "Unsupported modpack loader: {loader}",
   "整合包包含不安全的路径：{path}": "Unsafe modpack path: {path}",
   "请选择含有唯一 Modrinth 或 CurseForge 清单的整合包":
@@ -222,10 +220,6 @@ export const backendEnglish: Readonly<Record<string, string>> = {
     "The selected files do not match the modpack's declared checksums",
   "此整合包有 {count} 个文件需要从作者页面手动下载，请补齐后继续":
     "This modpack requires {count} files to be downloaded from their project pages; add them to continue",
-  "CurseForge API Key 无效或没有访问权限，请在网络设置中更新":
-    "The CurseForge API key is invalid or lacks access; update it in network settings",
-  "尚未配置 CurseForge API Key，请在网络设置中配置后继续导入":
-    "Configure a CurseForge API key in network settings to continue importing",
   此文件不在当前版本的内容列表中:
     "This file is not in the selected version\u2019s content list",
   内容路径不能离开所选目录:

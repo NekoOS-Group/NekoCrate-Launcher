@@ -90,10 +90,8 @@ pub(super) fn compatible(
 impl Provider {
     pub(super) fn new(launcher: &Launcher, platform: Platform) -> Result<Self> {
         let key = if platform == Platform::Curseforge {
-            let value = launcher
-                .curseforge_key()?
-                .context("需要配置 CurseForge API Key，请前往网络设置")?;
-            let mut header = reqwest::header::HeaderValue::from_str(&value)?;
+            let value = crate::curseforge::key()?;
+            let mut header = reqwest::header::HeaderValue::from_str(value)?;
             header.set_sensitive(true);
             Some(header)
         } else {
@@ -146,7 +144,7 @@ impl Provider {
             result = async {
                 let mut response = request.send().await?;
                 match response.status().as_u16() {
-                    401 | 403 if self.platform == Platform::Curseforge => bail!("CurseForge API Key 无效或没有访问权限"),
+                    401 | 403 if self.platform == Platform::Curseforge => bail!(crate::curseforge::ACCESS_DENIED),
                     429 => bail!("资源平台请求过于频繁，请稍后重试"),
                     _ => {},
                 }
