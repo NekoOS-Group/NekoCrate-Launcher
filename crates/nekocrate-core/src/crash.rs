@@ -333,9 +333,16 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let log = root.path().join("game.log");
         fs::write(&log, "game output\n").unwrap();
-        let start = SystemTime::now();
+        let start = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
         fs::create_dir(root.path().join("logs")).unwrap();
-        fs::write(root.path().join("logs/latest.log"), "Caused by: java.lang.module.ResolutionException: Modules game and minecraft export package net.minecraft.server password=secret").unwrap();
+        let latest = root.path().join("logs/latest.log");
+        fs::write(&latest, "Caused by: java.lang.module.ResolutionException: Modules game and minecraft export package net.minecraft.server password=secret").unwrap();
+        // Filesystem mtimes can lag the wall clock by a kernel tick. Set the
+        // fixture's timestamp explicitly instead of relying on write timing.
+        fs::File::open(&latest)
+            .unwrap()
+            .set_modified(start + std::time::Duration::from_secs(1))
+            .unwrap();
         let report = collect(
             root.path(),
             &log,
@@ -345,8 +352,9 @@ mod tests {
             "Exit 1".into(),
             &[],
         );
-        assert_eq!(report.findings[0].code, "module_conflict");
         assert!(report.sources.contains(&"latest.log".to_owned()));
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].code, "module_conflict");
         let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let saved = events.clone();
         let sink: EventSink = std::sync::Arc::new(move |event| saved.lock().unwrap().push(event));
