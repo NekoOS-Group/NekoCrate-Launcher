@@ -157,6 +157,50 @@ async fn mod_copy_preserves_source_and_disabled_state_and_is_idempotent() {
 }
 
 #[test]
+fn drag_export_resolves_only_listed_resources_and_keeps_the_original() {
+    let (temp, launcher, id, working) = fixture(true);
+    let path = working.join("mods/cat.jar.disabled");
+    archive(
+        &path,
+        &[("fabric.mod.json", r#"{"id":"cat","version":"1"}"#)],
+    );
+    let mut source = ResourceCopySource {
+        kind: ResourceKind::Mods,
+        instance: id,
+        version: "1.20.1".into(),
+        file: "cat.jar.disabled".into(),
+    };
+    let before = fs::read(&path).unwrap();
+    assert_eq!(
+        launcher.resource_export_path(&source).unwrap(),
+        path.canonicalize().unwrap()
+    );
+    for invalid in [
+        "../cat.jar.disabled",
+        "missing.jar",
+        "cat.jar.disabled/other",
+    ] {
+        source.file = invalid.into();
+        assert!(launcher.resource_export_path(&source).is_err());
+    }
+    source.file = temp
+        .path()
+        .join("private.jar")
+        .to_string_lossy()
+        .into_owned();
+    assert!(launcher.resource_export_path(&source).is_err());
+    #[cfg(unix)]
+    {
+        let outside = temp.path().join("private.jar");
+        fs::write(&outside, b"private").unwrap();
+        std::os::unix::fs::symlink(&outside, working.join("mods/escape.jar")).unwrap();
+        source.file = "escape.jar".into();
+        assert!(launcher.resource_export_path(&source).is_err());
+    }
+    assert_eq!(fs::read(path).unwrap(), before);
+}
+
+#[test]
 fn mod_copy_rejects_conflicts_and_unlisted_sources_without_touching_files() {
     let (_temp, launcher, id, working) = fixture(true);
     let target = copy_target(&launcher, &id, &working, true);

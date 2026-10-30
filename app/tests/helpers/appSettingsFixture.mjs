@@ -66,11 +66,20 @@ export const flush = async () => {
 export async function settingsFixture() {
   const previous = {
     document: globalThis.document,
+    window: globalThis.window,
     __settingsFixture: globalThis.__settingsFixture,
+  };
+  globalThis.window = {
+    innerWidth: 900,
+    innerHeight: 600,
+    devicePixelRatio: 1,
+    addEventListener() {},
+    removeEventListener() {},
   };
   globalThis.document = {
     hidden: false,
-    documentElement: {},
+    documentElement: { classList: { toggle() {}, remove() {}, add() {} } },
+    elementFromPoint: () => globalThis.__settingsFixture.hovered || null,
     getElementById: () => null,
     addEventListener() {},
     removeEventListener() {},

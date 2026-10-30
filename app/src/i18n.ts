@@ -27,6 +27,23 @@ export function setLanguage(preference: string, system: string) {
 
 /** Chinese source keys stay readable in templates; interpolate only after translation. */
 export const english: Readonly<Record<string, string>> = {
+  没有可导入的文件: "No files to import",
+  无法识别文件内容: "Could not identify the file contents",
+  请拖到目标版本或对应的资源区域:
+    "Drop on a target version or the matching resource area",
+  "{name} 是{actual}，此处只接收{expected}":
+    "{name} is {actual}; this area only accepts {expected}",
+  请拖到目标版本: "Drop on a target version",
+  请先安装目标游戏版本: "Install the target game version first",
+  请先结束目标实例的游戏: "Stop the target instance's game first",
+  资源已在此版本中: "This resource is already in this version",
+  "复制到 {version}": "Copy to {version}",
+  导入缺失文件: "Import missing files",
+  导入皮肤: "Import skins",
+  "登记本地 Java": "Register local Java",
+  "识别文件内容…": "Identifying file contents…",
+  "导入{kind}": "Import {kind}",
+  此资源可拖出到文件管理器: "Drag this resource out to your file manager",
   游客: "Guest",
   游客名称: "Guest name",
   修改游客名称: "Edit guest name",
@@ -161,6 +178,12 @@ export const english: Readonly<Record<string, string>> = {
   "按 Mod ID 匹配配置；保存保留原文并创建备份。":
     "Matched by mod ID. Saving preserves your text and creates a backup.",
   崩溃诊断: "Crash diagnosis",
+  "Java 模块冲突": "Conflicting Java modules",
+  "检查启动类路径中是否重复包含游戏本体或依赖 JAR，并核对加载器的 ignoreList；错误中引用该包的 Mod 不一定是冲突来源。":
+    "Check for duplicate game or library JARs on the classpath and the loader's ignoreList. The mod referencing that package is not necessarily the source of the conflict.",
+  发现尚未分类的运行异常: "Unclassified runtime exception found",
+  "以下为本次退出前的异常信息；尚不能确定具体原因，请结合异常调用栈继续排查。":
+    "These exceptions were recorded before this exit. The cause is not yet confirmed; review their stack traces.",
   日志依据: "Log evidence",
   复制诊断: "Copy diagnosis",
   "未找到明确的已知原因，请结合完整日志继续排查。":
@@ -329,6 +352,20 @@ export const english: Readonly<Record<string, string>> = {
   写入整合包配置: "Apply modpack overrides",
   下载整合包文件: "Download modpack files",
   解析整合包依赖: "Resolve modpack dependencies",
+  解析并下载整合包文件: "Resolve and download modpack files",
+  等待导入: "Waiting for import",
+  手动导入文件: "Import required files",
+  需手动导入: "Manual import",
+  选择文件: "Choose files",
+  "拖入文件，或点击名称下载": "Drop files here, or click a name to download",
+  松开以导入并校验: "Drop to import and verify",
+  其他文件安装中: "Other files are installing",
+  等待手动导入文件: "Waiting for manual files",
+  "已解析 {done} / {total}": "Resolved {done} / {total}",
+  "以下文件需手动导入，其余文件仍在自动安装。":
+    "These files need a manual import. Other files are still being installed.",
+  "以下文件需手动导入。点击名称打开作者页面，下载后选择文件，启动器会校验并继续安装。":
+    "These files need a manual import. Open the author’s page by clicking a name, download the files, then select them to verify and continue installation.",
   选择存放位置: "Choose location",
   导入整合包: "Import modpack",
   此文件未提供可识别的元数据: "This file provides no recognized metadata",

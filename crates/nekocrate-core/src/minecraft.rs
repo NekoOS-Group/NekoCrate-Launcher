@@ -543,7 +543,8 @@ pub fn arguments_with_memory(
             classpath.push(crate::java::argument_path(&path));
         }
     }
-    classpath.push(crate::java::argument_path(&version::client_path(&game, v)?));
+    let client_path = version::client_path(&game, v)?;
+    classpath.push(crate::java::argument_path(&client_path));
     let separator = if cfg!(windows) { ";" } else { ":" };
     let mut vars = HashMap::from([
         ("auth_player_name", account.username.clone()),
@@ -588,6 +589,29 @@ pub fn arguments_with_memory(
         }
     } else {
         args.extend(expand_for_arch(&legacy_jvm(), &vars, runtime_arch)?);
+    }
+    if v.main_class == "cpw.mods.bootstraplauncher.BootstrapLauncher" {
+        // Forge templates exclude ${version_name}.jar, but an inherited or
+        // renamed profile can use a different vanilla client JAR. Exclude that
+        // actual filename too, or BootstrapLauncher creates a second Minecraft
+        // module alongside the transformed one. Keep other filters intact.
+        let client_name = client_path
+            .file_name()
+            .context("游戏本体 JAR 文件名无效")?
+            .to_string_lossy();
+        for arg in &mut args {
+            if let Some(filters) = arg.strip_prefix("-DignoreList=")
+                && !filters
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .any(|filter| client_name.starts_with(filter))
+            {
+                if !filters.is_empty() {
+                    arg.push(',');
+                }
+                arg.push_str(&client_name);
+            }
+        }
     }
     // The chosen preset owns the heap flags. Imported profile options must not
     // override it or leave an initial heap larger than the selected maximum.
@@ -1025,6 +1049,56 @@ mod tests {
             vec!["/tmp/My World; echo secret"]
         );
         assert!(expand(&[Argument::Plain("${unknown}".into())], &vars).is_err());
+    }
+    #[test]
+    fn bootstrap_ignores_the_actual_inherited_client_jar_without_changing_profile_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let launcher = crate::Launcher::open(Some(temp.path().to_owned())).unwrap();
+        let instance = launcher.create_instance("Pack", "1.20.1").unwrap();
+        let mut version = crate::test_http::version_fixture("奥术咖啡馆 v1.0.2");
+        version.jar = Some("1.20.1".into());
+        version.main_class = "cpw.mods.bootstraplauncher.BootstrapLauncher".into();
+        version.arguments = Some(
+            serde_json::from_value(serde_json::json!({
+                "jvm": ["-cp", "${classpath}", "-DignoreList=asm,forge-,${version_name}.jar"],
+                "game": ["--version", "${version_name}"]
+            }))
+            .unwrap(),
+        );
+        let args = arguments_with_memory(
+            &version,
+            launcher.root(),
+            &instance,
+            &LaunchSession::guest(),
+            1024,
+        )
+        .unwrap();
+        assert!(args.contains(&"-DignoreList=asm,forge-,奥术咖啡馆 v1.0.2.jar,1.20.1.jar".into()));
+        assert_eq!(args.last().unwrap(), "奥术咖啡馆 v1.0.2");
+        // Profiles that already identify their client JAR are unchanged.
+        version.arguments.as_mut().unwrap().jvm[2] =
+            Argument::Plain("-DignoreList=asm,${primary_jar_name}".into());
+        let args = arguments_with_memory(
+            &version,
+            launcher.root(),
+            &instance,
+            &LaunchSession::guest(),
+            1024,
+        )
+        .unwrap();
+        assert!(args.contains(&"-DignoreList=asm,1.20.1.jar".into()));
+        version.main_class = "net.minecraft.client.main.Main".into();
+        version.arguments.as_mut().unwrap().jvm[2] =
+            Argument::Plain("-DignoreList=asm,custom".into());
+        let args = arguments_with_memory(
+            &version,
+            launcher.root(),
+            &instance,
+            &LaunchSession::guest(),
+            1024,
+        )
+        .unwrap();
+        assert!(args.contains(&"-DignoreList=asm,custom".into()));
     }
     #[tokio::test]
     async fn install_and_launch_use_original_directory_for_libraries_and_assets() {

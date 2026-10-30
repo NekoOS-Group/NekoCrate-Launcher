@@ -357,6 +357,7 @@ onBeforeUnmount(() => {
 <template>
   <section
     class="resource-browser"
+    :data-drop-kind="kind"
     :class="embedded ? 'resource-embedded' : 'modal glass-surface'"
     :data-resource-instance="session.instance.id"
     :data-resource-version="session.version"
@@ -516,6 +517,7 @@ onBeforeUnmount(() => {
             <button
               v-for="(category, index) in categories"
               :key="category.value"
+              :data-drop-kind="category.value"
               :disabled="blocked"
               class="list-reveal-item"
               :style="{

@@ -21,7 +21,7 @@ import {
 import { modFileName } from "../contentIdentity";
 import {
   resourceTransferKey,
-  isResourceCopyKind,
+  isResourceDragKind,
 } from "../useResourceTransfer";
 import GlassSelect from "./GlassSelect.vue";
 import { locale, t, translateMessage } from "../i18n";
@@ -84,14 +84,14 @@ const transferResource = inject(resourceTransferKey, undefined);
 const draggableResource = computed(
   () =>
     !!transferResource &&
-    isResourceCopyKind(props.kind) &&
+    isResourceDragKind(props.kind) &&
     available.value &&
     !props.locked &&
     !modSaving.value &&
     !modDownloading.value,
 );
 function beginResourceDrag(event: PointerEvent) {
-  if (!draggableResource.value || !isResourceCopyKind(props.kind)) return;
+  if (!draggableResource.value || !isResourceDragKind(props.kind)) return;
   transferResource?.(event, {
     kind: props.kind,
     instance: props.instanceId,

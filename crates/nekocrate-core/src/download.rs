@@ -191,6 +191,20 @@ impl BatchProgress {
             last: std::time::Instant::now() - Duration::from_secs(1),
         }
     }
+    fn extend(&mut self, files: &[FileProgress]) {
+        for file in files {
+            if self.files.contains_key(&file.id) {
+                continue;
+            }
+            self.files.insert(
+                file.id.clone(),
+                (file.downloaded, file.total, file.status == "done"),
+            );
+            self.bytes += file.downloaded;
+            self.total_bytes += file.total;
+            self.completed += usize::from(file.status == "done");
+        }
+    }
     fn update(&mut self, event: &Event) -> Option<Event> {
         let mut reset = false;
         for file in &event.files {
@@ -1026,24 +1040,29 @@ impl Downloader {
         sink: &EventSink,
     ) -> Result<()> {
         check_cancel(cancel)?;
-        if let Some(task) = &self.task {
-            task.track(&self.cache, &files).await?;
-        }
-        let result = self.batch_inner(files, cancel, sink).await;
+        let result = self.batch_inner(files, None, cancel, sink).await;
         self.flush_verification(sink).await;
         result
     }
-    async fn batch_inner(
+    pub(crate) async fn batch_stream(
         &self,
-        files: Vec<FileSpec>,
+        batches: tokio::sync::mpsc::Receiver<Vec<FileSpec>>,
         cancel: &CancellationToken,
         sink: &EventSink,
     ) -> Result<()> {
-        let mut unique = std::collections::BTreeMap::new();
-        for f in files {
-            unique.insert(f.path.clone(), f);
+        let result = self.batch_inner(vec![], Some(batches), cancel, sink).await;
+        self.flush_verification(sink).await;
+        result
+    }
+    async fn inventory(
+        &self,
+        files: Vec<FileSpec>,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<(FileSpec, FileProgress)>> {
+        if let Some(task) = &self.task {
+            task.track(&self.cache, &files).await?;
         }
-        let inventory = futures_util::stream::iter(unique.into_values().map(|file| async move {
+        let inventory = futures_util::stream::iter(files.into_iter().map(|file| async move {
             let bytes = self.local_bytes(&file).await?;
             let reused = !self.full_verification
                 && self
@@ -1060,12 +1079,19 @@ impl Downloader {
         }))
         .buffered(8)
         .try_collect::<Vec<_>>();
-        let inventoried = tokio::select! {
+        tokio::select! {
             _ = cancel.cancelled() => bail!("操作已取消"),
-            result = inventory => result?,
-        };
-        let (files, planned): (Vec<_>, Vec<_>) = inventoried.into_iter().unzip();
-        let aggregate = Arc::new(std::sync::Mutex::new(BatchProgress::new(&planned)));
+            result = inventory => result,
+        }
+    }
+    async fn batch_inner(
+        &self,
+        files: Vec<FileSpec>,
+        mut batches: Option<tokio::sync::mpsc::Receiver<Vec<FileSpec>>>,
+        cancel: &CancellationToken,
+        sink: &EventSink,
+    ) -> Result<()> {
+        let aggregate = Arc::new(std::sync::Mutex::new(BatchProgress::new(&[])));
         let _final_progress = FinalProgress {
             sink: sink.clone(),
             state: aggregate.clone(),
@@ -1083,26 +1109,12 @@ impl Downloader {
                 forward(progress);
             }
         });
-        // Seed the queue before hash/network work, including entries later in
-        // the queue. Resume must not briefly display every existing file as 0.
-        for chunk in planned.chunks(256) {
-            sink(Event {
-                files: chunk.to_vec(),
-                ..Event::new("file_plan", "")
-            });
-        }
-        sink(Event {
-            reset_progress: true,
-            ..aggregate.lock().unwrap().event()
-        });
-        // The initial size inventory already accounts for all local data.
-        // Check/reuse each file as its slot opens; missing files no longer wait
-        // for a second pass over the entire local installation.
-        sink(Event::new("stage", "复用缓存并下载缺失文件"));
+        let mut incoming = Some(files);
+        let mut seen = std::collections::HashSet::new();
+        let mut queue = std::collections::VecDeque::new();
         let mut completed = 0;
         let mut failures = Vec::new();
         let mut errors = Vec::new();
-        let mut queue = files.into_iter().zip(planned).peekable();
         let mut active = FuturesUnordered::new();
         let mut concurrency = crate::download_concurrency::Concurrency::new(
             if self.settings.adaptive_concurrency {
@@ -1120,8 +1132,37 @@ impl Downloader {
         sample.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             check_cancel(cancel)?;
+            if let Some(files) = incoming.take() {
+                let mut unique = std::collections::BTreeMap::new();
+                for file in files {
+                    if !seen.contains(&file.path) {
+                        unique.insert(file.path.clone(), file);
+                    }
+                }
+                seen.extend(unique.keys().cloned());
+                let inventoried = self
+                    .inventory(unique.into_values().collect(), cancel)
+                    .await?;
+                let planned: Vec<_> = inventoried.iter().map(|(_, file)| file.clone()).collect();
+                let reset = aggregate.lock().unwrap().files.is_empty();
+                aggregate.lock().unwrap().extend(&planned);
+                queue.extend(inventoried);
+                for chunk in planned.chunks(256) {
+                    sink(Event {
+                        files: chunk.to_vec(),
+                        ..Event::new("file_plan", "")
+                    });
+                }
+                sink(Event {
+                    reset_progress: reset,
+                    ..aggregate.lock().unwrap().event()
+                });
+                if !planned.is_empty() {
+                    sink(Event::new("stage", "复用缓存并下载缺失文件"));
+                }
+            }
             while active.len() < concurrency.limit {
-                let Some((file, known)) = queue.next() else {
+                let Some((file, known)) = queue.pop_front() else {
                     break;
                 };
                 let sink = sink.clone();
@@ -1147,13 +1188,17 @@ impl Downloader {
                     Ok::<_, anyhow::Error>((file, result))
                 });
             }
-            if active.is_empty() {
+            if active.is_empty() && batches.is_none() {
                 break;
             }
             tokio::select! {
                 biased;
                 _ = cancel.cancelled() => bail!("操作已取消"),
-                result = active.next() => {
+                chunk = async { batches.as_mut().unwrap().recv().await }, if batches.is_some() => {
+                    if let Some(files) = chunk { incoming = Some(files); }
+                    else { batches = None; }
+                }
+                result = active.next(), if !active.is_empty() => {
                     let (file, result) = result.expect("active downloads exist")?;
                     match result {
                         Ok(()) => completed += 1,
@@ -1163,7 +1208,7 @@ impl Downloader {
                         }
                     }
                 }
-                _ = sample.tick(), if self.settings.adaptive_concurrency && queue.peek().is_some() => {
+                _ = sample.tick(), if self.settings.adaptive_concurrency && !queue.is_empty() => {
                     let now = tokio::time::Instant::now();
                     concurrency.observe(self.metrics.bytes.load(Ordering::Relaxed), self.metrics.retries.load(Ordering::Relaxed), completed, now - sampled_at, active.len());
                     sampled_at = now;
@@ -1920,6 +1965,87 @@ mod tests {
                 .all(|f| f.status != "downloading")
         );
         assert_eq!(events.last().unwrap().files[0].status, "done");
+    }
+
+    #[tokio::test]
+    async fn streaming_downloads_finish_early_files_before_metadata_queue_closes() {
+        use sha1::Digest;
+        let temp = tempfile::tempdir().unwrap();
+        let downloader = Downloader::new(
+            temp.path(),
+            Settings {
+                proxy_mode: "none".into(),
+                ..Settings::default()
+            },
+        )
+        .unwrap();
+        let first = FileSpec {
+            url: "https://example.invalid/first".into(),
+            path: temp.path().join("first.jar"),
+            hash: hex::encode(sha1::Sha1::digest(b"mod")),
+            sha256: false,
+            size: 3,
+        };
+        let second = FileSpec {
+            path: temp.path().join("second.jar"),
+            ..first.clone()
+        };
+        let cache = object_path(&temp.path().join("cache/objects"), &first).unwrap();
+        tokio::fs::create_dir_all(cache.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&cache, b"mod").await.unwrap();
+        let ready = Arc::new(tokio::sync::Notify::new());
+        let signal = ready.clone();
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let sink: EventSink = Arc::new(move |event| {
+            if event
+                .files
+                .iter()
+                .any(|f| f.name == "first.jar" && f.status == "done")
+            {
+                signal.notify_one();
+            }
+            captured.lock().unwrap().push(event);
+        });
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let cancel = CancellationToken::new();
+        let producer = async {
+            tx.send(vec![first.clone()]).await.unwrap();
+            ready.notified().await;
+            assert!(
+                first.path.is_file(),
+                "first batch completes while producer is still open"
+            );
+            tx.send(vec![first.clone(), second.clone()]).await.unwrap();
+            drop(tx);
+        };
+        let (_, result) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(producer, downloader.batch_stream(rx, &cancel, &sink))
+        })
+        .await
+        .unwrap();
+        result.unwrap();
+        assert_eq!(tokio::fs::read(second.path).await.unwrap(), b"mod");
+        let events = events.lock().unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| e.kind == "file_plan")
+                .map(|e| e.files.len())
+                .sum::<usize>(),
+            2
+        );
+        let final_progress = events.iter().rev().find(|e| e.kind == "progress").unwrap();
+        assert_eq!(
+            (
+                final_progress.completed,
+                final_progress.total,
+                final_progress.bytes
+            ),
+            (2, 2, 6)
+        );
     }
 
     #[tokio::test]

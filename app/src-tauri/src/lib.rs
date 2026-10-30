@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 mod clipboard;
 mod download_retry;
+mod file_drag;
 mod folder_scan;
 mod import_picker;
 mod jobs;
@@ -118,6 +119,9 @@ enum Request {
         source: nekocrate_core::resources::ResourceCopySource,
         id: String,
         version: String,
+    },
+    ExportResource {
+        source: nekocrate_core::resources::ResourceCopySource,
     },
     ResourcePlans {
         id: String,
@@ -480,6 +484,12 @@ fn dispatch<'a>(
                     json!(true)
                 } else { json!(false) }
             },
+            Request::ExportResource{source}=>{
+                let worker=launcher.clone();
+                let path=tauri::async_runtime::spawn_blocking(move || worker.resource_export_path(&source)).await??;
+                let window=app.get_webview_window("main").ok_or_else(|| anyhow::anyhow!("启动器窗口已关闭"))?;
+                json!(file_drag::start(window,path).await?)
+            },
             Request::ResourcePlans{id,version}=>{
                 let launcher=launcher.clone();
                 json!(tauri::async_runtime::spawn_blocking(move || launcher.resource_plans(&id,&version)).await??)
@@ -638,8 +648,7 @@ fn dispatch<'a>(
                     else { launcher.install(&id,&cancel,&sink).await }
                 };
                 let operation = nekocrate_core::loader::with_pause(receiver.clone(), operation);
-                pausable::run(operation,&cancel,receiver).await?;
-                json!(true)
+                json!(pausable::run(operation,&cancel,receiver).await?)
             },
             Request::Launch{id}=>{let (cancel,_guard)=state.job().await?;json!(launcher.launch(&id,&cancel,sink).await?)},
             Request::Stop{id}=>{launcher.stop_game(&id)?;json!(true)},

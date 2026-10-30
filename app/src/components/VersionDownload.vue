@@ -97,7 +97,10 @@ const selectionColor = computed(() =>
 </script>
 
 <template>
-  <section class="modal glass-surface version-download">
+  <section
+    class="modal glass-surface version-download"
+    data-drop-kind="modpack"
+  >
     <header class="modal-header">
       <h2 class="dialog-heading" tabindex="-1" autofocus>
         {{ t("添加新的版本") }}

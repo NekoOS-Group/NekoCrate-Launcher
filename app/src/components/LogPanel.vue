@@ -17,7 +17,6 @@ import {
   filterLogs,
   copyLogRows,
 } from "../logPresentation";
-import type { CrashReport } from "../types";
 import type { LogStore } from "../logStore";
 import { LogViewport } from "../logViewport";
 import { createViewportMotion } from "../viewportMotion";
@@ -25,32 +24,12 @@ import { listRevealStyle } from "../listMotion";
 
 const props = defineProps<{
   store: LogStore;
-  loadDiagnosis?: (id: string) => Promise<CrashReport | null>;
-  diagnosisRevision?: number;
   instances: readonly { id: string; name: string }[];
   initialScope: string;
   session: number;
 }>();
 const emit = defineEmits<{ close: []; copy: [text: string] }>();
 const filter = reactive({ scope: props.initialScope, level: "all", query: "" });
-const diagnosis = ref<CrashReport | null>(null);
-let diagnosisRequest = 0;
-watch(
-  [() => filter.scope, () => props.session, () => props.diagnosisRevision],
-  async () => {
-    const ticket = ++diagnosisRequest;
-    diagnosis.value = null;
-    if (!props.loadDiagnosis || ["all", "launcher"].includes(filter.scope))
-      return;
-    try {
-      const report = await props.loadDiagnosis(filter.scope);
-      if (ticket === diagnosisRequest) diagnosis.value = report;
-    } catch {
-      /* Diagnostic I/O must never hide the underlying game log. */
-    }
-  },
-  { immediate: true },
-);
 const raw = shallowRef(props.store.snapshot());
 const presenter = createLogPresenter();
 const rows = computed(() =>
@@ -234,7 +213,6 @@ onMounted(() => {
   });
 });
 onBeforeUnmount(() => {
-  diagnosisRequest++;
   revealRevision++;
   if (revealFrame !== undefined) cancelAnimationFrame(revealFrame);
   motion.dispose();
@@ -279,32 +257,6 @@ onBeforeUnmount(() => {
         </button>
       </div>
     </header>
-    <details v-if="diagnosis" class="crash-diagnosis" open>
-      <summary>
-        {{ t("崩溃诊断") }}<small>{{ diagnosis.version }}</small>
-      </summary>
-      <div class="crash-findings">
-        <p v-if="!diagnosis.findings.length">
-          {{ t("未找到明确的已知原因，请结合完整日志继续排查。") }}
-        </p>
-        <article v-for="finding in diagnosis.findings" :key="finding.code">
-          <strong>{{ t(finding.title) }}</strong>
-          <p>{{ t(finding.advice) }}</p>
-          <details>
-            <summary>{{ t("日志依据") }}</summary>
-            <pre>{{ finding.evidence.join("\n") }}</pre>
-          </details>
-        </article>
-        <small>{{ t("诊断来自本次运行日志，不代表已确定唯一原因。") }}</small>
-        <button
-          type="button"
-          class="text-button"
-          @click="emit('copy', JSON.stringify(diagnosis, null, 2))"
-        >
-          <Copy :size="13" />{{ t("复制诊断") }}
-        </button>
-      </div>
-    </details>
     <div class="log-filters">
       <div class="list-reveal-item" :style="listRevealStyle(0)">
         <label id="log-scope-label" class="sr-only">{{ t("日志来源") }}</label
@@ -404,52 +356,3 @@ onBeforeUnmount(() => {
     </button>
   </section>
 </template>
-
-<style scoped>
-.crash-diagnosis {
-  flex: 0 0 auto;
-  min-height: 0;
-  border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent);
-  padding: 8px var(--panel-inset);
-}
-.crash-diagnosis > summary {
-  cursor: pointer;
-  font-size: 12px;
-}
-.crash-diagnosis small {
-  margin-left: 8px;
-  opacity: 0.6;
-  font-size: 10px;
-}
-.crash-findings {
-  max-height: 210px;
-  overflow-y: auto;
-  padding: 8px 4px;
-  font-size: 12px;
-}
-.crash-findings article + article {
-  margin-top: 12px;
-}
-.crash-findings p {
-  margin: 5px 0;
-  opacity: 0.8;
-  line-height: 1.6;
-}
-.crash-findings pre {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  font-size: 10px;
-}
-.crash-findings details summary {
-  cursor: pointer;
-  opacity: 0.7;
-}
-</style>
-
-<style scoped>
-.crash-findings > small {
-  display: block;
-  margin: 8px 0;
-  line-height: 1.5;
-}
-</style>

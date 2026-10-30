@@ -181,6 +181,7 @@ export interface CrashReport {
   }[];
 }
 export interface LauncherEvent {
+  pack_missing?: ModpackStatus;
   crash?: CrashReport;
   kind: string;
   message: string;
@@ -215,10 +216,19 @@ export interface DownloadFile {
   step?: string;
 }
 export interface WorkflowStep {
+  detail?: string;
+  resolved?: { completed: number; total: number };
   activity?: Record<string, number>;
   id: string;
   label: string;
-  status: "pending" | "running" | "paused" | "done" | "error" | "cancelled";
+  status:
+    | "pending"
+    | "running"
+    | "paused"
+    | "waiting"
+    | "done"
+    | "error"
+    | "cancelled";
   fileCount: number;
   filesDone: number;
 }
@@ -246,7 +256,7 @@ export interface Task {
   download_progress: number;
   cancellable: boolean;
   title: string;
-  status: "running" | "paused" | "done" | "error" | "cancelled";
+  status: "running" | "paused" | "waiting" | "done" | "error" | "cancelled";
   message: string;
   progress: number;
   indeterminate: boolean;
@@ -295,6 +305,7 @@ export interface VersionStorage {
 }
 
 export interface ModpackFile {
+  display_name?: string | null;
   key: string;
   path: string | null;
   optional: boolean;

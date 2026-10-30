@@ -15,7 +15,7 @@ defineEmits<{ select: [path: string]; import: []; create: [] }>();
 </script>
 
 <template>
-  <div class="instance-picker-content">
+  <div class="instance-picker-content" data-drop-kind="directory">
     <TransitionGroup
       name="instance-choice"
       tag="div"

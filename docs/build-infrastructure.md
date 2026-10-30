@@ -143,6 +143,10 @@ Linux 没有要求普通应用持有类似 macOS 的本机签名证书；可按�
 验证失败时停止执行，不退回临时签名。Windows/Linux 的 `cargo ui` 路径不执行该脚本。
 `tauri.local.conf.json` 提供本机 `.app` 打包覆盖配置，不由 Release 工作流加载。
 
+该自签方案只固定签名要求，无法固定 macOS 钥匙串的分区身份；自签应用的分区仍为
+随编译变化的 `cdhash`，因此「始终允许」后也可能在下一次 Rust 重编译后再次询问密码。
+跨构建的稳定分区身份需要 Apple 开发者签名的 Team ID，详见[账户凭据说明](authentication.md)。
+
 玩家的微软刷新令牌始终留在玩家自己的系统凭据库：macOS Keychain、Windows
 [Credential Manager](https://learn.microsoft.com/en-us/windows/win32/secauthn/credentials-management)、
 Linux [Secret Service](https://specifications.freedesktop.org/secret-service/latest/)。

@@ -50,6 +50,7 @@ function submit() {
 </script>
 <template>
   <section
+    data-drop-kind="modpack"
     class="modal glass-surface pack-import"
     :class="{ 'online-pack': online }"
   >

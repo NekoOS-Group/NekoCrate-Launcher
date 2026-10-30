@@ -61,8 +61,18 @@ impl Launcher {
                 };
                 let api = crate::network::client_builder(self.root(), &settings)?
                     .redirect(reqwest::redirect::Policy::none())
+                    .http1_only()
                     .build()?;
-                provider::resolve(&mut subset, api_key, &api, cancel, |_| Ok(())).await?;
+                provider::resolve(
+                    &mut subset,
+                    api_key,
+                    &api,
+                    cancel,
+                    &Event::scoped(&sink, id, Some("mod_resolve")),
+                    None,
+                    |_| Ok(()),
+                )
+                .await?;
                 file = subset.files.remove(0);
                 if crate::pack_content::kind(file.path.as_deref()) != "mods" {
                     bail!("此声明对应的文件不是 Mod");

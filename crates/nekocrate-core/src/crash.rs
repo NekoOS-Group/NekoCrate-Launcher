@@ -1,10 +1,14 @@
 //! Evidence-based, local crash hints. Never infer a culprit from an exit code alone.
-use crate::{Launcher, diagnostics, storage};
+use crate::{
+    Launcher, diagnostics,
+    model::{Event, EventSink},
+    storage,
+};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek, SeekFrom, Write},
     path::Path,
     time::SystemTime,
 };
@@ -31,6 +35,15 @@ struct Rule {
     patterns: &'static [&'static str],
 }
 const RULES: &[Rule] = &[
+    Rule {
+        code: "module_conflict",
+        title: "Java 模块冲突",
+        advice: "检查启动类路径中是否重复包含游戏本体或依赖 JAR，并核对加载器的 ignoreList；错误中引用该包的 Mod 不一定是冲突来源。",
+        patterns: &[
+            "java.lang.module.resolutionexception",
+            "java.lang.layerinstantiationexception",
+        ],
+    },
     Rule {
         code: "heap",
         title: "Java 堆内存不足",
@@ -131,7 +144,7 @@ const RULES: &[Rule] = &[
 ];
 pub fn analyze(text: &str) -> Vec<Finding> {
     let lines: Vec<_> = text.lines().collect();
-    RULES.iter().filter_map(|rule| {
+    let mut findings: Vec<_> = RULES.iter().filter_map(|rule| {
         let evidence: Vec<_> = lines.iter().filter(|line| {
             let lower = line.to_ascii_lowercase();
             rule.patterns.iter().any(|pattern| lower.contains(pattern))
@@ -139,7 +152,79 @@ pub fn analyze(text: &str) -> Vec<Finding> {
                 && (!lower.contains("requires version") || lower.contains("missing") || lower.contains("incompatible"))
         }).take(3).map(|line| diagnostics::redact(line).chars().take(600).collect()).collect();
         (!evidence.is_empty()).then(|| Finding { code:rule.code.into(), title:rule.title.into(), advice:rule.advice.into(), evidence })
-    }).take(5).collect()
+    }).take(5).collect();
+    // Preserve the actual exception even when it has no dedicated rule. This is
+    // evidence for investigation, not an invented attribution to a mod.
+    if findings.is_empty() {
+        let mut evidence: Vec<_> = lines
+            .iter()
+            .rev()
+            .filter(|line| {
+                let line = line.trim();
+                line.starts_with("Caused by:")
+                    || line.starts_with("Exception in thread ")
+                    || (line.starts_with("java.")
+                        && (line.contains("Exception:") || line.contains("Error:")))
+            })
+            .take(3)
+            .map(|line| diagnostics::redact(line).chars().take(600).collect())
+            .collect();
+        evidence.reverse();
+        if !evidence.is_empty() {
+            findings.push(Finding {
+                code: "unclassified_exception".into(),
+                title: "发现尚未分类的运行异常".into(),
+                advice:
+                    "以下为本次退出前的异常信息；尚不能确定具体原因，请结合异常调用栈继续排查。"
+                        .into(),
+                evidence,
+            });
+        }
+    }
+    findings
+}
+
+/// Diagnostics share the game log, so filtering, copying and saved logs all
+/// contain the same evidence. A disk error must not hide it from the live UI.
+pub(crate) fn write_to_log(
+    report: &CrashReport,
+    log: &Path,
+    id: &str,
+    sink: &EventSink,
+) -> std::io::Result<()> {
+    let line = |level: &str, message: &str| Event {
+        instance_id: Some(id.into()),
+        ..Event::new("diagnosis", format!("[{level}] [Diagnosis] {message}"))
+    };
+    let mut events = vec![line("ERROR", &report.exit)];
+    if report.findings.is_empty() {
+        events.push(line(
+            "WARN",
+            "未找到明确的已知原因，请结合完整日志继续排查。",
+        ));
+    }
+    for finding in &report.findings {
+        events.push(line("ERROR", &finding.title));
+        events.push(line("WARN", &finding.advice));
+        for evidence in &finding.evidence {
+            events.push(Event {
+                instance_id: Some(id.into()),
+                // Evidence is game output; do not translate it as launcher UI.
+                ..Event::new("log", format!("[ERROR] [Diagnosis] {evidence}"))
+            });
+        }
+    }
+    let result = (|| {
+        let mut file = fs::OpenOptions::new().append(true).open(log)?;
+        for event in &events {
+            writeln!(file, "{}", event.message)?;
+        }
+        file.flush()
+    })();
+    for event in events {
+        sink(event);
+    }
+    result
 }
 fn tail(path: &Path) -> std::io::Result<String> {
     if !fs::symlink_metadata(path)?.file_type().is_file() {
@@ -161,7 +246,11 @@ pub(crate) fn collect(
     exit: String,
     secrets: &[String],
 ) -> CrashReport {
-    let mut paths = vec![log.to_owned(), working.join(format!("hs_err_pid{pid}.log"))];
+    let mut paths = vec![
+        log.to_owned(),
+        working.join("logs/latest.log"),
+        working.join(format!("hs_err_pid{pid}.log")),
+    ];
     let reports = working.join("crash-reports");
     if !fs::symlink_metadata(&reports).is_ok_and(|m| m.file_type().is_symlink())
         && let Ok(entries) = fs::read_dir(reports)
@@ -227,6 +316,53 @@ impl Launcher {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn module_conflicts_and_unclassified_exceptions_keep_the_real_error() {
+        let message = "Exception in thread \"main\" java.lang.module.ResolutionException: Modules _1._20._1 and minecraft export package net.minecraft.server to module sdm_economy";
+        let findings = analyze(message);
+        assert_eq!(findings[0].code, "module_conflict");
+        assert_eq!(findings[0].evidence, [message]);
+        let unknown = analyze(
+            "Exception in thread \"main\" java.lang.IllegalStateException: fixture\nCaused by: sample.UnfamiliarException: reason",
+        );
+        assert_eq!(unknown[0].code, "unclassified_exception");
+        assert_eq!(unknown[0].evidence.len(), 2);
+    }
+    #[test]
+    fn reads_fresh_game_log_and_appends_diagnosis_to_saved_and_live_logs() {
+        let root = tempfile::tempdir().unwrap();
+        let log = root.path().join("game.log");
+        fs::write(&log, "game output\n").unwrap();
+        let start = SystemTime::now();
+        fs::create_dir(root.path().join("logs")).unwrap();
+        fs::write(root.path().join("logs/latest.log"), "Caused by: java.lang.module.ResolutionException: Modules game and minecraft export package net.minecraft.server password=secret").unwrap();
+        let report = collect(
+            root.path(),
+            &log,
+            start,
+            1,
+            "Pack".into(),
+            "Exit 1".into(),
+            &[],
+        );
+        assert_eq!(report.findings[0].code, "module_conflict");
+        assert!(report.sources.contains(&"latest.log".to_owned()));
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let saved = events.clone();
+        let sink: EventSink = std::sync::Arc::new(move |event| saved.lock().unwrap().push(event));
+        write_to_log(&report, &log, "instance", &sink).unwrap();
+        let text = fs::read_to_string(&log).unwrap();
+        assert!(text.starts_with("game output\n"));
+        assert!(text.contains("[ERROR] [Diagnosis] Java 模块冲突"));
+        assert!(!text.contains("secret"));
+        let events = events.lock().unwrap();
+        assert!(
+            events
+                .iter()
+                .all(|event| event.instance_id.as_deref() == Some("instance")
+                    && text.contains(&event.message))
+        );
+    }
     #[test]
     fn distinguishes_heap_and_native_memory_and_keeps_evidence() {
         let heap = analyze("Caused by: java.lang.OutOfMemoryError: Java heap space");

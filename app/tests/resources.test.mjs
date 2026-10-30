@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { resourceDropTarget, routeResourceDrop } from "../src/resources.ts";
+import { dropHint } from "../src/dropSurface.ts";
+import {
+  resourceDropTarget,
+  routeResourceDrop,
+  resourceDropIssue,
+} from "../src/resources.ts";
 import {
   settingsFixture,
   deferred,
@@ -119,7 +124,7 @@ test("resource installation has independent progress and supports pause without 
   }
 });
 
-test("invalid or mixed drops report a corner error and never silently associate directories", async () => {
+test("invalid or mixed drops report a target-local error and never silently associate directories", async () => {
   const f = await settingsFixture();
   try {
     f.handlers.inspect_resources = () => [
@@ -127,7 +132,8 @@ test("invalid or mixed drops report a corner error and never silently associate 
     ];
     f.fileDrop({ payload: { type: "drop", paths: ["/broken.zip"] } });
     await flush();
-    assert.equal(f.context.error.value, "invalid archive");
+    assert.equal(dropHint.value.message, "invalid archive");
+    assert.equal(f.context.error.value, "");
     assert.equal(f.context.resourceSession.value, undefined);
     assert.equal(
       f.calls.some((c) => c.op === "scan_folders"),
@@ -136,4 +142,188 @@ test("invalid or mixed drops report a corner error and never silently associate 
   } finally {
     f.dispose();
   }
+});
+
+test("ZIP target constraints preserve inspected types and reject mismatches, including mixed batches", () => {
+  const files = [
+    { name: "textures.zip", format: "resource", kinds: ["resourcepacks"] },
+    { name: "shader.zip", format: "resource", kinds: ["shaderpacks"] },
+    { name: "world.zip", format: "resource", kinds: ["saves"] },
+    { name: "pack.zip", format: "modpack", kinds: [] },
+  ];
+  const before = structuredClone(files);
+  for (const file of files) {
+    for (const kind of [
+      "mods",
+      "resourcepacks",
+      "shaderpacks",
+      "datapacks",
+      "saves",
+      "modpack",
+    ]) {
+      const matches =
+        kind === "modpack"
+          ? file.format === "modpack"
+          : file.kinds.includes(kind);
+      assert.equal(
+        resourceDropIssue([file], kind) === undefined,
+        matches,
+        `${file.name} -> ${kind}`,
+      );
+    }
+  }
+  assert.ok(resourceDropIssue(files.slice(0, 2), "resourcepacks"));
+  assert.equal(
+    resourceDropIssue(
+      [
+        {
+          name: "both.zip",
+          format: "resource",
+          kinds: ["datapacks", "resourcepacks"],
+        },
+      ],
+      "datapacks",
+    ),
+    undefined,
+  );
+  assert.deepEqual(files, before);
+});
+
+function dropElement(dataset, parent) {
+  return {
+    dataset,
+    getBoundingClientRect: () => ({
+      left: 30,
+      top: 60,
+      width: 350,
+      height: 260,
+    }),
+    closest(selector) {
+      if (selector.includes("data-drop-kind") && this.dataset.dropKind)
+        return this;
+      if (
+        selector.includes("data-resource-instance") &&
+        this.dataset.resourceInstance
+      )
+        return this;
+      return parent?.closest(selector) || null;
+    },
+  };
+}
+
+test("a ZIP dropped on the wrong resource tab stays there with a reason and never opens another importer", async () => {
+  const f = await settingsFixture();
+  try {
+    f.fixture.hovered = dropElement(
+      { dropKind: "resourcepacks" },
+      dropElement({
+        resourceInstance: "instance-a",
+        resourceVersion: "1.21.1",
+      }),
+    );
+    f.handlers.inspect_resources = () => [
+      {
+        name: "world.zip",
+        path: "/world.zip",
+        format: "resource",
+        kinds: ["saves"],
+        issue: null,
+      },
+    ];
+    f.fileDrop({
+      payload: {
+        type: "enter",
+        position: { x: 100, y: 100 },
+        paths: ["/world.zip"],
+      },
+    });
+    await flush();
+    assert.equal(dropHint.value.invalid, true);
+    for (let i = 0; i < 10; i++)
+      f.fileDrop({ payload: { type: "over", position: { x: 105, y: 100 } } });
+    f.fileDrop({
+      payload: {
+        type: "drop",
+        position: { x: 100, y: 100 },
+        paths: ["/world.zip"],
+      },
+    });
+    await flush();
+    assert.equal(
+      f.calls.filter((call) => call.op === "inspect_resources").length,
+      1,
+    );
+    assert.equal(
+      f.calls.some((call) =>
+        ["preview_modpack", "scan_folders", "supply_modpack_files"].includes(
+          call.op,
+        ),
+      ),
+      false,
+    );
+    assert.equal(f.context.resourceSession.value, undefined);
+    assert.equal(f.context.error.value, "");
+    assert.equal(dropHint.value.left, 30);
+    assert.equal(dropHint.value.invalid, true);
+    assert.match(dropHint.value.message, /world.zip/);
+  } finally {
+    f.dispose();
+  }
+});
+
+test("a waiting manual install does not hijack drops on another version", async () => {
+  const f = await settingsFixture();
+  try {
+    f.context.tasks.value = [
+      {
+        id: "waiting",
+        status: "waiting",
+        modpack_status: { missing: [{ key: "file" }] },
+      },
+    ];
+    f.fixture.hovered = dropElement({
+      resourceInstance: "instance-a",
+      resourceVersion: "1.21.1",
+      dropKind: "version",
+    });
+    f.handlers.inspect_resources = () => [
+      {
+        name: "cat.jar",
+        path: "/cat.jar",
+        format: "resource",
+        kinds: ["mods"],
+        issue: null,
+      },
+    ];
+    f.fileDrop({
+      payload: {
+        type: "drop",
+        position: { x: 100, y: 100 },
+        paths: ["/cat.jar"],
+      },
+    });
+    await flush();
+    assert.equal(f.context.resourceSession.value.version, "1.21.1");
+    assert.equal(f.context.utility.value, null);
+    assert.equal(
+      f.calls.some((call) => call.op === "supply_modpack_files"),
+      false,
+    );
+  } finally {
+    f.dispose();
+  }
+});
+
+test("an explicit stale instance target never inherits the current version", () => {
+  const instances = [
+    { id: "a", versions: [{ id: "selected" }] },
+    { id: "b", versions: [{ id: "selected" }] },
+  ];
+  assert.equal(
+    resourceDropTarget(dropElement({ resourceInstance: "b" }), instances, {
+      instance: "a",
+      version: "selected",
+    }),
+    undefined,
+  );
 });

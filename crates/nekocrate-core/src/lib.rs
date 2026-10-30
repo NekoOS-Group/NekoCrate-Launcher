@@ -59,6 +59,8 @@ struct Shared {
     db: Mutex<Database>,
     operation: tokio::sync::Mutex<()>,
     account_operation: tokio::sync::Mutex<()>,
+    pack_import: tokio::sync::Mutex<()>,
+    active_modpack: Mutex<Option<(String, String)>>,
     progress_scanned: tokio::sync::Mutex<HashSet<(String, String)>>,
     games: Mutex<HashMap<String, CancellationToken>>,
     mod_summaries: version_management::SummaryCache,
@@ -119,6 +121,8 @@ impl Launcher {
             db: Mutex::new(db),
             operation: tokio::sync::Mutex::new(()),
             account_operation: tokio::sync::Mutex::new(()),
+            pack_import: tokio::sync::Mutex::new(()),
+            active_modpack: Mutex::new(None),
             progress_scanned: tokio::sync::Mutex::new(HashSet::new()),
             games: Mutex::new(HashMap::new()),
             mod_summaries: version_management::SummaryCache::default(),
@@ -925,7 +929,7 @@ impl Launcher {
         id: &str,
         cancel: &CancellationToken,
         sink: &EventSink,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         self.install_with_verification(id, cancel, sink, false)
             .await
     }
@@ -934,7 +938,7 @@ impl Launcher {
         id: &str,
         cancel: &CancellationToken,
         sink: &EventSink,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         self.install_with_verification(id, cancel, sink, true).await
     }
     async fn install_with_verification(
@@ -943,7 +947,7 @@ impl Launcher {
         cancel: &CancellationToken,
         sink: &EventSink,
         full_verification: bool,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         if let Some(selected) = self.instance(id)?.selected().filter(|v| v.modpack) {
             return self
                 .install_modpack(id, &selected.id, cancel, sink, full_verification)
@@ -954,7 +958,8 @@ impl Launcher {
             if loader::has_record(&game, &selected.id) {
                 return self
                     .install_loader(id, &selected.id, cancel, sink, full_verification)
-                    .await;
+                    .await
+                    .map(|()| true);
             }
         }
         let _guard = self.0.operation.lock().await;
@@ -1067,7 +1072,7 @@ impl Launcher {
         self.set_installed(id, &selected.id, true)?;
         downloader.finish_installation(&sink).await;
         sink(Event::new("complete", "游戏文件与 Java 已准备好"));
-        Ok(())
+        Ok(true)
     }
     pub async fn begin_login(&self) -> Result<auth::DeviceChallenge> {
         auth::begin(
@@ -1422,6 +1427,8 @@ impl Launcher {
             let diagnosis = if unexpected {
                 let root = launcher.clone();
                 let exit = message.clone();
+                let log_sink = sink.clone();
+                let log_id = id.clone();
                 tokio::task::spawn_blocking(move || {
                     let report = crash::collect(
                         &working_directory,
@@ -1436,6 +1443,14 @@ impl Launcher {
                         storage::write_json(&log_dir.join("last-crash.json"), &report)
                     {
                         let _ = diagnostics::record_error(root.root(), "crash_diagnosis", &error);
+                    }
+                    if let Err(error) = crash::write_to_log(&report, &log_path, &log_id, &log_sink)
+                    {
+                        let _ = diagnostics::record_error(
+                            root.root(),
+                            "crash_diagnosis",
+                            &error.into(),
+                        );
                     }
                     report
                 })

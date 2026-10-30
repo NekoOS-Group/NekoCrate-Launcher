@@ -731,13 +731,20 @@ async fn cancellation_and_manual_file_hash_mismatch_cannot_complete_an_install()
     );
     let correct = temp.path().join("manual.jar");
     fs::write(&correct, b"mod").unwrap();
+    let operation = launcher.0.operation.lock().await;
+    *launcher.0.active_modpack.lock().unwrap() = Some((instance.id.clone(), id.clone()));
     assert_eq!(
-        launcher
-            .supply_modpack_files(&instance.id, &id, vec![correct])
-            .await
-            .unwrap(),
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            launcher.supply_modpack_files(&instance.id, &id, vec![correct])
+        )
+        .await
+        .unwrap()
+        .unwrap(),
         1
     );
+    *launcher.0.active_modpack.lock().unwrap() = None;
+    drop(operation);
     assert!(
         launcher
             .modpack_status(&instance.id, &id)
@@ -895,6 +902,98 @@ async fn offline_install_resumes_after_overrides_and_keeps_user_configuration_on
     assert_eq!(
         fs::read(directory.join("config/options.txt")).unwrap(),
         b"my settings"
+    );
+    // A manual-only dependency must not prevent the other resources and base
+    // game from installing, nor publish a runnable incomplete profile.
+    let mut job = launcher.pack_job(&instance.id, &id).unwrap();
+    let mut manual = job.pack.files[0].clone();
+    manual.key = "manual".into();
+    manual.path = Some("mods/manual.jar".into());
+    manual.urls.clear();
+    let mut automatic = manual.clone();
+    automatic.key = "automatic".into();
+    automatic.path = Some("mods/automatic.jar".into());
+    automatic.urls = vec!["https://example.invalid/automatic.jar".into()];
+    job.pack.files.extend([manual, automatic]);
+    job.files_done = false;
+    job.completed = false;
+    record::write_job(&game, &id, &job).unwrap();
+    let cache = crate::download::object_path(
+        &root.join("cache/objects"),
+        &FileSpec {
+            url: "https://example.invalid/automatic.jar".into(),
+            path: directory.join("mods/automatic.jar"),
+            hash: hex::encode(Sha1::digest(b"mod")),
+            sha256: false,
+            size: 3,
+        },
+    )
+    .unwrap();
+    fs::create_dir_all(cache.parent().unwrap()).unwrap();
+    fs::write(&cache, b"mod").unwrap();
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = events.clone();
+    let sink: EventSink = Arc::new(move |event| captured.lock().unwrap().push(event));
+    assert!(
+        !launcher
+            .install(&instance.id, &CancellationToken::new(), &sink)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        fs::read(directory.join("mods/automatic.jar")).unwrap(),
+        b"mod"
+    );
+    assert!(
+        !launcher
+            .instance(&instance.id)
+            .unwrap()
+            .selected()
+            .unwrap()
+            .installed
+    );
+    assert_eq!(
+        launcher
+            .modpack_status(&instance.id, &id)
+            .await
+            .unwrap()
+            .missing
+            .len(),
+        1
+    );
+    assert!(
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| e.pack_missing.is_some())
+    );
+    assert!(
+        !events
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|e| e.kind == "complete" && e.message == "整合包已安装")
+    );
+    let supplied = temp.path().join("manual.jar");
+    fs::write(&supplied, b"mod").unwrap();
+    launcher
+        .supply_modpack_files(&instance.id, &id, vec![supplied])
+        .await
+        .unwrap();
+    assert!(
+        launcher
+            .install(&instance.id, &CancellationToken::new(), &sink)
+            .await
+            .unwrap()
+    );
+    assert!(
+        launcher
+            .instance(&instance.id)
+            .unwrap()
+            .selected()
+            .unwrap()
+            .installed
     );
 }
 

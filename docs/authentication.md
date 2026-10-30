@@ -53,7 +53,9 @@ Microsoft device code → Microsoft access/refresh token
 
 macOS 的钥匙串授权还取决于程序的代码签名身份。`cargo ui` 使用固定的本地自签证书，在首次启动和每次 Rust 重载前签名；指定要求绑定 `dev.nekocrate.launcher` 和证书指纹，不再绑定随编译变化的二进制哈希。私钥保存在当前用户钥匙串，仅允许系统 `codesign` 使用；公证书与身份配置保存在 `~/Library/Application Support/NekoCrate/signing/`。缺失原身份时停止启动，不静默生成新证书。
 
-从旧的临时签名迁移后，已有账户的凭据可能仍需授权一次；在系统提示中选择「始终允许」才会持久记住授权。钥匙串锁定、系统策略或证书被替换仍可能触发提示。此实现不放开凭据条目的访问控制，也不读取用户的钥匙串密码。GitHub Release 需要另外配置持久的发布签名身份，本机证书不会自动用于远程构建。参见 [Apple TN2206：代码签名与钥匙串](https://developer.apple.com/library/archive/technotes/tn2206/_index.html)。
+固定自签证书只稳定指定签名要求，**不能保证重新编译后免钥匙串授权**。macOS 还检查条目的分区列表：Apple 开发者签名使用 Team ID，普通自签名仍使用随二进制变化的 `cdhash`。2026-10-30 本机检查确认：自签名有效，但账户条目的分区仍是旧构建的 `cdhash`，因此即使点过「始终允许」仍会再次询问密码。参见 [Apple securityd 的分区身份实现](https://github.com/apple-oss-distributions/Security/blob/main/securityd/src/clientid.cpp)。
+
+稳定解决应使用同一开发团队的 Apple Development／Developer ID 签名；没有该身份时，需要另行设计二进制固定、严格验证调用方签名的凭据服务，自签证书本身不足以解决。当前实现保留凭据访问控制，不读取钥匙串密码、不扩大到所有应用授权。钥匙串锁定或系统策略仍可能要求解锁。GitHub Release 需要另外配置持久的发布签名身份，本机证书不会自动用于远程构建。
 
 Windows 使用 Windows Credential Manager 存储刷新令牌，Linux 使用 Secret Service；更新或重新编译不需要照搬 macOS 的应用签名授权流程。用户凭据不会进入构建环境，发布签名私钥也不会装入用户凭据库或分发到客户端，具体见[签名与密钥管理](build-infrastructure.md#签名与密钥管理)。
 

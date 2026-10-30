@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from "vue";
+import { onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { dropInteraction } from "../dropSurface";
 import { CheckCircle2 } from "lucide-vue-next";
 import {
   rememberDialogFocus,
@@ -14,6 +15,23 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{ close: [] }>();
 const dialog = ref<HTMLDialogElement>();
+let focusBeforeDrop: HTMLElement | null = null;
+watch(
+  dropInteraction,
+  (active) => {
+    const surface = dialog.value;
+    if (!surface?.open) return;
+    if (active) focusBeforeDrop = document.activeElement as HTMLElement;
+    // Native modal dialogs make the existing dock inert. Temporarily use the
+    // same dialog non-modally during a drag, retaining all its component state.
+    surface.close();
+    if (active) surface.show();
+    else surface.showModal();
+    if (!active && focusBeforeDrop?.isConnected)
+      focusBeforeDrop.focus({ preventScroll: true });
+  },
+  { flush: "sync" },
+);
 let unregister: (() => void) | undefined;
 onBeforeUnmount(() => unregister?.());
 function close() {
@@ -21,7 +39,8 @@ function close() {
 }
 onMounted(() => {
   if (dialog.value) rememberDialogFocus(dialog.value);
-  dialog.value?.showModal();
+  if (dropInteraction.value) dialog.value?.show();
+  else dialog.value?.showModal();
   if (dialog.value) unregister = registerDialog(dialog.value);
   // Start on the static title, keeping Tab navigation inside the dialog
   // without highlighting or arming its first action button.
@@ -35,9 +54,11 @@ onMounted(() => {
   <dialog
     ref="dialog"
     class="overlay-dialog"
+    data-drop-kind="blocked"
+    :class="{ 'drop-interaction': dropInteraction }"
     :aria-label="label"
     @cancel.prevent="close"
-    @click.self="close"
+    @click.self="!dropInteraction && close()"
   >
     <Transition
       name="dialog-panel"

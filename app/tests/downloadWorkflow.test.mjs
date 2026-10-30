@@ -467,25 +467,263 @@ test("single-file retry stays on the requested task and does not replace whole-t
   }
 });
 
-test("unexpected game exit opens its evidence report, and a new launch clears the previous report", async () => {
+test("crash diagnosis stays in the scoped log without a separate report panel", async () => {
   const f = await settingsFixture();
   try {
-    const report = {
-      version: "1.21.1",
-      time: 1,
-      exit: "1",
-      sources: ["game.log"],
-      findings: [],
-    };
-    f.fixture.event({ payload: { ...event("game_crash"), crash: report } });
+    f.fixture.event({
+      payload: {
+        ...event("diagnosis"),
+        message: "[ERROR] [Diagnosis] Java 模块冲突",
+      },
+    });
+    f.fixture.event({ payload: event("game_crash") });
     await flush();
     assert.equal(f.context.showLogs.value, true);
     assert.equal(f.context.logScope.value, "instance-a");
-    assert.deepEqual(await f.context.loadDiagnosis("instance-a"), report);
-    f.fixture.event({ payload: event("game_started") });
-    await flush();
-    assert.equal(await f.context.loadDiagnosis("instance-a"), null);
+    assert.equal(
+      f.context.logStore.snapshot().at(-2).message,
+      "[ERROR] [Diagnosis] Java 模块冲突",
+    );
+    assert.equal(
+      f.fixture.calls.some((call) => call.op === "crash_report"),
+      false,
+    );
   } finally {
     f.dispose();
+  }
+});
+
+test("整合包解析进度与下载文件共享阶段，元数据完成不会伪造下载完成量", () => {
+  const workflow = createWorkflow("modpack", "Pack");
+  assert.equal(workflow.steps[0].id, "pack_files");
+  assert.equal(
+    workflow.steps.some((step) => step.id === "pack_resolve"),
+    false,
+  );
+  applyWorkflowEvent(workflow, {
+    ...event("workflow_progress", "pack_files"),
+    completed: 100,
+    total: 435,
+    message: "获取项目资料与下载地址（第 2 / 5 批）",
+  });
+  applyWorkflowEvent(
+    workflow,
+    event("file_plan", "pack_files", [file("first")]),
+  );
+  applyWorkflowEvent(
+    workflow,
+    event("file", "pack_files", [file("first", "done", 100)]),
+  );
+  assert.deepEqual(workflow.steps[0].resolved, { completed: 100, total: 435 });
+  assert.equal(workflow.steps[0].filesDone, 1);
+  assert.equal(workflow.steps[0].status, "running");
+});
+
+test("需手动补齐的整合包进入等待状态，无错误弹窗，也不会启动游戏", async () => {
+  const { fixture, context: ui, dispose } = await settingsFixture();
+  const instance = fixture.state.database.instances[0];
+  instance.versions.find((v) => v.id === instance.selected_version).modpack =
+    true;
+  const missing = {
+    name: "Pack",
+    completed: false,
+    missing: [
+      {
+        key: "manual",
+        path: "mods/manual.jar",
+        display_name: "Manual mod",
+        manual_url:
+          "https://www.curseforge.com/minecraft/mc-mods/manual/files/1",
+      },
+    ],
+  };
+  fixture.handlers.install = () => {
+    fixture.event({
+      payload: { ...event("pack_manual", "pack_files"), pack_missing: missing },
+    });
+    fixture.event({ payload: { ...event("workflow", "java") } });
+    return false;
+  };
+  fixture.handlers.modpack_status = () => missing;
+  try {
+    await ui.sync();
+    assert.equal(await ui.install(instance), false);
+    const task = ui.tasks.value[0];
+    assert.equal(task.status, "waiting");
+    assert.equal(task.workflow.steps[0].status, "done");
+    assert.equal(task.workflow.steps.at(-1).id, "pack_manual");
+    assert.equal(task.workflow.steps.at(-1).status, "waiting");
+    assert.equal(
+      task.workflow.steps.some((step) => step.status === "running"),
+      false,
+    );
+    assert.equal(task.modpack_status.missing[0].key, "manual");
+    assert.equal(ui.error.value, "");
+    assert.equal(ui.busy.value, false);
+    assert.equal(ui.utility.value, "downloads");
+    assert.equal(
+      fixture.calls.some((call) => call.op === "launch"),
+      false,
+    );
+    const workflow = task.workflow;
+    ui.utility.value = null;
+    const installs = fixture.calls.filter(
+      (call) => call.op === "install",
+    ).length;
+    await ui.startGame();
+    assert.equal(ui.utility.value, "downloads");
+    assert.equal(
+      fixture.calls.filter((call) => call.op === "install").length,
+      installs,
+    );
+    fixture.handlers.install = () => true;
+    fixture.handlers.select_version = () => true;
+    await ui.resumePack();
+    assert.equal(ui.tasks.value[0].workflow, workflow);
+    assert.equal(ui.tasks.value[0].status, "done");
+    assert.equal(ui.error.value, "");
+  } finally {
+    dispose();
+  }
+});
+
+test("拖入手动资源框，匹配失败留在区域内，补齐后继续", async () => {
+  const { fixture, context: ui, dispose } = await settingsFixture();
+  const instance = fixture.state.database.instances[0];
+  instance.versions.find((v) => v.id === instance.selected_version).modpack =
+    true;
+  const status = {
+    name: "Pack",
+    completed: false,
+    missing: [
+      { key: "manual", path: "mods/manual.jar", display_name: "Manual" },
+    ],
+  };
+  fixture.handlers.install = () => false;
+  fixture.handlers.modpack_status = () => status;
+  try {
+    await ui.sync();
+    await ui.install(instance);
+    ui.utility.value = "downloads";
+    fixture.hovered = {
+      dataset: {},
+      closest: (selector) =>
+        selector.includes("data-manual-pack-drop") ? fixture.hovered : null,
+      getBoundingClientRect: () => ({
+        left: 40,
+        top: 50,
+        width: 300,
+        height: 100,
+      }),
+    };
+    fixture.fileDrop({
+      payload: {
+        type: "enter",
+        position: { x: 100, y: 100 },
+        paths: ["/Downloads/manual.jar"],
+      },
+    });
+    assert.equal(ui.utility.value, "downloads");
+    assert.equal(ui.manualPackDragging.value, true);
+    fixture.fileDrop({ payload: { type: "leave" } });
+    assert.equal(ui.manualPackDragging.value, false);
+    fixture.handlers.supply_modpack_files = () => {
+      throw new Error("所选文件与整合包声明的文件校验值不匹配");
+    };
+    fixture.fileDrop({
+      payload: { type: "drop", paths: ["/Downloads/wrong.jar"] },
+    });
+    await flush();
+    assert.match(ui.manualPackError.value, /校验值不匹配/);
+    assert.equal(ui.error.value, "");
+    assert.equal(
+      fixture.calls.filter((call) => call.op === "inspect_resources").length,
+      1,
+    );
+    fixture.handlers.supply_modpack_files = (request) => {
+      assert.equal(request.id, instance.id);
+      assert.equal(request.version, instance.selected_version);
+      assert.deepEqual(request.paths, ["/Downloads/manual.jar"]);
+      status.missing = [];
+      return 1;
+    };
+    fixture.handlers.select_version = () => true;
+    fixture.handlers.install = () => true;
+    fixture.fileDrop({
+      payload: { type: "drop", paths: ["/Downloads/manual.jar"] },
+    });
+    await flush();
+    await flush();
+    assert.equal(ui.manualPackError.value, "");
+    assert.equal(ui.tasks.value[0].status, "done");
+  } finally {
+    dispose();
+  }
+});
+
+test("自动安装期间仍可拖入手动文件，补齐不会另开安装任务", async () => {
+  const { fixture, context: ui, dispose } = await settingsFixture();
+  const instance = fixture.state.database.instances[0];
+  instance.versions.find((v) => v.id === instance.selected_version).modpack =
+    true;
+  const download = deferred();
+  const status = {
+    name: "Pack",
+    completed: false,
+    missing: [{ key: "manual", path: "mods/manual.jar" }],
+  };
+  fixture.handlers.install = () => download.promise;
+  fixture.handlers.modpack_status = () => status;
+  fixture.handlers.supply_modpack_files = () => {
+    status.missing = [];
+    return 1;
+  };
+  await ui.sync();
+  const installing = ui.install(instance);
+  try {
+    fixture.event({
+      payload: { ...event("pack_manual", "pack_files"), pack_missing: status },
+    });
+    assert.equal(ui.busy.value, true);
+    ui.utility.value = "downloads";
+    fixture.hovered = {
+      dataset: {},
+      closest: (selector) =>
+        selector.includes("data-manual-pack-drop") ? fixture.hovered : null,
+      getBoundingClientRect: () => ({
+        left: 40,
+        top: 50,
+        width: 300,
+        height: 100,
+      }),
+    };
+    fixture.fileDrop({
+      payload: {
+        type: "enter",
+        position: { x: 100, y: 100 },
+        paths: ["/Downloads/manual.jar"],
+      },
+    });
+    assert.equal(ui.manualPackDragging.value, true);
+    fixture.fileDrop({
+      payload: { type: "drop", paths: ["/Downloads/manual.jar"] },
+    });
+    await flush();
+    await flush();
+    assert.equal(
+      fixture.calls.filter((call) => call.op === "supply_modpack_files").length,
+      1,
+    );
+    assert.equal(
+      fixture.calls.filter((call) => call.op === "install").length,
+      1,
+    );
+    assert.equal(ui.busy.value, true);
+    assert.equal(ui.manualPackError.value, "");
+    assert.equal(ui.current.value.modpack_status.missing.length, 0);
+  } finally {
+    download.resolve(true);
+    await installing;
+    dispose();
   }
 });

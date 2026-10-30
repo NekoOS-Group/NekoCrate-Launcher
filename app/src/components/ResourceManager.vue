@@ -42,7 +42,7 @@ import { createVersionContentLoader } from "../versionContentLoader";
 import { modFileName } from "../contentIdentity";
 import {
   resourceTransferKey,
-  isResourceCopyKind,
+  isResourceDragKind,
 } from "../useResourceTransfer";
 import { createSkinThumbnails } from "../skinThumbnails";
 import { builtinSkins } from "../builtinSkins";
@@ -112,7 +112,7 @@ const emit = defineEmits<{
 const transferResource = inject(resourceTransferKey, undefined);
 function beginResourceDrag(event: PointerEvent, row: ResourceRow) {
   const owner = row.owners[0];
-  if (!owner || !isResourceCopyKind(resourceKind.value) || locked(row)) return;
+  if (!owner || !isResourceDragKind(resourceKind.value) || locked(row)) return;
   transferResource?.(event, {
     kind: resourceKind.value,
     instance: owner.id,
@@ -723,12 +723,12 @@ async function changed(row: ResourceRow) {
 function showMod(id: string, version: string) {
   emit("manage", id, version, "mods");
 }
-async function drop(paths: string[]) {
-  if (tab.value === "skins") {
+async function drop(paths: string[], destination = tab.value) {
+  if (destination === "skins") {
     const images = paths.filter((p) => /\.png$/i.test(p));
     if (!images.length) emit("error", t("请选择 PNG 皮肤文件"));
     else await importPaths(images);
-  } else if (tab.value === "java" && paths.length === 1)
+  } else if (destination === "java" && paths.length === 1)
     await run(async () => {
       const registered = await library<{ path: string }>("register_java", {
         path: paths[0],
@@ -744,7 +744,7 @@ defineExpose({ drop, refresh });
 </script>
 
 <template>
-  <section class="modal glass-surface resource-manager">
+  <section class="modal glass-surface resource-manager" :data-drop-kind="tab">
     <header class="modal-header">
       <nav
         class="rm-tabs dialog-heading"
@@ -754,6 +754,7 @@ defineExpose({ drop, refresh });
         <button
           v-for="item in tabs"
           :key="item.id"
+          :data-drop-kind="item.id"
           :style="{ '--tab-color': item.color }"
           :class="{ active: tab === item.id }"
           :disabled="mutating"
@@ -958,7 +959,7 @@ defineExpose({ drop, refresh });
             :class="{
               active: resourceKey === row.key,
               'resource-drag-handle':
-                isResourceCopyKind(resourceKind) &&
+                isResourceDragKind(resourceKind) &&
                 !!transferResource &&
                 !locked(row),
               'is-disabled': resourceKind === 'mods' && !row.file.enabled,

@@ -330,6 +330,8 @@ fn is_zero(value: &u64) -> bool {
 #[derive(Clone, Debug, Serialize)]
 pub struct Event {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub pack_missing: Option<crate::modpack::PackStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub crash: Option<crate::crash::CrashReport>,
     pub kind: String,
     pub message: String,
@@ -351,6 +353,7 @@ pub struct Event {
 impl Event {
     pub fn new(kind: &str, message: impl Into<String>) -> Self {
         Self {
+            pack_missing: None,
             crash: None,
             kind: kind.into(),
             message: message.into(),

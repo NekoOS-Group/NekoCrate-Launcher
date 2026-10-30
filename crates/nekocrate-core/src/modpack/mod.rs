@@ -15,6 +15,7 @@ use std::{
 use tokio_util::sync::CancellationToken;
 mod archive;
 mod content_download;
+mod install_files;
 
 mod provider;
 mod record;
@@ -66,6 +67,8 @@ struct Job {
     files_done: bool,
     #[serde(default)]
     completed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pending_profile: Option<Value>,
     #[serde(default)]
     overridden: Option<std::collections::HashSet<String>>,
 }
@@ -77,7 +80,7 @@ impl Job {
             .unwrap_or_else(|| archive::override_paths(&self.archive, &self.pack))
     }
 }
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct PackStatus {
     pub name: String,
     pub missing: Vec<PackFile>,
@@ -238,6 +241,7 @@ impl Launcher {
             overrides_done: false,
             files_done: false,
             completed: false,
+            pending_profile: None,
             overridden: Some(overrides),
         };
         std::fs::create_dir_all(dir.join("mods"))?;
@@ -362,7 +366,13 @@ impl Launcher {
         version: &str,
         paths: Vec<PathBuf>,
     ) -> Result<usize> {
-        let _guard = self.0.operation.lock().await;
+        let _supply = self.0.pack_import.lock().await;
+        let _operation = self.0.operation.try_lock().ok();
+        if _operation.is_none()
+            && self.0.active_modpack.lock().unwrap().as_ref() != Some(&(id.into(), version.into()))
+        {
+            bail!("请等待当前任务完成。");
+        }
         self.idle(id)?;
         let job = self.pack_job(id, version)?;
         if job.completed {
@@ -382,7 +392,23 @@ impl Launcher {
                         archive::installed_destination(&target, file.path.as_deref().unwrap())?;
                     tokio::fs::create_dir_all(out.parent().unwrap()).await?;
                     if path != out {
-                        tokio::fs::copy(&path, &out).await?;
+                        let temporary = archive::managed_destination(
+                            &target,
+                            &format!(".nekocrate/manual-imports/{}", uuid::Uuid::new_v4()),
+                        )?;
+                        tokio::fs::create_dir_all(temporary.parent().unwrap()).await?;
+                        let staged = ManualImportFile(temporary);
+                        tokio::fs::copy(&path, &staged.0).await?;
+                        if !Downloader::verified(&staged.0, &file.sha1, false, file.size).await? {
+                            bail!("所选文件与整合包声明的文件校验值不匹配");
+                        }
+                        if !file.sha512.is_empty() {
+                            verify_sha512(&staged.0, &file.sha512, &CancellationToken::new())
+                                .await?;
+                        }
+                        let out =
+                            archive::installed_destination(&target, file.path.as_deref().unwrap())?;
+                        tokio::fs::rename(&staged.0, out).await?;
                     }
                     matched += 1;
                     break;
@@ -401,8 +427,10 @@ impl Launcher {
         cancel: &CancellationToken,
         sink: &EventSink,
         repair: bool,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let _guard = self.0.operation.lock().await;
+        *self.0.active_modpack.lock().unwrap() = Some((id.into(), selected.into()));
+        let _active = ActiveModpack(&self.0.active_modpack);
         self.idle(id)?;
         let mut job = self.pack_job(id, selected)?;
         let game = self.available_game_dir(id)?;
@@ -429,7 +457,7 @@ impl Launcher {
         } else {
             downloader
         };
-        sink(Event::workflow("pack_resolve", "解析整合包依赖"));
+        sink(Event::workflow("pack_files", "解析并下载整合包文件"));
         let key = if job.pack.format == "curseforge" {
             Some(crate::curseforge::key()?.to_owned())
         } else {
@@ -440,29 +468,9 @@ impl Launcher {
         } else {
             downloader
         };
-        if job.pack.format == "curseforge" {
-            // Never forward a provider credential to a redirected host.
-            let api = crate::network::client_builder(self.root(), &settings)?
-                .redirect(reqwest::redirect::Policy::none())
-                .build()?;
-            let mut checkpoint = job.clone();
-            provider::resolve(&mut job.pack, key, &api, cancel, |pack| {
-                checkpoint.pack = pack.clone();
-                record::write_job(&game, selected, &checkpoint)
-            })
-            .await?;
-        }
         job.completed = false;
         record::write_job(&game, selected, &job)?;
-        let status = self.modpack_status(id, selected).await?;
-        if !status.missing.is_empty() {
-            bail!(
-                "此整合包有 {} 个文件需要从作者页面手动下载，请补齐后继续",
-                status.missing.len()
-            );
-        }
         self.set_installed(id, selected, false)?;
-        sink(Event::workflow("pack_files", "下载整合包文件"));
         if repair {
             job.files_done = false;
         }
@@ -476,85 +484,18 @@ impl Launcher {
             });
         }
         if !job.files_done {
-            let mut files = vec![];
-            let mut mirrors = std::collections::HashMap::new();
-            let mut targets = std::collections::HashSet::new();
-            for file in &job.pack.files {
-                if job.overrides_done
-                    && file
-                        .path
-                        .as_ref()
-                        .is_some_and(|path| overridden.contains(&path.to_lowercase()))
-                {
-                    continue;
-                }
-                let path = archive::installed_destination(
-                    &target,
-                    file.path.as_deref().context("整合包文件尚未解析")?,
-                )?;
-                if !targets.insert(path.to_string_lossy().to_lowercase()) {
-                    bail!("整合包有多个文件写入同一位置");
-                }
-                if !file.urls.is_empty() {
-                    mirrors.insert(path.clone(), file.urls.clone());
-                    files.push(FileSpec {
-                        url: file.urls[0].clone(),
-                        path,
-                        hash: file.sha1.clone(),
-                        sha256: false,
-                        size: file.size,
-                    });
-                }
+            install_files::ContentInstall {
+                launcher: self,
+                id,
+                selected,
+                game: &game,
+                target: &target,
+                downloader: &downloader,
+                cancel,
+                sink: &sink,
             }
-            let cache = archive::managed_destination(&target, ".nekocrate/downloads")?;
-            let file_downloader = downloader.clone().with_mirrors(mirrors).with_cache(cache);
-            file_downloader
-                .import_cached_files(self.root(), &files, cancel)
-                .await?;
-            let launcher = self.clone();
-            let instance_id = id.to_owned();
-            let version_id = selected.to_owned();
-            let forward = Event::scoped(&sink, id, Some("pack_files"));
-            let last_progress = std::sync::Mutex::new(std::time::Instant::now());
-            let progress: EventSink = Arc::new(move |event| {
-                if event.kind == "progress" && event.total > 0 {
-                    let percent = if event.total_bytes > 0 {
-                        event.bytes as f64 / event.total_bytes as f64
-                    } else {
-                        event.completed as f64 / event.total as f64
-                    };
-                    let mut last = last_progress.lock().unwrap();
-                    if last.elapsed().as_secs_f32() > 1.0 || event.completed == event.total {
-                        let _ = launcher.save_download_progress(
-                            &instance_id,
-                            &version_id,
-                            (percent * 70.0).min(70.0),
-                        );
-                        *last = std::time::Instant::now();
-                    }
-                }
-                forward(event);
-            });
-            file_downloader.batch(files, cancel, &progress).await?;
-            // Modrinth declares both digests. Check SHA-512 before accepting content.
-            for file in &job.pack.files {
-                let supplied_by_override = job.overrides_done
-                    && file
-                        .path
-                        .as_ref()
-                        .is_some_and(|path| overridden.contains(&path.to_lowercase()));
-                if supplied_by_override {
-                    continue;
-                }
-                if !file.sha512.is_empty() {
-                    verify_sha512(
-                        &archive::installed_destination(&target, file.path.as_deref().unwrap())?,
-                        &file.sha512,
-                        cancel,
-                    )
-                    .await?;
-                }
-            }
+            .run(&mut job, key)
+            .await?;
             job.files_done = true;
             record::write_job(&game, selected, &job)?;
         }
@@ -577,33 +518,65 @@ impl Launcher {
             event.step = Some("pack_game".into());
             pack_sink(event);
         });
-        let profile = crate::loader::installer::Install {
-            root: self.root(),
-            game: &game,
-            minecraft: &job.pack.minecraft,
-            loader: job.pack.loader.as_ref(),
-            id: selected,
-            explicit_java: instance.java_path.as_deref(),
-            downloader: &downloader,
-            cancel,
-            sink: &loader_sink,
-            auto_java: settings.auto_java,
-        }
-        .run()
-        .await?;
+        let profile = if let Some(profile) = job.pending_profile.as_ref().filter(|_| !repair) {
+            profile.clone()
+        } else {
+            crate::loader::installer::Install {
+                root: self.root(),
+                game: &game,
+                minecraft: &job.pack.minecraft,
+                loader: job.pack.loader.as_ref(),
+                id: selected,
+                explicit_java: instance.java_path.as_deref(),
+                downloader: &downloader,
+                cancel,
+                sink: &loader_sink,
+                auto_java: settings.auto_java,
+            }
+            .run()
+            .await?
+        };
         crate::download::check_cancel(cancel)?;
         sink(Event::workflow("java", "Java 已准备好"));
+        job.pending_profile = Some(profile.clone());
+        record::write_job(&game, selected, &job)?;
+        // Imports can run beside network work, but final publication waits for
+        // their atomic copies and final hash checks to finish.
+        let _manual = self.0.pack_import.lock().await;
+        let status = self.modpack_status(id, selected).await?;
+        if !status.missing.is_empty() {
+            sink(Event {
+                pack_missing: Some(status),
+                step: Some("pack_files".into()),
+                ..Event::new("pack_manual", "自动安装已完成，等待手动导入文件")
+            });
+            return Ok(false);
+        }
         sink(Event::workflow("finalize", "完成整合包安装"));
         // Publish the launch profile only after all dependencies and overrides exist.
         storage::write_json(&version::metadata_path(&game, selected)?, &profile)?;
         job.completed = true;
+        job.pending_profile = None;
         record::write_job(&game, selected, &job)?;
         self.set_installed(id, selected, true)?;
         downloader.finish_installation(&sink).await;
         sink(Event::new("complete", "整合包已安装"));
-        Ok(())
+        Ok(true)
     }
 }
+struct ActiveModpack<'a>(&'a std::sync::Mutex<Option<(String, String)>>);
+impl Drop for ActiveModpack<'_> {
+    fn drop(&mut self) {
+        *self.0.lock().unwrap() = None;
+    }
+}
+struct ManualImportFile(PathBuf);
+impl Drop for ManualImportFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 async fn verify_sha512(path: &Path, expected: &str, cancel: &CancellationToken) -> Result<()> {
     use ring::digest::{Context, SHA512};
     use tokio::io::AsyncReadExt;

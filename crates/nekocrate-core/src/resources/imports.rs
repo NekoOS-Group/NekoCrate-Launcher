@@ -161,6 +161,22 @@ pub(super) fn inspect(path: &Path) -> Result<DetectedResource> {
 }
 
 impl Launcher {
+    /// Only export a resource that is actually listed in this game version.
+    /// Never accept an arbitrary absolute path from the webview.
+    pub fn resource_export_path(&self, source: &ResourceCopySource) -> Result<PathBuf> {
+        use crate::version_management::ContentKind;
+        let kind = match source.kind {
+            ResourceKind::Mods => ContentKind::Mods,
+            ResourceKind::Resourcepacks => ContentKind::Resourcepacks,
+            ResourceKind::Shaderpacks => ContentKind::Shaderpacks,
+            ResourceKind::Datapacks => ContentKind::Datapacks,
+            ResourceKind::Saves => ContentKind::Saves,
+        };
+        Ok(self
+            .version_content_path(&source.instance, &source.version, kind, &source.file, None)?
+            .canonicalize()?)
+    }
+
     /// Resolve a listed resource rather than trusting a frontend-supplied absolute path.
     /// Use the normal transactional installer; copying never removes the source.
     pub fn prepare_resource_copy(

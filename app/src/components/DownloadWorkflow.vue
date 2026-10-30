@@ -35,7 +35,7 @@ defineEmits<{
 const active = computed(
   () =>
     props.task.workflow.steps.find((step) =>
-      ["running", "paused", "error"].includes(step.status),
+      ["running", "paused", "waiting", "error"].includes(step.status),
     )?.id,
 );
 const expanded = ref<string | null>(null);
@@ -54,6 +54,7 @@ const labels = {
   pending: "等待中",
   running: "进行中",
   paused: "已暂停",
+  waiting: "等待导入",
   done: "已完成",
   error: "失败",
   cancelled: "已取消",
@@ -136,7 +137,7 @@ const activities = {
             v-else-if="step.status === 'running'"
             class="spin"
             :size="16" /><Pause
-            v-else-if="step.status === 'paused'"
+            v-else-if="['paused', 'waiting'].includes(step.status)"
             :size="15" /><CircleAlert
             v-else-if="step.status === 'error'"
             :size="16" /><X
@@ -184,6 +185,21 @@ const activities = {
               :class="{ expanded: expanded === step.id }"
             />
           </button>
+          <div v-if="step.resolved" class="workflow-resolution">
+            <small>{{
+              t("已解析 {done} / {total}", {
+                done: step.resolved.completed,
+                total: step.resolved.total,
+              })
+            }}</small>
+            <small
+              v-if="
+                step.detail &&
+                ['running', 'paused', 'error'].includes(step.status)
+              "
+              >{{ translateMessage(step.detail) }}</small
+            >
+          </div>
           <div v-if="step.activity" class="workflow-activity">
             <template v-for="(label, status) in activities" :key="status"
               ><small v-if="step.activity[status]"
@@ -212,6 +228,15 @@ const activities = {
 </template>
 
 <style scoped>
+.workflow-resolution {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  font-size: 11px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
 .workflow-activity {
   display: flex;
   flex-wrap: wrap;

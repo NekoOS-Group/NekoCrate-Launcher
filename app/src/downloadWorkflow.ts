@@ -33,8 +33,7 @@ export function createWorkflow(
             ]
           : operation === "modpack"
             ? [
-                ["pack_resolve", "解析整合包依赖"],
-                ["pack_files", "下载整合包文件"],
+                ["pack_files", "解析并下载整合包文件"],
                 ["pack_overrides", "写入整合包配置"],
                 ["pack_game", "安装游戏与加载器"],
                 ["java", "准备 Java"],
@@ -83,6 +82,18 @@ export function applyWorkflowEvent(
   event: LauncherEvent,
 ) {
   if (event.kind === "workflow" && event.step) {
+    if (
+      event.step === "finalize" &&
+      workflow.steps.some((step) => step.id === "pack_manual") &&
+      !workflow.steps.some((step) => step.id === "finalize")
+    )
+      workflow.steps.push({
+        id: "finalize",
+        label: event.message || "完成整合包安装",
+        status: "pending",
+        fileCount: 0,
+        filesDone: 0,
+      });
     const index = workflow.steps.findIndex((step) => step.id === event.step);
     if (index >= 0)
       workflow.steps.forEach((step, position) => {
@@ -99,6 +110,10 @@ export function applyWorkflowEvent(
       ),
     );
   if (!step) return;
+  if (event.kind === "workflow_progress") {
+    step.detail = event.message;
+    step.resolved = { completed: event.completed, total: event.total };
+  }
   for (const update of event.files || []) {
     const previous = workflow.files.get(update.id);
     const owner =
@@ -176,6 +191,24 @@ export function finishWorkflow(
   for (const order of workflow.fileOrder.values()) finishFileOrder(order);
 }
 
+export function waitForManualFiles(workflow: WorkflowState) {
+  for (const step of workflow.steps)
+    if (["running", "paused"].includes(step.status)) step.status = "done";
+  let manual = workflow.steps.find((step) => step.id === "pack_manual");
+  if (!manual) {
+    manual = {
+      id: "pack_manual",
+      label: "手动导入文件",
+      status: "waiting",
+      fileCount: 0,
+      filesDone: 0,
+    };
+    workflow.steps = workflow.steps.filter((step) => step.id !== "finalize");
+    workflow.steps.push(manual);
+  }
+  manual.status = "waiting";
+}
+
 export function clearWorkflowFiles(workflow: WorkflowState) {
   workflow.files.clear();
   workflow.fileOrder.clear();
@@ -214,7 +247,11 @@ export function formatBytes(bytes: number) {
 
 export function resumeWorkflow(workflow: WorkflowState) {
   for (const step of workflow.steps) {
-    if (["error", "cancelled", "paused", "running"].includes(step.status))
+    if (
+      ["error", "cancelled", "paused", "running", "waiting"].includes(
+        step.status,
+      )
+    )
       step.status = "pending";
   }
   if (workflow.steps[0]) workflow.steps[0].status = "running";

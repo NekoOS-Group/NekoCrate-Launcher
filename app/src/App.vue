@@ -75,6 +75,7 @@ import {
   applyWorkflowEvent,
   resumeWorkflow,
   finishWorkflow,
+  waitForManualFiles,
   setWorkflowPaused,
   clearWorkflowFiles,
 } from "./downloadWorkflow";
@@ -96,6 +97,8 @@ import ModpackMissing from "./components/ModpackMissing.vue";
 import type { ModpackPreview, ModpackStatus } from "./types";
 import VersionManager from "./components/VersionManager.vue";
 import ResourceTransferOverlay from "./components/ResourceTransferOverlay.vue";
+import DropTargetOverlay from "./components/DropTargetOverlay.vue";
+import { dropInteraction, showDropHint, clearDropHint } from "./dropSurface";
 import {
   useResourceTransfer,
   type ResourceCopySource,
@@ -111,6 +114,8 @@ import ModpackBrowser from "./components/ModpackBrowser.vue";
 import {
   resourceDropTarget,
   routeResourceDrop,
+  resourceDropIssue,
+  resourceKindLabel,
   type ResourceSession,
   type ResourcePlan,
   type DetectedResource,
@@ -1439,11 +1444,53 @@ const folderDrop = useFolderDrop({
 });
 const packDragging = ref(false);
 const resourceDragging = ref(false);
-const dropVersionMenu = ref<{ revealForDrop: () => void }>();
+const dropVersionMenu = ref<{
+  revealForDrop: () => void;
+  endDrop: () => void;
+}>();
+const dragBrowseInstance = ref<Instance>();
+let browseTimer: ReturnType<typeof setTimeout> | undefined;
+let browseKey = "";
+let dockBeforeDrop = false;
+watch(dropInteraction, (active) => {
+  document.documentElement.classList?.toggle("resource-transferring", active);
+  if (active) dockBeforeDrop = instanceDockExpanded.value;
+});
+function browseDropTarget(element: Element | null) {
+  const dock = element?.closest<HTMLElement>(
+    ".instance-dock [data-resource-instance]",
+  );
+  const overflow = element?.closest("[data-drop-overflow]");
+  const key = overflow ? "overflow" : dock?.dataset.resourceInstance || "";
+  if (key !== browseKey) {
+    clearTimeout(browseTimer);
+    browseKey = key;
+    if (key)
+      browseTimer = setTimeout(async () => {
+        if (key === "overflow") instanceDockExpanded.value = true;
+        else {
+          dragBrowseInstance.value = instances.value.find(
+            (instance) => instance.id === key,
+          );
+          await nextTick();
+          if (dropInteraction.value) dropVersionMenu.value?.revealForDrop();
+        }
+      }, 320);
+  }
+  if (element?.closest("[data-resource-menu-trigger]"))
+    dropVersionMenu.value?.revealForDrop();
+}
+function finishDropBrowse() {
+  clearTimeout(browseTimer);
+  browseKey = "";
+  dragBrowseInstance.value = undefined;
+  dropVersionMenu.value?.endDrop();
+  instanceDockExpanded.value = dockBeforeDrop;
+}
 const resourceSession = ref<ResourceSession>();
 const versionManager = ref<{ refresh: () => Promise<void> }>();
 const resourceManager = ref<{
-  drop: (paths: string[]) => Promise<void>;
+  drop: (paths: string[], kind?: string) => Promise<void>;
   refresh: () => Promise<void>;
 }>();
 const libraryBusy = ref(false);
@@ -1453,6 +1500,12 @@ const resourceTransfer = useResourceTransfer({
   running: () => snapshot.value.running,
   busy: () => busy.value || libraryBusy.value || managing.value,
   copy: copyDraggedResource,
+  export: (source) => rpc("export_resource", { source }),
+  browse: browseDropTarget,
+  finishBrowse: finishDropBrowse,
+  error: (problem) => {
+    error.value = message(problem);
+  },
 });
 async function copyDraggedResource(
   source: ResourceCopySource,
@@ -1564,14 +1617,19 @@ function resourcesInstalled() {
 async function handleResourceDrop(
   paths: string[],
   target: ReturnType<typeof resourceDropTarget>,
+  inspected?: DetectedResource[],
+  kind?: string,
+  surface?: Element | null,
+  destination?: Instance,
 ) {
   folderDrop.handle({ type: "leave" });
-  if (busy.value) {
-    notify("请等待当前任务完成。");
-    return;
-  }
   try {
-    const files = await rpc<DetectedResource[]>("inspect_resources", { paths });
+    const files =
+      inspected ||
+      (await rpc<DetectedResource[]>("inspect_resources", { paths }));
+    const issue = resourceDropIssue(files, kind);
+    if (issue) throw new Error(issue);
+    if (busy.value) throw new Error(t("请等待当前任务完成。"));
     const route = routeResourceDrop(files);
     if (route === "folders") {
       if (modal.value === "add") modal.value = null;
@@ -1579,7 +1637,7 @@ async function handleResourceDrop(
       return;
     }
     if (route === "modpack") {
-      await openModpack(paths[0]);
+      await openModpack(paths[0], destination);
       return;
     }
     if (route === "mixed")
@@ -1588,71 +1646,204 @@ async function handleResourceDrop(
       );
     if (!target)
       throw new Error("请先选择目标游戏版本，或将资源拖到版本列表中的指定版本");
-    const kind = files[0]?.kinds[0] || "mods";
-    openResources(target.instance, target.version, kind, files);
+    if (snapshot.value.running.includes(target.instance.id))
+      throw new Error(t("请先结束目标实例的游戏"));
+    const resourceKind =
+      kind && !["instance", "version"].includes(kind)
+        ? kind
+        : files[0]?.kinds[0] || "mods";
+    openResources(target.instance, target.version, resourceKind, files);
   } catch (e) {
-    error.value = message(e);
+    rejectDrop(surface || null, message(e));
   }
+}
+let dropHintTimer: ReturnType<typeof setTimeout> | undefined;
+function rejectDrop(surface: Element | null, reason: string) {
+  showDropHint(surface, reason, true);
+  clearTimeout(dropHintTimer);
+  dropHintTimer = setTimeout(clearDropHint, 2600);
 }
 let unlistenDrop: UnlistenFn | undefined;
 let dropDisposed = false;
+let incomingPaths: string[] = [];
+let incomingFiles: Promise<DetectedResource[]> | undefined;
+let incomingRevision = 0;
+let lastDropPoint: { x: number; y: number } | undefined;
+function incomingElement() {
+  return lastDropPoint
+    ? document.elementFromPoint(lastDropPoint.x, lastDropPoint.y)
+    : null;
+}
+function dropScope(element: Element | null) {
+  const surface =
+    element?.closest<HTMLElement>(
+      "[data-manual-pack-drop], [data-drop-kind], [data-resource-instance]",
+    ) || null;
+  const kind = surface?.dataset.dropKind;
+  const manual = !!element?.closest("[data-manual-pack-drop]");
+  const fallback = resourceSession.value
+    ? {
+        instance: resourceSession.value.instance.id,
+        version: resourceSession.value.version,
+      }
+    : selectedInstance.value?.selected_version
+      ? {
+          instance: selectedInstance.value.id,
+          version: selectedInstance.value.selected_version,
+        }
+      : undefined;
+  return {
+    surface,
+    kind,
+    manual,
+    target: resourceDropTarget(element, instances.value, fallback),
+    destination: instances.value.find(
+      (instance) =>
+        instance.id ===
+        element?.closest<HTMLElement>("[data-resource-instance]")?.dataset
+          .resourceInstance,
+    ),
+  };
+}
+async function previewIncoming() {
+  const revision = incomingRevision;
+  const element = incomingElement();
+  browseDropTarget(element);
+  const scope = dropScope(element);
+  manualPackDragging.value = scope.manual;
+  if (scope.manual) {
+    showDropHint(scope.surface, t("导入缺失文件"));
+    return;
+  }
+  if (scope.kind === "skins" || scope.kind === "java") {
+    const issue =
+      scope.kind === "skins" &&
+      !incomingPaths.every((path) => /\.png$/i.test(path))
+        ? t("请选择 PNG 皮肤文件")
+        : undefined;
+    showDropHint(
+      scope.surface,
+      issue || t(scope.kind === "skins" ? "导入皮肤" : "登记本地 Java"),
+      !!issue,
+    );
+    return;
+  }
+  showDropHint(scope.surface, t("识别文件内容…"));
+  try {
+    const files = await incomingFiles;
+    if (
+      !files ||
+      revision !== incomingRevision ||
+      element !== incomingElement()
+    )
+      return;
+    const issue = resourceDropIssue(files, scope.kind);
+    const label =
+      files[0]?.format === "resource"
+        ? resourceKindLabel(
+            scope.kind && !["instance", "version"].includes(scope.kind)
+              ? scope.kind
+              : files[0].kinds[0],
+          )
+        : resourceKindLabel(files[0]?.format || "");
+    showDropHint(
+      scope.surface,
+      issue || t("导入{kind}", { kind: label }),
+      !!issue,
+    );
+  } catch (error) {
+    if (revision === incomingRevision)
+      showDropHint(scope.surface, message(error), true);
+  }
+}
+function endIncoming() {
+  incomingRevision++;
+  incomingPaths = [];
+  incomingFiles = undefined;
+  manualPackDragging.value = false;
+  dropInteraction.value = false;
+  packDragging.value = resourceDragging.value = false;
+  folderDrop.handle({ type: "leave" });
+  clearDropHint();
+  finishDropBrowse();
+}
+async function receiveFiles(
+  paths: string[],
+  scope: ReturnType<typeof dropScope>,
+  files?: Promise<DetectedResource[]>,
+) {
+  const manualTask = scope.manual ? displayedTask.value : null;
+  endIncoming();
+  if (scope.manual) {
+    if (manualTask?.modpack_status?.missing.length)
+      await supplyPackFiles(paths, manualTask);
+    return;
+  }
+  if (scope.kind === "java" || scope.kind === "skins") {
+    if (
+      scope.kind === "skins" &&
+      !paths.every((path) => /\.png$/i.test(path))
+    ) {
+      rejectDrop(scope.surface, t("请选择 PNG 皮肤文件"));
+      return;
+    }
+    await resourceManager.value?.drop(paths, scope.kind);
+    return;
+  }
+  try {
+    await handleResourceDrop(
+      paths,
+      scope.target,
+      await files,
+      scope.kind,
+      scope.surface,
+      scope.destination,
+    );
+  } catch (error) {
+    rejectDrop(scope.surface, message(error));
+  }
+}
 async function listenForFolders() {
   try {
     const stop = await getCurrentWindow().onDragDropEvent((e) => {
       const payload = e.payload;
-      if (modal.value === "library" && !resourceSession.value) {
-        if (payload.type === "drop")
-          void resourceManager.value?.drop(payload.paths);
-        return;
-      }
+      if ("position" in payload)
+        lastDropPoint = {
+          x: payload.position.x / window.devicePixelRatio,
+          y: payload.position.y / window.devicePixelRatio,
+        };
       if (
-        (payload.type === "enter" || payload.type === "over") &&
-        payload.position
-      ) {
-        const element = document.elementFromPoint(
-          payload.position.x / window.devicePixelRatio,
-          payload.position.y / window.devicePixelRatio,
-        );
-        if (element?.closest("[data-resource-menu-trigger]"))
-          dropVersionMenu.value?.revealForDrop();
+        resourceTransfer.nativeEvent(
+          payload.type,
+          lastDropPoint?.x || 0,
+          lastDropPoint?.y || 0,
+        )
+      )
+        return;
+      if (payload.type === "leave") {
+        endIncoming();
+        return;
       }
       if (payload.type === "drop") {
-        packDragging.value = false;
-        resourceDragging.value = false;
-        const position = payload.position;
-        const element = position
-          ? document.elementFromPoint(
-              position.x / window.devicePixelRatio,
-              position.y / window.devicePixelRatio,
-            )
-          : null;
-        const fallback = resourceSession.value
-          ? {
-              instance: resourceSession.value.instance.id,
-              version: resourceSession.value.version,
-            }
-          : selectedInstance.value?.selected_version
-            ? {
-                instance: selectedInstance.value.id,
-                version: selectedInstance.value.selected_version,
-              }
-            : undefined;
-        const target = resourceDropTarget(element, instances.value, fallback);
-        void handleResourceDrop(payload.paths, target);
+        void receiveFiles(
+          payload.paths,
+          dropScope(incomingElement()),
+          incomingFiles,
+        );
         return;
       }
-      if (payload.type === "enter")
-        resourceDragging.value =
-          payload.paths.some((path) => /\.(jar|zip)$/i.test(path)) ||
-          modal.value === "manage" ||
-          !!resourceSession.value;
-      if (payload.type === "leave") resourceDragging.value = false;
-      if (e.payload.type === "enter")
-        packDragging.value = e.payload.paths.some((path) =>
-          /\.(mrpack|zip)$/i.test(path),
-        );
-      if (e.payload.type === "leave") packDragging.value = false;
-      folderDrop.handle(e.payload);
+      if (payload.type === "enter") {
+        clearTimeout(dropHintTimer);
+        incomingRevision++;
+        incomingPaths = payload.paths;
+        dropInteraction.value = true;
+        incomingFiles = rpc<DetectedResource[]>("inspect_resources", {
+          paths: payload.paths,
+        });
+        // Handle failures immediately even if the pointer leaves before preview awaits it.
+        void incomingFiles.catch(() => {});
+      }
+      void previewIncoming();
     });
     if (dropDisposed) stop();
     else unlistenDrop = stop;
@@ -1730,7 +1921,7 @@ async function action<T>(
         previous.operation === op &&
         previous.version_id === (version?.id ?? null) &&
         JSON.stringify(previous.arguments) === JSON.stringify(data) &&
-        ["error", "cancelled"].includes(previous.status),
+        ["error", "cancelled", "waiting"].includes(previous.status),
     );
     const savedProgress = version
       ? Math.max(
@@ -1797,7 +1988,13 @@ async function action<T>(
       if (settingsSaveError.value) throw new Error(settingsSaveError.value);
     }
     const result = await rpc<T>(op, data);
-    if (entry) {
+    if (entry && op === "install" && result === false) {
+      entry.status = "waiting";
+      entry.indeterminate = false;
+      entry.cancellable = false;
+      entry.message = "等待手动导入文件";
+      waitForManualFiles(entry.workflow);
+    } else if (entry) {
       finishWorkflow(entry.workflow, "done");
       entry.status = "done";
       entry.progress = 100;
@@ -2177,7 +2374,7 @@ async function submitDownload() {
     downloadSubmitting.value = false;
   }
 }
-async function openModpack(source?: string) {
+async function openModpack(source?: string, destination?: Instance) {
   if (busy.value || downloadSubmitting.value) {
     notify("请等待当前任务完成。");
     return;
@@ -2196,8 +2393,8 @@ async function openModpack(source?: string) {
     if (!path || typeof path !== "string") return;
     const preview = await rpc<ModpackPreview>("preview_modpack", { path });
     if (request !== packPreviewRequest) return;
-    if (modal.value !== "version") {
-      editing.value = selectedInstance.value || null;
+    if (destination || modal.value !== "version") {
+      editing.value = destination || selectedInstance.value || null;
       resetInstanceDraft();
       downloadDraftInitialized = true;
     }
@@ -2336,11 +2533,34 @@ async function continueDownloadTask(
   }
 }
 
-async function supplyPackFiles() {
-  const task = displayedTask.value;
-  if (!task?.instance_id || !task.version_id || busy.value) return;
+const manualPackDragging = ref(false);
+const manualPackImporting = ref(false);
+const manualPackError = ref("");
+watch(
+  () => displayedTask.value?.id,
+  () => {
+    manualPackError.value = "";
+  },
+);
+function showManualPack(task: Task) {
+  if (current.value && current.value !== task) return;
+  tasks.value = [task, ...tasks.value.filter((item) => item !== task)];
+  modal.value = null;
+  showLogs.value = false;
+  resourceSession.value = undefined;
+  utility.value = "downloads";
+}
+async function supplyPackFiles(
+  dropped?: string[],
+  target: Task | null = displayedTask.value,
+) {
+  const task = target;
+  if (!task?.instance_id || !task.version_id || manualPackImporting.value)
+    return;
+  manualPackError.value = "";
+  manualPackImporting.value = true;
   try {
-    const paths = await open({ multiple: true, directory: false });
+    const paths = dropped || (await open({ multiple: true, directory: false }));
     if (!paths) return;
     await rpc("supply_modpack_files", {
       id: task.instance_id,
@@ -2351,10 +2571,19 @@ async function supplyPackFiles() {
       id: task.instance_id,
       version: task.version_id,
     });
+    if (
+      !task.modpack_status.missing.length &&
+      !task.modpack_status.completed &&
+      !busy.value
+    )
+      await resumePack();
   } catch (e) {
-    error.value = message(e);
+    manualPackError.value = message(e);
+  } finally {
+    manualPackImporting.value = false;
   }
 }
+
 async function resumePack() {
   const task = displayedTask.value;
   const instance = instances.value.find((i) => i.id === task?.instance_id);
@@ -2526,7 +2755,10 @@ async function selectVersion(instance: Instance, version: string) {
     version,
   });
 }
-async function install(i: Instance, repair = false) {
+async function install(
+  i: Instance,
+  repair = false,
+): Promise<boolean | undefined> {
   const result = await action<boolean>(
     repair ? "校验与修复" : "安装游戏",
     "install",
@@ -2549,12 +2781,30 @@ async function install(i: Instance, repair = false) {
       }
       if (!modal.value && !utility.value && !showLogs.value)
         utility.value = "downloads";
+      if (
+        result === false &&
+        task.modpack_status &&
+        !task.modpack_status.completed &&
+        !task.modpack_status.missing.length &&
+        !manualPackImporting.value
+      )
+        return install(i, repair);
     }
   }
   return result;
 }
 async function startGame() {
   if (busy.value || selectedRunning.value || !selectedInstance.value) return;
+  const waiting = tasks.value.find(
+    (task) =>
+      task.status === "waiting" &&
+      task.instance_id === selectedInstance.value!.id &&
+      task.version_id === selectedInstance.value!.selected_version,
+  );
+  if (waiting) {
+    showManualPack(waiting);
+    return;
+  }
   await prepareAndLaunch(selectedInstance.value, { install, launch });
 }
 async function launch(i: Instance) {
@@ -2873,12 +3123,6 @@ async function copy(text: string) {
     error.value = "无法访问剪贴板，请手动选择并复制。";
   }
 }
-const crashReports = new Map<string, import("./types").CrashReport | null>();
-const diagnosisRevision = ref(0);
-async function loadDiagnosis(id: string) {
-  if (crashReports.has(id)) return crashReports.get(id) || null;
-  return rpc<import("./types").CrashReport | null>("crash_report", { id });
-}
 function onEvent(e: LauncherEvent) {
   if (e.kind === "download_progress_recovered") {
     void sync();
@@ -2889,6 +3133,7 @@ function onEvent(e: LauncherEvent) {
     (!e.instance_id || e.instance_id === current.value.instance_id)
   ) {
     applyWorkflowEvent(current.value.workflow, e);
+    if (e.pack_missing) current.value.modpack_status = e.pack_missing;
     if (current.value.status === "paused")
       setWorkflowPaused(current.value.workflow, true);
     if (!retryingFile.value && (e.kind === "stage" || e.kind === "workflow")) {
@@ -2912,7 +3157,7 @@ function onEvent(e: LauncherEvent) {
             : (e.completed / e.total) * 100,
         ),
       );
-      const isPack = current.value.workflow.steps[0]?.id === "pack_resolve";
+      const isPack = current.value.workflow.steps[0]?.id === "pack_files";
       if (isPack) {
         const [base, weight] =
           e.step === "pack_game"
@@ -2955,7 +3200,15 @@ function onEvent(e: LauncherEvent) {
     if (["stage", "progress", "retry", "warning", "complete"].includes(e.kind))
       current.value.message = e.message;
   }
-  if (!["transfer", "progress", "file", "file_plan"].includes(e.kind)) {
+  if (
+    ![
+      "transfer",
+      "progress",
+      "file",
+      "file_plan",
+      "workflow_progress",
+    ].includes(e.kind)
+  ) {
     appendLog({
       time: stamp(),
       kind: e.kind,
@@ -2963,17 +3216,7 @@ function onEvent(e: LauncherEvent) {
       instanceId: e.instance_id,
     });
   }
-  if (e.kind === "game_started" && e.instance_id) {
-    crashReports.set(e.instance_id, null);
-    diagnosisRevision.value++;
-  }
-  if (e.kind === "game_crash") {
-    if (e.instance_id) {
-      crashReports.set(e.instance_id, e.crash || null);
-      diagnosisRevision.value++;
-    }
-    openLogs(e.instance_id || "all");
-  }
+  if (e.kind === "game_crash") openLogs(e.instance_id || "all");
   if (["game_started", "game_exit", "game_crash"].includes(e.kind)) void sync();
 }
 onMounted(async () => {
@@ -3013,6 +3256,10 @@ onUnmounted(() => {
   unlistenDrop?.();
   folderDrop.dispose();
   clearTimeout(noticeTimer);
+  clearTimeout(dropHintTimer);
+  clearTimeout(browseTimer);
+  clearDropHint();
+  dropInteraction.value = false;
   clearLoaderNotice();
   skinGeneration++;
   logStore.dispose();
@@ -3024,11 +3271,8 @@ onUnmounted(() => {
 
 <template>
   <div class="shell" :data-theme="theme">
-    <ResourceTransferOverlay
-      :drag="resourceTransfer"
-      :instances="instances"
-      :running="snapshot.running"
-    />
+    <ResourceTransferOverlay :drag="resourceTransfer" />
+    <DropTargetOverlay />
     <ErrorNotice
       :message="visibleError || loaderNotice"
       :informational="!visibleError && !!loaderNotice"
@@ -3167,6 +3411,7 @@ onUnmounted(() => {
           <button
             v-if="hiddenInstanceCount"
             ref="instanceOverflowToggle"
+            data-drop-overflow
             class="icon-button instance-overflow-toggle"
             :class="{
               expanded: instanceDockExpanded,
@@ -3237,6 +3482,7 @@ onUnmounted(() => {
                   class="instance-item"
                   :data-instance-id="instance.id"
                   :data-resource-instance="instance.id"
+                  data-drop-kind="instance"
                   :data-resource-version="
                     instance.selected_version || undefined
                   "
@@ -3406,11 +3652,14 @@ onUnmounted(() => {
           <Transition name="version-control">
             <VersionMenu
               ref="dropVersionMenu"
-              v-if="selectedVersion"
-              :instance="selectedInstance"
+              v-if="selectedVersion || dragBrowseInstance"
+              :instance="dragBrowseInstance || selectedInstance"
               :tasks="tasks"
               :locked="busy || selectedRunning || versionOrderSaving"
-              :disabled="!selectedInstance || !!modal || !!utility || showLogs"
+              :disabled="
+                !dropInteraction &&
+                (!selectedInstance || !!modal || !!utility || showLogs)
+              "
               :move-version="reorderVersion"
               :remove-version="removeDraggedVersion"
               @select="
@@ -3827,11 +4076,22 @@ onUnmounted(() => {
                   <ModpackMissing
                     v-if="
                       displayedTask.modpack_status &&
-                      ['error', 'cancelled'].includes(step.status)
+                      step.id ===
+                        (displayedTask.workflow.steps.some(
+                          (item) => item.id === 'pack_manual',
+                        )
+                          ? 'pack_manual'
+                          : 'pack_files') &&
+                      displayedTask.modpack_status.missing.length > 0
                     "
                     :status="displayedTask.modpack_status"
-                    :disabled="busy"
-                    @supply="supplyPackFiles"
+                    :disabled="manualPackImporting"
+                    :dragging="manualPackDragging"
+                    :error="manualPackError"
+                    :running="
+                      ['running', 'paused'].includes(displayedTask.status)
+                    "
+                    @supply="supplyPackFiles()"
                     @resume="resumePack"
                     @link="openLink"
                   />
@@ -4221,8 +4481,6 @@ onUnmounted(() => {
       >
         <LogPanel
           :store="logStore"
-          :load-diagnosis="loadDiagnosis"
-          :diagnosis-revision="diagnosisRevision"
           :instances="snapshot.database.instances"
           :initial-scope="logScope"
           :session="logSession"
@@ -4454,6 +4712,7 @@ onUnmounted(() => {
         <section
           v-else
           :key="`${modal}:${editing?.id || ''}`"
+          :data-drop-kind="modal === 'add' ? 'directory' : 'blocked'"
           class="modal glass-surface"
           :class="{ 'instance-settings': modal === 'edit' }"
         >

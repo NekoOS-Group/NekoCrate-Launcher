@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { t } from "../i18n";
+import { dropInteraction } from "../dropSurface";
 import {
   computed,
   nextTick,
@@ -178,7 +179,12 @@ function outside(event: PointerEvent) {
     close();
 }
 function leave(event: FocusEvent) {
-  if (draggedVersion.value || (reorderingFocus && !event.relatedTarget)) return;
+  if (
+    dropInteraction.value ||
+    draggedVersion.value ||
+    (reorderingFocus && !event.relatedTarget)
+  )
+    return;
   if (
     !(event.relatedTarget instanceof Node) ||
     !root.value?.contains(event.relatedTarget)
@@ -201,7 +207,11 @@ onBeforeUnmount(() =>
 );
 defineExpose({
   revealForDrop() {
-    if (!expanded.value && !props.locked) void open();
+    // Hovering a drop destination must not move keyboard focus or select it.
+    if (!props.disabled) expanded.value = true;
+  },
+  endDrop() {
+    close();
   },
 });
 </script>
@@ -263,6 +273,7 @@ defineExpose({
               :data-version-id="version.id"
               :data-resource-instance="instance?.id"
               :data-resource-version="version.id"
+              data-drop-kind="version"
               role="menuitemradio"
               :aria-checked="version.selected"
               :aria-disabled="locked"
@@ -305,6 +316,8 @@ defineExpose({
         <div class="version-menu-footer" role="none">
           <button
             class="version-menu-item version-menu-download"
+            :data-resource-instance="instance?.id"
+            data-drop-kind="modpack"
             role="menuitem"
             :aria-disabled="locked"
             tabindex="-1"

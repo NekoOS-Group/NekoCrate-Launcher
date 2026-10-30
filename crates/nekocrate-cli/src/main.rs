@@ -125,8 +125,12 @@ async fn main() -> Result<()> {
             serde_json::to_string_pretty(&launcher.add_version(&id, &version)?)?
         ),
         Commands::SelectVersion { id, version } => launcher.select_version(&id, &version)?,
-        Commands::Install { id } => launcher.install(&id, &cancel, &sink).await?,
-        Commands::Repair { id } => launcher.repair(&id, &cancel, &sink).await?,
+        Commands::Install { id } => {
+            launcher.install(&id, &cancel, &sink).await?;
+        }
+        Commands::Repair { id } => {
+            launcher.repair(&id, &cancel, &sink).await?;
+        }
         Commands::Clone { id } => println!(
             "{}",
             serde_json::to_string_pretty(&launcher.clone_instance(&id).await?)?

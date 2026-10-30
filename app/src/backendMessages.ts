@@ -216,6 +216,20 @@ export const backendEnglish: Readonly<Record<string, string>> = {
   写入整合包配置: "Applying modpack overrides",
   下载整合包文件: "Downloading modpack files",
   解析整合包依赖: "Resolving modpack dependencies",
+  解析并下载整合包文件: "Resolving and downloading modpack files",
+  复用已解析的文件信息: "Reusing resolved file metadata",
+  准备获取整合包文件信息: "Preparing modpack file metadata",
+  "获取项目资料与下载地址（第 {batch} / {total} 批）":
+    "Fetching project details and download URLs (batch {batch} / {total})",
+  "获取整合包依赖失败（第 {batch} / {total} 批）":
+    "Failed to fetch modpack dependencies (batch {batch} / {total})",
+  "已解析：{name}": "Resolved: {name}",
+  "等待 CurseForge 响应（第 {batch} / {total} 批，{seconds} 秒）":
+    "Waiting for CurseForge (batch {batch} / {total}, {seconds}s)",
+  "部分文件需手动导入，其余文件继续下载":
+    "Some files need a manual import; other files are still downloading",
+  "自动安装已完成，等待手动导入文件":
+    "Automatic installation finished; waiting for manual files",
   所选文件与整合包声明的文件校验值不匹配:
     "The selected files do not match the modpack's declared checksums",
   "此整合包有 {count} 个文件需要从作者页面手动下载，请补齐后继续":

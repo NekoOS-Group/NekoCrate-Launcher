@@ -567,6 +567,7 @@ defineExpose({ refresh });
     class="modal glass-surface version-manager"
     :data-resource-instance="instance.id"
     :data-resource-version="selected"
+    data-drop-kind="version"
   >
     <header ref="header" class="modal-header">
       <h2 class="dialog-heading" tabindex="-1" autofocus>
@@ -671,8 +672,7 @@ defineExpose({ refresh });
               class="version-manager-choice list-reveal-item"
               :data-resource-instance="instance.id"
               :data-resource-version="item.id"
-              :data-resource-copy-instance="instance.id"
-              :data-resource-copy-version="item.id"
+              data-drop-kind="version"
               :style="listRevealStyle(index)"
               :aria-current="item.id === selected ? 'true' : undefined"
               :disabled="saving"
@@ -759,6 +759,7 @@ defineExpose({ refresh });
             <button
               v-for="item in visibleTabs"
               :id="`version-content-tab-${item.id}`"
+              :data-drop-kind="item.id"
               :key="item.id"
               class="settings-tab"
               :style="{ '--tab-color': item.color }"
@@ -784,6 +785,7 @@ defineExpose({ refresh });
         </div>
         <div
           id="version-content-panel"
+          :data-drop-kind="tab"
           class="version-manager-panel"
           role="tabpanel"
           :aria-labelledby="`version-content-tab-${tab}`"
