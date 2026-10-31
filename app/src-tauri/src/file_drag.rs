@@ -16,7 +16,7 @@ impl Drop for DragGuard {
 }
 
 /// Hand the existing file to the OS. Copy-only keeps the original game intact.
-pub async fn start(window: tauri::WebviewWindow, path: PathBuf) -> Result<bool> {
+pub async fn start(window: tauri::WebviewWindow, paths: Vec<PathBuf>) -> Result<bool> {
     anyhow::ensure!(!ACTIVE.swap(true, Ordering::AcqRel), "已有文件正在拖动");
     let guard = DragGuard;
     let (sender, receiver) = tokio::sync::oneshot::channel();
@@ -25,11 +25,11 @@ pub async fn start(window: tauri::WebviewWindow, path: PathBuf) -> Result<bool> 
     let native = window.clone();
     window.run_on_main_thread(move || {
         #[cfg(target_os = "linux")]
-        let result = linux::start(&native, path, sender);
+        let result = linux::start(&native, paths, sender);
         #[cfg(not(target_os = "linux"))]
         let result = drag::start_drag(
             &native,
-            drag::DragItem::Files(vec![path]),
+            drag::DragItem::Files(paths),
             drag::Image::Raw(include_bytes!("../icons/drag.png").to_vec()),
             move |result, _| {
                 if let Some(sender) = sender.lock().unwrap().take() {
@@ -63,18 +63,25 @@ mod linux {
 
     type Completion = Arc<Mutex<Option<tokio::sync::oneshot::Sender<Result<bool>>>>>;
 
-    pub fn start(window: &tauri::WebviewWindow, path: PathBuf, sender: Completion) -> Result<()> {
+    pub fn start(
+        window: &tauri::WebviewWindow,
+        paths: Vec<PathBuf>,
+        sender: Completion,
+    ) -> Result<()> {
         // GTK objects stay on the main thread. GIO escapes spaces, #, % and
         // non-ASCII names in text/uri-list; raw file:// paths are not valid URIs.
         let window = window.gtk_window()?;
-        let uri = gio::File::for_path(path).uri();
+        let uris: Vec<_> = paths
+            .into_iter()
+            .map(|path| gio::File::for_path(path).uri())
+            .collect();
         window.drag_source_set(gdk::ModifierType::BUTTON1_MASK, &[], gdk::DragAction::COPY);
         window.drag_source_add_uri_targets();
         let handlers = Rc::new(RefCell::new(Vec::new()));
         handlers
             .borrow_mut()
             .push(window.connect_drag_data_get(move |_, _, selection, _, _| {
-                selection.set_uris(&[uri.as_str()]);
+                selection.set_uris(&uris.iter().map(|uri| uri.as_str()).collect::<Vec<_>>());
             }));
         let failed = Rc::new(Cell::new(false));
         let failure = failed.clone();

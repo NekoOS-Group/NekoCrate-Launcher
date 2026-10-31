@@ -168,6 +168,16 @@ export function createVersionContentLoader(rpc: Rpc) {
     return value;
   }
   return Object.assign(load, {
+    invalidate(id: string) {
+      for (const [key, entry] of cache) {
+        if (JSON.parse(key)[0] === id) {
+          cacheBytes -= entry.bytes;
+          cache.delete(key);
+        }
+      }
+      for (const key of indexes.keys())
+        if (JSON.parse(key)[0] === id) indexes.delete(key);
+    },
     async preload(id: string, version: string, signal?: AbortSignal) {
       if (signal?.aborted) return;
       const index = await readIndex(id, version);

@@ -28,7 +28,10 @@ export function isResourceCopyKind(kind: string): kind is ResourceCopyKind {
 }
 export type ResourceDestination = { instance: string; version: string };
 export const resourceTransferKey: InjectionKey<
-  (event: PointerEvent, source: ResourceCopySource) => void
+  (
+    event: PointerEvent,
+    source: ResourceCopySource | ResourceCopySource[],
+  ) => void
 > = Symbol("resource-transfer");
 
 function copyIssue(
@@ -84,6 +87,11 @@ export function useResourceTransfer(options: {
     source: ResourceCopySource,
     target: ResourceDestination,
   ) => Promise<void>;
+  copyMany?: (
+    sources: ResourceCopySource[],
+    target: ResourceDestination,
+  ) => Promise<void>;
+  exportMany?: (sources: ResourceCopySource[]) => Promise<unknown>;
   export?: (source: ResourceCopySource) => Promise<unknown>;
   browse?: (element: Element | null) => void;
   finishBrowse?: () => void;
@@ -91,6 +99,7 @@ export function useResourceTransfer(options: {
 }) {
   const drag = shallowRef<{
     source: ResourceCopySource;
+    sources: ResourceCopySource[];
     x: number;
     y: number;
     target?: ResourceDestination;
@@ -99,6 +108,7 @@ export function useResourceTransfer(options: {
   let pending:
     | {
         source: ResourceCopySource;
+        sources: ResourceCopySource[];
         x: number;
         y: number;
         pointer: number;
@@ -122,18 +132,19 @@ export function useResourceTransfer(options: {
     const surface = element?.closest<HTMLElement>(
       "[data-drop-kind], [data-resource-instance]",
     );
-    const issue = copyIssue(
-      element,
-      pending.source,
-      options.instances(),
-      options.running(),
-    );
-    const target = resourceCopyDestination(
-      element,
-      pending.source,
-      options.instances(),
-      options.running(),
-    );
+    const issue = pending.sources
+      .map((source) =>
+        copyIssue(element, source, options.instances(), options.running()),
+      )
+      .find(Boolean);
+    const target = issue
+      ? undefined
+      : resourceCopyDestination(
+          element,
+          pending.source,
+          options.instances(),
+          options.running(),
+        );
     if (surface)
       showDropHint(
         surface,
@@ -170,7 +181,9 @@ export function useResourceTransfer(options: {
     if (session.element.hasPointerCapture?.(session.pointer))
       session.element.releasePointerCapture(session.pointer);
     try {
-      await options.export(session.source);
+      if (session.sources.length > 1)
+        await options.exportMany?.(session.sources);
+      else await options.export(session.source);
     } catch (error) {
       options.error?.(error);
     } finally {
@@ -200,6 +213,7 @@ export function useResourceTransfer(options: {
     }
     drag.value = {
       source: pending.source,
+      sources: pending.sources,
       x: event.clientX,
       y: event.clientY,
       target: hit(event.clientX, event.clientY),
@@ -239,9 +253,13 @@ export function useResourceTransfer(options: {
   function complete(x: number, y: number) {
     if (!pending) return;
     const source = pending.source;
+    const sources = pending.sources;
     const target = drag.value && hit(x, y);
     stop();
-    if (target && !options.busy()) void options.copy(source, target);
+    if (target && !options.busy()) {
+      if (sources.length > 1) void options.copyMany?.(sources, target);
+      else void options.copy(source, target);
+    }
   }
   function end(event: PointerEvent) {
     if (!pending || event.pointerId !== pending.pointer || drag.value?.native)
@@ -257,12 +275,43 @@ export function useResourceTransfer(options: {
     event.stopImmediatePropagation();
     stop();
   }
-  function start(event: PointerEvent, source: ResourceCopySource) {
-    if (event.button !== 0 || !event.isPrimary || options.busy()) return;
+  function start(
+    event: PointerEvent,
+    input: ResourceCopySource | ResourceCopySource[],
+  ) {
+    if (
+      event.button !== 0 ||
+      !event.isPrimary ||
+      event.shiftKey ||
+      event.metaKey ||
+      event.ctrlKey ||
+      options.busy()
+    )
+      return;
+    const sources = [
+      ...new Map(
+        (Array.isArray(input) ? input : [input]).map((source) => [
+          JSON.stringify([
+            source.kind,
+            source.instance,
+            source.version,
+            source.file,
+          ]),
+          source,
+        ]),
+      ).values(),
+    ];
+    if (!sources.length) return;
+    if (sources.length > 256) {
+      options.error?.(new Error(t("每次最多拖动 256 项资源")));
+      return;
+    }
+    const source = sources[0]!;
     event.preventDefault();
     clearClickGuard();
     pending = {
       source,
+      sources,
       x: event.clientX,
       y: event.clientY,
       pointer: event.pointerId,

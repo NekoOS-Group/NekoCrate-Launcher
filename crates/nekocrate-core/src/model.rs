@@ -73,6 +73,8 @@ pub struct Instance {
     #[serde(default)]
     pub memory_mode: MemoryMode,
     pub java_path: Option<String>,
+    #[serde(default)]
+    pub launch: crate::launch_options::LaunchOptions,
     pub created_at: u64,
     pub last_played: Option<u64>,
 }

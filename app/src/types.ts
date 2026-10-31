@@ -64,6 +64,7 @@ export interface Instance {
   selected_version: string | null;
   memory_mb: number;
   memory_mode?: MemoryMode;
+  launch?: import("./instanceLaunch").InstanceLaunchOptions;
   java_path: string | null;
   created_at: number;
   last_played: number | null;

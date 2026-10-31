@@ -68,6 +68,13 @@ function fixture(exportResult) {
         copy: async (...args) => {
           copied.push(args);
         },
+        copyMany: async (...args) => {
+          copied.push(args);
+        },
+        exportMany: async (sources) => {
+          exported.push(sources);
+          return exportResult;
+        },
         export: async (source) => {
           exported.push(source);
           if (exportResult instanceof Error) throw exportResult;
@@ -96,14 +103,17 @@ function fixture(exportResult) {
     copied,
     exported,
     errors,
-    start: () =>
-      start(event(100, 120), {
-        kind: "mods",
-        instance: "a",
-        version: "one",
-        file: "cat.jar",
-        name: "Cat",
-      }),
+    start: (sources) =>
+      start(
+        event(100, 120),
+        sources || {
+          kind: "mods",
+          instance: "a",
+          version: "one",
+          file: "cat.jar",
+          name: "Cat",
+        },
+      ),
     move: (x, y) => listeners.get("pointermove")?.(event(x, y)),
     release: (x, y) => listeners.get("pointerup")?.(event(x, y)),
     finish: () => finish,
@@ -171,5 +181,36 @@ test("native cancel or failure leaves no drag state or accidental internal copy"
     } finally {
       f.dispose();
     }
+  }
+});
+
+const batch = ["cat.jar", "ice.jar.disabled"].map((file) => ({
+  kind: "mods",
+  instance: "a",
+  version: "one",
+  file,
+  name: file,
+}));
+test("selected resources copy as one batch and native export receives the entire selection", async () => {
+  const f = fixture();
+  try {
+    f.start(batch);
+    f.move(150, 150);
+    assert.equal(f.drag.value.sources.length, 2);
+    f.release(150, 150);
+    await new Promise(setImmediate);
+    assert.equal(f.copied.length, 1);
+    assert.deepEqual(f.copied[0][0], batch);
+  } finally {
+    f.dispose();
+  }
+  const g = fixture({ action: "copy" });
+  try {
+    g.start(batch);
+    g.move(895, 150);
+    await new Promise(setImmediate);
+    assert.deepEqual(g.exported, [batch]);
+  } finally {
+    g.dispose();
   }
 });

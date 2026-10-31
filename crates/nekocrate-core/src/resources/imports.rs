@@ -186,32 +186,48 @@ impl Launcher {
         version: &str,
         cancel: &CancellationToken,
     ) -> Result<Option<ResourcePlan>> {
+        self.prepare_resource_copies(std::slice::from_ref(source), id, version, cancel)
+    }
+
+    pub fn prepare_resource_copies(
+        &self,
+        sources: &[ResourceCopySource],
+        id: &str,
+        version: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Option<ResourcePlan>> {
         self.idle(id)?;
-        use crate::version_management::ContentKind;
-        let kind = match source.kind {
-            ResourceKind::Mods => ContentKind::Mods,
-            ResourceKind::Resourcepacks => ContentKind::Resourcepacks,
-            ResourceKind::Shaderpacks => ContentKind::Shaderpacks,
-            _ => bail!("此资源类型不支持跨版本复制"),
-        };
-        let path =
-            self.version_content_path(&source.instance, &source.version, kind, &source.file, None)?;
+        anyhow::ensure!(
+            !sources.is_empty() && sources.len() <= 256,
+            "每次可导入 1–256 个文件或目录"
+        );
         let target = self.resource_target(id, version)?;
-        let origin = self.resource_target(&source.instance, &source.version)?;
-        if origin.directory == target.directory {
+        let mut paths = std::collections::HashSet::new();
+        let mut inputs = Vec::new();
+        for source in sources {
+            crate::download::check_cancel(cancel)?;
+            anyhow::ensure!(
+                matches!(
+                    source.kind,
+                    ResourceKind::Mods | ResourceKind::Resourcepacks | ResourceKind::Shaderpacks
+                ),
+                "此资源类型不支持跨版本复制"
+            );
+            let path = self.resource_export_path(source)?;
+            let origin = self.resource_target(&source.instance, &source.version)?;
+            if origin.directory != target.directory && paths.insert(path.clone()) {
+                inputs.push(LocalImport {
+                    path,
+                    kind: Some(source.kind),
+                });
+            }
+        }
+        if inputs.is_empty() {
             return Ok(None);
         }
-        let plan = self.prepare_local_resources_inner(
-            id,
-            version,
-            &[LocalImport {
-                path,
-                kind: Some(source.kind),
-            }],
-            None,
-            cancel,
-            source.kind == ResourceKind::Mods,
-        )?;
+        // Validate the whole batch before publishing any file. The normal
+        // installer retains provenance, disabled states and conflict handling.
+        let plan = self.prepare_local_resources_inner(id, version, &inputs, None, cancel, true)?;
         if !plan.conflicts.is_empty() || plan.entries.iter().all(|entry| entry.reuse) {
             // This new plan has no staged data. Failed/idempotent drags must not
             // accumulate unfinished tasks in the target version.
@@ -274,7 +290,11 @@ impl Launcher {
             let mut detected = inspect(&input.path)?;
             // Legacy/core Mods may lack loader descriptors. A file already
             // resolved from a version's Mods list is still a valid copy source.
-            if listed_mod && detected.kinds.is_empty() && detected.format == "unknown" {
+            if listed_mod
+                && input.kind == Some(ResourceKind::Mods)
+                && detected.kinds.is_empty()
+                && detected.format == "unknown"
+            {
                 archive_support::open(&input.path)?;
                 detected.kinds.push(ResourceKind::Mods);
             }

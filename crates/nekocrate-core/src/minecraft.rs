@@ -507,9 +507,10 @@ pub fn arguments_with_memory(
     if !(512..=65536).contains(&memory_mb) {
         bail!("内存应为 512–65536 MiB");
     }
+    instance.launch.validate()?;
     let runtime_arch = crate::java::JavaRequirement::for_version(v).arch;
     let game = instance.game_dir(root);
-    let working_directory = version::working_directory(&game, v)?;
+    let working_directory = version::instance_working_directory(&game, instance, &v.id)?;
     let native = game.join("versions").join(&v.id).join("natives");
     // New installations live entirely in their .minecraft directory. Keep a
     // read-only fallback for games installed by releases with shared storage.
@@ -573,8 +574,22 @@ pub fn arguments_with_memory(
         ("launcher_version", env!("CARGO_PKG_VERSION").into()),
         ("clientid", account.client_id.clone()),
         ("auth_xuid", account.xuid.clone()),
-        ("resolution_width", "1280".into()),
-        ("resolution_height", "720".into()),
+        (
+            "resolution_width",
+            if instance.launch.window_mode == crate::launch_options::WindowMode::Windowed {
+                instance.launch.width.to_string()
+            } else {
+                "1280".into()
+            },
+        ),
+        (
+            "resolution_height",
+            if instance.launch.window_mode == crate::launch_options::WindowMode::Windowed {
+                instance.launch.height.to_string()
+            } else {
+                "720".into()
+            },
+        ),
     ]);
     vars.insert(
         "game_assets",
@@ -640,7 +655,9 @@ pub fn arguments_with_memory(
             }),
         ));
     }
+    args.extend(instance.launch.jvm_args.iter().cloned());
     args.push(v.main_class.clone());
+    let game_arguments_start = args.len();
     if let Some(legacy) = &v.minecraft_arguments {
         let tokens = split_legacy_arguments(legacy)?
             .into_iter()
@@ -654,6 +671,47 @@ pub fn arguments_with_memory(
         args.extend(expand_for_arch(&config.game, &vars, runtime_arch)?);
     } else {
         bail!("版本配置缺少启动参数");
+    }
+    args.extend(instance.launch.game_args.iter().cloned());
+    if instance.launch.window_mode == crate::launch_options::WindowMode::Windowed {
+        let supports_resolution = matches!(
+            v.main_class.as_str(),
+            "net.minecraft.client.main.Main"
+                | "net.minecraft.launchwrapper.Launch"
+                | "cpw.mods.bootstraplauncher.BootstrapLauncher"
+                | "cpw.mods.modlauncher.Launcher"
+                | "net.fabricmc.loader.impl.launch.knot.KnotClient"
+                | "net.fabricmc.loader.launch.knot.KnotClient"
+                | "org.quiltmc.loader.impl.launch.knot.KnotClient"
+        );
+        let mut game_args = args.split_off(game_arguments_start);
+        for (flag, value) in [
+            ("--width", instance.launch.width),
+            ("--height", instance.launch.height),
+        ] {
+            let mut found = false;
+            let mut index = 0;
+            while index < game_args.len() {
+                if game_args[index] == flag {
+                    game_args.remove(index);
+                    if index < game_args.len() && !game_args[index].starts_with("--") {
+                        game_args.remove(index);
+                    }
+                    found = true;
+                } else if game_args[index].starts_with(&format!("{flag}=")) {
+                    game_args.remove(index);
+                    found = true;
+                } else {
+                    index += 1;
+                }
+            }
+            if found || supports_resolution {
+                game_args.extend([flag.into(), value.to_string()]);
+            }
+        }
+        // An explicit launcher choice takes precedence over a profile's full-screen flag.
+        game_args.retain(|arg| arg != "--fullscreen");
+        args.extend(game_args);
     }
     Ok(args)
 }
@@ -1039,6 +1097,56 @@ mod tests {
         )
         .unwrap();
         assert!(!rules_allow(&rules, "linux", "x86_64", &HashMap::new()));
+    }
+    #[test]
+    fn window_and_jvm_preferences_generate_literal_scoped_arguments() {
+        use crate::launch_options::{LaunchOptions, WindowMode};
+        let temp = tempfile::tempdir().unwrap();
+        let launcher = crate::Launcher::open(Some(temp.path().into())).unwrap();
+        let mut instance = launcher.create_instance("Options", "1.20.1").unwrap();
+        let mut version = crate::test_http::version_fixture("1.20.1");
+        version.main_class = "net.minecraft.client.main.Main".into();
+        version.arguments=Some(serde_json::from_value(serde_json::json!({"jvm":["-cp","${classpath}"],"game":["--width","800","--height=600","--fullscreen","--version","${version_name}"]})).unwrap());
+        instance.launch = LaunchOptions {
+            window_mode: WindowMode::Windowed,
+            width: 1440,
+            height: 900,
+            jvm_args: vec!["-Dpack.name=My Pack; still literal".into()],
+            ..Default::default()
+        };
+        let args = arguments_with_memory(
+            &version,
+            launcher.root(),
+            &instance,
+            &LaunchSession::guest(),
+            2048,
+        )
+        .unwrap();
+        let entry = args
+            .iter()
+            .position(|arg| arg == &version.main_class)
+            .unwrap();
+        assert_eq!(args[entry - 1], instance.launch.jvm_args[0]);
+        assert_eq!(args.iter().filter(|arg| *arg == "--width").count(), 1);
+        assert_eq!(
+            args[args.iter().position(|arg| arg == "--width").unwrap() + 1],
+            "1440"
+        );
+        assert_eq!(args.last().unwrap(), "900");
+        assert!(!args.contains(&"--fullscreen".into()));
+        // Old clients without resolution arguments use options.txt, not unsupported CLI flags.
+        version.main_class = "net.minecraft.client.Minecraft".into();
+        version.arguments = None;
+        version.minecraft_arguments = Some("${auth_player_name} ${auth_session}".into());
+        let legacy = arguments_with_memory(
+            &version,
+            launcher.root(),
+            &instance,
+            &LaunchSession::guest(),
+            2048,
+        )
+        .unwrap();
+        assert!(!legacy.contains(&"--width".into()));
     }
     #[test]
     fn expands_arguments_without_shell_splitting() {

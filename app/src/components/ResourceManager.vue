@@ -30,6 +30,11 @@ import GlassSelect from "./GlassSelect.vue";
 import ContentSwitch from "./ContentSwitch.vue";
 import SkinStage from "./SkinStage.vue";
 import SkinLibraryItem from "./SkinLibraryItem.vue";
+import ResourceSelectionBar from "./ResourceSelectionBar.vue";
+import {
+  useResourceSelection,
+  changeSelectedMods,
+} from "../useResourceSelection";
 import VersionContentItem from "./VersionContentItem.vue";
 import { t } from "../i18n";
 import { formatBytes as formatSmallBytes } from "../downloadWorkflow";
@@ -113,13 +118,20 @@ const transferResource = inject(resourceTransferKey, undefined);
 function beginResourceDrag(event: PointerEvent, row: ResourceRow) {
   const owner = row.owners[0];
   if (!owner || !isResourceDragKind(resourceKind.value) || locked(row)) return;
-  transferResource?.(event, {
-    kind: resourceKind.value,
-    instance: owner.id,
-    version: owner.version,
-    file: row.file.file_name,
-    name: resourceName(row),
-  });
+  if (event.shiftKey || event.metaKey || event.ctrlKey) return;
+  const rows = selection.drag(row);
+  if (rows.some(locked)) return;
+  const kind = resourceKind.value;
+  transferResource?.(
+    event,
+    rows.map((item) => ({
+      kind,
+      instance: item.owners[0]!.id,
+      version: item.owners[0]!.version,
+      file: item.file.file_name,
+      name: resourceName(item),
+    })),
+  );
 }
 const tabs = [
   { id: "java", label: "Java", icon: Coffee, color: "#e7bc76" },
@@ -254,6 +266,68 @@ const filtered = computed(() => {
       ].some((s) => s.toLocaleLowerCase().includes(needle)),
   );
 });
+const selection = useResourceSelection(
+  () => filtered.value,
+  (row) => row.key,
+);
+const selectedResources = selection.selected;
+const selectedHasEnabled = computed(() =>
+  selectedResources.value.some((row) => row.file.enabled),
+);
+const selectedHasDisabled = computed(() =>
+  selectedResources.value.some((row) => !row.file.enabled),
+);
+const selectionLocked = computed(
+  () => props.busy || mutating.value || selectedResources.value.some(locked),
+);
+watch([tab, resourceKind, query], () => selection.clear());
+function selectResource(event: MouseEvent, row: ResourceRow) {
+  if (mutating.value) return;
+  if (selection.click(event, row)) return;
+  resourceKey.value = resourceKey.value === row.key ? "" : row.key;
+}
+async function setSelectedEnabled(enabled: boolean) {
+  if (selectionLocked.value || resourceKind.value !== "mods") return;
+  const rows = [...selectedResources.value];
+  const scope = generation;
+  await run(async () => {
+    const failures = await changeSelectedMods(
+      rows,
+      enabled,
+      (row) => row.file.enabled,
+      (row, state) =>
+        props.modActions.setEnabled(
+          row.owners[0]!.id,
+          row.owners[0]!.version,
+          row.file.file_name,
+          state,
+        ),
+      (row, name) => {
+        if (scope !== generation) return;
+        const entries = resourceGroups.get(row.group) || [];
+        resourceGroups.set(
+          row.group,
+          entries.map((entry) =>
+            entry.key === row.key
+              ? { ...entry, file: { ...entry.file, file_name: name, enabled } }
+              : entry,
+          ),
+        );
+        resources.value = [...resourceGroups.values()].flat();
+      },
+    );
+    if (scope === generation)
+      for (const row of new Map(rows.map((row) => [row.group, row])).values())
+        await changed(row);
+    if (failures.length)
+      emit(
+        "error",
+        failures
+          .map(({ item, error }) => `${resourceName(item)}: ${String(error)}`)
+          .join("\n"),
+      );
+  });
+}
 const resourceKey = ref("");
 const selectedResource = computed(() =>
   filtered.value.find((row) => row.key === resourceKey.value),
@@ -916,7 +990,11 @@ defineExpose({ drop, refresh });
           >
         </footer>
       </div>
-      <div v-else-if="tab === 'resources'" class="rm-page">
+      <div
+        v-else-if="tab === 'resources'"
+        class="rm-page"
+        @keydown="!mutating && selection.keyboard($event)"
+      >
         <div
           class="rm-toolbar list-reveal-item"
           :style="listRevealStyle(0)"
@@ -946,6 +1024,16 @@ defineExpose({ drop, refresh });
             }}</span>
           </div>
         </div>
+        <ResourceSelectionBar
+          class="rm-selection"
+          :count="selectedResources.length"
+          :mods="resourceKind === 'mods'"
+          :busy="selectionLocked"
+          :enable="selectedHasDisabled"
+          :disable="selectedHasEnabled"
+          @clear="selection.clear"
+          @enabled="setSelectedEnabled"
+        />
         <div
           class="rm-tile-grid rm-scroll rm-resources"
           data-list-viewport
@@ -958,16 +1046,17 @@ defineExpose({ drop, refresh });
             :style="listRevealStyle(index, 20, resourceRowStagger)"
             :class="{
               active: resourceKey === row.key,
+              'is-selected': selection.contains(row),
               'resource-drag-handle':
                 isResourceDragKind(resourceKind) &&
                 !!transferResource &&
                 !locked(row),
               'is-disabled': resourceKind === 'mods' && !row.file.enabled,
             }"
-            :aria-pressed="resourceKey === row.key"
+            :aria-pressed="selection.contains(row) || resourceKey === row.key"
             :aria-label="resourceName(row)"
             :title="`${resourceName(row)}${row.file.version ? ' · ' + row.file.version : ''}\n${row.owners.map((owner) => owner.label).join(' · ')}${resourceKind === 'mods' && !row.file.enabled ? '\n' + t('已禁用') : ''}`"
-            @click="resourceKey = resourceKey === row.key ? '' : row.key"
+            @click="selectResource($event, row)"
             @pointerdown="beginResourceDrag($event, row)"
             @dragstart.prevent
           >
@@ -1253,6 +1342,16 @@ defineExpose({ drop, refresh });
 </template>
 
 <style scoped>
+.rm-selection {
+  padding-bottom: 8px;
+}
+.rm-resource-tile.is-selected {
+  color: var(--blue);
+  background: color-mix(in srgb, var(--blue) 9%, transparent);
+}
+.rm-resource-tile.is-selected .rm-tile-icon {
+  filter: drop-shadow(0 0 8px color-mix(in srgb, var(--blue) 65%, transparent));
+}
 .resource-manager {
   width: min(940px, calc(100vw - 48px));
   height: min(620px, calc(100dvh - 64px));

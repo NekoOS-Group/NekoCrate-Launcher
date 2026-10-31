@@ -13,9 +13,11 @@ mod game_options;
 mod installer_cache;
 mod instance_creation;
 pub mod instance_discovery;
+pub mod isolation;
 pub mod java;
 pub mod java_compatibility;
 mod language;
+pub mod launch_options;
 pub mod loader;
 pub mod memory;
 mod migration;
@@ -58,6 +60,7 @@ struct Shared {
     _lock: fs::File,
     db: Mutex<Database>,
     operation: tokio::sync::Mutex<()>,
+    layout: Mutex<()>,
     account_operation: tokio::sync::Mutex<()>,
     pack_import: tokio::sync::Mutex<()>,
     active_modpack: Mutex<Option<(String, String)>>,
@@ -120,6 +123,7 @@ impl Launcher {
             _lock: lock,
             db: Mutex::new(db),
             operation: tokio::sync::Mutex::new(()),
+            layout: Mutex::new(()),
             account_operation: tokio::sync::Mutex::new(()),
             pack_import: tokio::sync::Mutex::new(()),
             active_modpack: Mutex::new(None),
@@ -518,6 +522,7 @@ impl Launcher {
             memory_mb: 2048,
             memory_mode: MemoryMode::Auto,
             java_path: None,
+            launch: launch_options::LaunchOptions::default(),
             created_at: storage::now(),
             last_played: None,
         };
@@ -563,6 +568,22 @@ impl Launcher {
         java_path: Option<String>,
         icon: Option<u8>,
     ) -> Result<()> {
+        self.update_instance_options(id, name, memory, java_path, icon, None)
+    }
+    pub fn update_instance_options(
+        &self,
+        id: &str,
+        name: &str,
+        memory: memory::MemoryConfig,
+        java_path: Option<String>,
+        icon: Option<u8>,
+        launch: Option<launch_options::LaunchOptions>,
+    ) -> Result<()> {
+        let _layout = self.0.layout.lock().unwrap();
+        if let Some(options) = &launch {
+            options.validate()?;
+            self.validate_isolation_change(id, options.isolation)?;
+        }
         let memory_mb = memory.custom_mb;
         // Metadata-only edits use the database lock. Install/launch already own
         // an Instance snapshot; saving preferences must not wait for downloads
@@ -586,6 +607,9 @@ impl Launcher {
             i.name = name.trim().into();
             i.memory_mb = memory_mb;
             i.memory_mode = memory.mode;
+            if let Some(launch) = launch {
+                i.launch = launch;
+            }
             i.java_path = java_path.filter(|s| !s.trim().is_empty());
             if let Some(icon) = icon {
                 i.icon = Some(icon);
@@ -1054,7 +1078,12 @@ impl Launcher {
         sink(Event::workflow("java", "准备 Java"));
         let java = java::ensure(
             self.root(),
-            java::JavaRequirement::for_instance(&v, &game, instance.java_path.as_deref()).await?,
+            java::JavaRequirement::for_working_directory(
+                &v,
+                &version::instance_working_directory(&game, &instance, &selected.id)?,
+                instance.java_path.as_deref(),
+            )
+            .await?,
             instance.java_path.as_deref(),
             settings.auto_java,
             &downloader,
@@ -1266,6 +1295,9 @@ impl Launcher {
         let instance = self.instance(id)?;
         let game = self.available_game_dir(id)?;
         let selected = instance.selected().context("请先选择游戏版本")?;
+        instance.launch.validate()?;
+        let working_directory =
+            version::instance_working_directory(&game, &instance, &selected.id)?;
         let mut resolved = version::resolve(self.root(), &game, &selected.id)?;
         let settings = self.settings();
         let downloader = download::Downloader::new(self.root(), settings.clone())?
@@ -1275,14 +1307,15 @@ impl Launcher {
         version::check_launch_files(self.root(), &game, &resolved)?;
         // Assess Java against the original entry point/libraries: the color
         // overlay must not relax LaunchWrapper's existing Java 8 restriction.
-        let java_requirement = java::JavaRequirement::for_instance(
+        let java_requirement = java::JavaRequirement::for_working_directory(
             &resolved.version,
-            &game,
+            &working_directory,
             instance.java_path.as_deref(),
         )
         .await?;
         let compatibility_args = runtime_compatibility::prepare_legacy_colors(
             &game,
+            &working_directory,
             &mut resolved,
             &downloader,
             cancel,
@@ -1340,7 +1373,6 @@ impl Launcher {
         ));
         let args =
             minecraft::arguments_with_memory(&v, self.root(), &instance, &session, memory_mb)?;
-        let working_directory = version::working_directory(&game, &v)?;
         let log_dir = self.instance_dir(id)?.join("launcher-logs");
         fs::create_dir_all(&log_dir)?;
         let log_path = log_dir.join(format!("{}-{}.log", storage::now(), uuid::Uuid::new_v4()));
@@ -1353,6 +1385,13 @@ impl Launcher {
         command
             .args(compatibility_args)
             .args(args)
+            .envs(
+                instance
+                    .launch
+                    .environment
+                    .iter()
+                    .filter_map(|line| line.split_once('=')),
+            )
             .current_dir(&working_directory)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -1363,7 +1402,8 @@ impl Launcher {
             command.current_dir(java::argument_path(&working_directory));
         }
         download::check_cancel(cancel)?;
-        game_options::apply_language(&working_directory, &settings)?;
+        fs::create_dir_all(&working_directory).context("无法创建游戏运行目录")?;
+        game_options::apply_launch(&working_directory, &settings, &instance.launch)?;
         let mut child = command
             .spawn()
             .context("无法启动 Java 进程，请检查 Java 路径和系统权限")?;
@@ -1562,6 +1602,72 @@ async fn pipe_logs<R: tokio::io::AsyncRead + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn instance_launch_preferences_persist_and_invalid_edits_are_atomic() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("launcher");
+        let launcher = Launcher::open(Some(root.clone())).unwrap();
+        let instance = launcher.create_instance("Options", "1.20.1").unwrap();
+        let mut old = serde_json::to_value(&instance).unwrap();
+        old.as_object_mut().unwrap().remove("launch");
+        let legacy: Instance = serde_json::from_value(old).unwrap();
+        assert_eq!(legacy.launch, launch_options::LaunchOptions::default());
+        let launch = launch_options::LaunchOptions {
+            window_mode: launch_options::WindowMode::Windowed,
+            width: 1440,
+            height: 900,
+            minimize_launcher: true,
+            jvm_args: vec!["-Dpack=My Pack".into()],
+            ..Default::default()
+        };
+        launcher
+            .update_instance_options(
+                &instance.id,
+                "Configured",
+                memory::MemoryConfig {
+                    mode: MemoryMode::Auto,
+                    custom_mb: 2048,
+                },
+                None,
+                None,
+                Some(launch.clone()),
+            )
+            .unwrap();
+        launcher
+            .update_instance_memory(
+                &instance.id,
+                "Renamed",
+                memory::MemoryConfig {
+                    mode: MemoryMode::Auto,
+                    custom_mb: 2048,
+                },
+                None,
+                None,
+            )
+            .unwrap();
+        let mut invalid = launch.clone();
+        invalid.jvm_args = vec!["-Xmx2G".into()];
+        assert!(
+            launcher
+                .update_instance_options(
+                    &instance.id,
+                    "Invalid",
+                    memory::MemoryConfig {
+                        mode: MemoryMode::Auto,
+                        custom_mb: 2048
+                    },
+                    None,
+                    None,
+                    Some(invalid)
+                )
+                .is_err()
+        );
+        assert_eq!(launcher.instance(&instance.id).unwrap().name, "Renamed");
+        drop(launcher);
+        let reopened = Launcher::open(Some(root)).unwrap();
+        assert_eq!(reopened.instance(&instance.id).unwrap().launch, launch);
+    }
+
     #[tokio::test]
     async fn cancelled_install_persists_byte_progress_across_launcher_restarts() {
         use sha1::{Digest, Sha1};
@@ -2124,8 +2230,9 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn no_account_launch_reaches_game_process_and_keeps_guest_logs_intact() {
-        verify_guest_launch_directory(false).await;
-        verify_guest_launch_directory(true).await;
+        verify_guest_launch_directory(false, false).await;
+        verify_guest_launch_directory(true, false).await;
+        verify_guest_launch_directory(true, true).await;
     }
 
     #[tokio::test]
@@ -2198,7 +2305,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    async fn verify_guest_launch_directory(linked: bool) {
+    async fn verify_guest_launch_directory(linked: bool, isolated: bool) {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
         let launcher = Launcher::open(Some(temp.path().join("launcher"))).unwrap();
@@ -2228,6 +2335,7 @@ if [ "$2" = "-version" ]; then
   exit 0
 fi
 printf '%s\n' "$@" > launch-arguments.txt
+printf '%s\n' "$NEKO_LAUNCH_TEST" > launch-environment.txt
 printf '%s\n' 'offline session 0 started'
 "#,
         )
@@ -2252,6 +2360,26 @@ printf '%s\n' 'offline session 0 started'
                 None,
             )
             .unwrap();
+        if isolated {
+            launcher
+                .update_instance_options(
+                    &instance.id,
+                    &instance.name,
+                    memory::MemoryConfig {
+                        mode: MemoryMode::Auto,
+                        custom_mb: 1024,
+                    },
+                    Some(java.to_string_lossy().into()),
+                    None,
+                    Some(launch_options::LaunchOptions {
+                        isolation: Some(launch_options::IsolationMode::Version),
+                        game_args: vec!["--server".into(), "mc.example.org;$(echo literal)".into()],
+                        environment: vec!["NEKO_LAUNCH_TEST=one=two $HOME".into()],
+                        ..Default::default()
+                    }),
+                )
+                .unwrap();
+        }
         let version = test_http::version_fixture("1.21.1");
         let game = launcher.game_dir(&instance.id).unwrap();
         if linked {
@@ -2280,10 +2408,25 @@ printf '%s\n' 'offline session 0 started'
         })
         .await
         .unwrap();
-        let text = fs::read_to_string(game.join("launch-arguments.txt")).unwrap();
+        let working = if isolated {
+            game.join("versions/1.21.1")
+        } else {
+            game.clone()
+        };
+        let text = fs::read_to_string(working.join("launch-arguments.txt")).unwrap();
         let args: Vec<_> = text.lines().collect();
         let game_at = args.iter().position(|arg| *arg == "--gameDir").unwrap();
-        assert_eq!(args[game_at + 1], game.to_string_lossy());
+        assert_eq!(args[game_at + 1], working.to_string_lossy());
+        if isolated {
+            assert_eq!(
+                fs::read_to_string(working.join("launch-environment.txt")).unwrap(),
+                "one=two $HOME\n"
+            );
+            assert!(text.contains("mc.example.org;$(echo literal)"));
+            assert!(!game.join("launch-arguments.txt").exists());
+            assert!(game.join("saves").is_dir());
+            assert!(std::env::var_os("NEKO_LAUNCH_TEST").is_none());
+        }
         if linked {
             assert!(
                 !launcher

@@ -11,7 +11,7 @@ const packageVersion = JSON.parse(
 ).version;
 const stubs = {
   "@tauri-apps/api/core": `export const isTauri = () => true; export const invoke = (...args) => globalThis.__settingsFixture.invoke(...args);`,
-  "@tauri-apps/api/window": `export const getCurrentWindow = () => ({ setTitle: async () => {}, onDragDropEvent: async callback => { const fixture = globalThis.__settingsFixture; fixture.fileDrop = callback; return () => { fixture.dropUnlistened = true; }; } });`,
+  "@tauri-apps/api/window": `export const getCurrentWindow = () => ({ setTitle: async () => {}, isMinimized: async () => false, minimize: async () => {}, unminimize: async () => {}, setFocus: async () => {}, onDragDropEvent: async callback => { const fixture = globalThis.__settingsFixture; fixture.fileDrop = callback; return () => { fixture.dropUnlistened = true; }; } });`,
   "@tauri-apps/api/event": `export const listen = async (name, callback) => { if (name === 'launcher-event') globalThis.__settingsFixture.event = callback; else globalThis.__settingsFixture.updateEvent = callback; return () => {}; };`,
   "@tauri-apps/plugin-dialog": `export const open = async (...args) => globalThis.__settingsFixture.pickFile?.(...args) ?? null;`,
   "@tauri-apps/plugin-opener": `export const openUrl = async () => {};`,
@@ -151,6 +151,13 @@ export async function settingsFixture() {
           issue: null,
         }));
       if (request.op === "proxy_password") return this.proxyPassword;
+      if (request.op === "launch_directory")
+        return {
+          path: "/games",
+          mode: request.isolation || "shared",
+          changed: false,
+          protected_pack: false,
+        };
       if (request.op === "memory_options")
         return {
           auto_mb: 6144,

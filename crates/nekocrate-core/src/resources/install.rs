@@ -221,17 +221,31 @@ impl Launcher {
     ) -> Result<()> {
         let _operation = self.0.operation.lock().await;
         self.idle(id)?;
-        let target = self.resource_target(id, version)?;
-        let directory = task_dir(&target, task)?;
-        let mut plan: ResourcePlan = storage::read_json(&safe_join(&directory, "plan.json")?)?;
-        if plan.target.instance != id
-            || plan.target.version != version
-            || plan.target.directory != target.directory
-            || plan.target.minecraft != target.minecraft
-            || plan.target.loader != target.loader
-        {
-            bail!("目标版本已变化，请重新生成资源安装计划");
-        }
+        let (mut plan, directory) = {
+            // Serialize the target snapshot/checkpoint with isolation edits. No network work
+            // or await holds this short lock, and unrelated settings remain editable.
+            let _layout = self.0.layout.lock().unwrap();
+            let target = self.resource_target(id, version)?;
+            let directory = task_dir(&target, task)?;
+            let mut plan: ResourcePlan = storage::read_json(&safe_join(&directory, "plan.json")?)?;
+            if plan.target.instance != id
+                || plan.target.version != version
+                || plan.target.directory != target.directory
+                || plan.target.minecraft != target.minecraft
+                || plan.target.loader != target.loader
+            {
+                bail!("目标版本已变化，请重新生成资源安装计划");
+            }
+            if !plan.complete {
+                if !plan.conflicts.is_empty() {
+                    bail!("请先解决安装预览中的冲突并重新生成计划");
+                }
+                plan.target = target;
+                plan.started = true;
+                save_plan(&plan)?;
+            }
+            (plan, directory)
+        };
         let game = self.available_game_dir(id)?;
         let mut downloader = Downloader::new(self.root(), self.settings())?.for_installation(
             self.root(),
@@ -245,12 +259,6 @@ impl Launcher {
             downloader.finish_installation(sink).await;
             return Ok(());
         }
-        if !plan.conflicts.is_empty() {
-            bail!("请先解决安装预览中的冲突并重新生成计划");
-        }
-        plan.target = target;
-        plan.started = true;
-        save_plan(&plan)?;
         let sink = Event::scoped(sink, id, None);
         sink(Event::workflow("resource_check", "检查资源与目标目录"));
         let token = cancel.clone();

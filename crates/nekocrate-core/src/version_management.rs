@@ -385,7 +385,7 @@ impl Launcher {
     ) -> Result<(PathBuf, Option<version::ResolvedVersion>)> {
         storage::safe_version(version_id)?;
         let instance = self.instance(id)?;
-        let tracked = instance
+        instance
             .versions
             .iter()
             .find(|v| v.id == version_id)
@@ -396,13 +396,7 @@ impl Launcher {
         } else {
             None
         };
-        let working = match &resolved {
-            Some(resolved) => version::working_directory(&game, &resolved.version)?,
-            None if tracked.modpack || crate::loader::has_record(&game, version_id) => {
-                game.join("versions").join(version_id)
-            }
-            None => game,
-        };
+        let working = version::instance_working_directory(&game, &instance, version_id)?;
         Ok((working, resolved))
     }
 }

@@ -120,6 +120,14 @@ enum Request {
         id: String,
         version: String,
     },
+    CopyResources {
+        sources: Vec<nekocrate_core::resources::ResourceCopySource>,
+        id: String,
+        version: String,
+    },
+    ExportResources {
+        sources: Vec<nekocrate_core::resources::ResourceCopySource>,
+    },
     ExportResource {
         source: nekocrate_core::resources::ResourceCopySource,
     },
@@ -205,6 +213,8 @@ enum Request {
         java_path: Option<String>,
         #[serde(default)]
         icon: Option<u8>,
+        #[serde(default)]
+        launch: Option<nekocrate_core::launch_options::LaunchOptions>,
     },
     Clone {
         id: String,
@@ -355,6 +365,10 @@ enum Request {
     OpenFolder {
         id: Option<String>,
     },
+    LaunchDirectory {
+        id: String,
+        isolation: Option<nekocrate_core::launch_options::IsolationMode>,
+    },
     InstanceDirectory {
         id: String,
     },
@@ -484,11 +498,24 @@ fn dispatch<'a>(
                     json!(true)
                 } else { json!(false) }
             },
+            Request::CopyResources{sources,id,version}=>{
+                let (cancel,_guard)=state.job().await?;
+                let worker=launcher.clone(); let token=cancel.clone();
+                let plan=tauri::async_runtime::spawn_blocking(move || worker.prepare_resource_copies(&sources,&id,&version,&token)).await??;
+                if let Some(plan)=plan { launcher.install_resources(&plan.target.instance,&plan.target.version,&plan.id,&cancel,&sink).await?;json!(true) } else {json!(false)}
+            },
+            Request::ExportResources{sources}=>{
+                anyhow::ensure!(!sources.is_empty() && sources.len() <= 256,"每次最多拖动 256 项资源");
+                let worker=launcher.clone();
+                let paths=tauri::async_runtime::spawn_blocking(move || sources.iter().map(|source| worker.resource_export_path(source)).collect::<anyhow::Result<std::collections::BTreeSet<_>>>()).await??;
+                let window=app.get_webview_window("main").ok_or_else(|| anyhow::anyhow!("启动器窗口已关闭"))?;
+                json!(file_drag::start(window,paths.into_iter().collect()).await?)
+            },
             Request::ExportResource{source}=>{
                 let worker=launcher.clone();
                 let path=tauri::async_runtime::spawn_blocking(move || worker.resource_export_path(&source)).await??;
                 let window=app.get_webview_window("main").ok_or_else(|| anyhow::anyhow!("启动器窗口已关闭"))?;
-                json!(file_drag::start(window,path).await?)
+                json!(file_drag::start(window,vec![path]).await?)
             },
             Request::ResourcePlans{id,version}=>{
                 let launcher=launcher.clone();
@@ -548,7 +575,7 @@ fn dispatch<'a>(
                     launcher.instance(&instance.id)
                 }).await??)
             },
-            Request::Update{id,name,memory_mb,memory_mode,java_path,icon}=>{launcher.update_instance_memory(&id,&name,nekocrate_core::memory::MemoryConfig{mode:memory_mode,custom_mb:memory_mb},java_path,icon)?;json!(true)},
+            Request::Update{id,name,memory_mb,memory_mode,java_path,icon,launch}=>{launcher.update_instance_options(&id,&name,nekocrate_core::memory::MemoryConfig{mode:memory_mode,custom_mb:memory_mb},java_path,icon,launch)?;json!(true)},
             Request::Clone{id}=>{let (_cancel,_guard)=state.job().await?;json!(launcher.clone_instance(&id).await?)},
             Request::Delete{id}=>{
                 let (_cancel,_guard)=state.job().await?;
@@ -677,6 +704,7 @@ fn dispatch<'a>(
             Request::RenameAccount{id,name}=>json!(Box::pin(launcher.rename_account(&id,&name)).await?),
             Request::RemoveAccount{id}=>{let (_cancel,_guard)=state.job().await?;launcher.remove_account(&id)?;json!(true)},
             Request::OpenFolder{id}=>{let path=match id{Some(id)=>launcher.game_dir(&id)?,None=>launcher.root().to_owned()};app.opener().open_path(path.to_string_lossy(),None::<&str>)?;json!(true)},
+            Request::LaunchDirectory{id,isolation}=>{let launcher = launcher.clone(); json!(tauri::async_runtime::spawn_blocking(move || launcher.launch_directory(&id,isolation)).await??)},
             Request::InstanceDirectory{id}=>json!(launcher.game_dir(&id)?),
         })
     }.await;

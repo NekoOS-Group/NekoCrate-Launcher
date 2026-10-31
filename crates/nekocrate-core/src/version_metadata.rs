@@ -191,16 +191,20 @@ impl Launcher {
         };
         let working_directory = resolved
             .as_ref()
-            .and_then(
-                |resolved| match version::working_directory(&game, &resolved.version) {
+            .and_then(|resolved| {
+                match version::instance_working_directory(&game, &instance, &resolved.version.id) {
                     Ok(path) => Some(path),
                     Err(error) => {
                         issue = Some(error.to_string());
                         None
                     }
-                },
-            )
-            .or_else(|| (pending_pack || pending_loader).then(|| directory.clone()));
+                }
+            })
+            .or_else(|| {
+                (pending_pack || pending_loader)
+                    .then(|| version::instance_working_directory(&game, &instance, version_id).ok())
+                    .flatten()
+            });
         // Only inspect known metadata files beside this profile and in its actual
         // working directory. Do not recurse into mods/saves or scan other versions.
         let mut locations = vec![directory.clone()];

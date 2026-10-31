@@ -268,6 +268,7 @@ impl Launcher {
         let result = installer::Install {
             root: self.root(),
             game: &game,
+            working_directory: &version::instance_working_directory(&game, &instance, selected)?,
             minecraft: &record.minecraft,
             loader: Some(&record.loader),
             id: selected,

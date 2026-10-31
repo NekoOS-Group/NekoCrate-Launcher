@@ -85,6 +85,7 @@ fn artifact(game: &Path) -> FileSpec {
 
 pub(crate) async fn prepare(
     game: &Path,
+    directory: &Path,
     resolved: &mut ResolvedVersion,
     downloader: &Downloader,
     cancel: &CancellationToken,
@@ -101,11 +102,10 @@ pub(crate) async fn prepare(
     if !tokio::task::spawn_blocking(move || has_applet(&client)).await?? {
         return Ok(vec![]);
     }
-    let directory = version::working_directory(game, &resolved.version)?;
     let file = artifact(game);
     prepare_file(
         &file,
-        &directory,
+        directory,
         &mut resolved.version,
         downloader,
         cancel,

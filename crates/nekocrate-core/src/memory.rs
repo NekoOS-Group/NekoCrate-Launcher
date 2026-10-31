@@ -105,9 +105,10 @@ pub fn presets(root: &Path, instance: &Instance) -> MemoryPresets {
         .unwrap_or("");
     let modded = resolved.as_ref().is_some_and(|r| r.loader.is_some())
         || selected.is_some_and(|s| s.loader.is_some());
-    let working = resolved
-        .as_ref()
-        .and_then(|r| version::working_directory(&game, &r.version).ok())
+    let working = selected
+        .and_then(|selected| {
+            version::instance_working_directory(&game, instance, &selected.id).ok()
+        })
         .unwrap_or_else(|| game.clone());
     let mods = if modded {
         fs::read_dir(working.join("mods"))

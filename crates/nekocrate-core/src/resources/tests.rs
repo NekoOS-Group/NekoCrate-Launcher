@@ -1236,3 +1236,57 @@ async fn interrupted_publication_recovers_from_the_checkpoint_without_requiring_
     assert_eq!(records(&working).unwrap().len(), 1);
     assert_eq!(fs::read(published.join("level.dat")).unwrap(), b"world");
 }
+
+#[tokio::test]
+async fn batch_resource_copy_checks_every_file_before_installing_and_keeps_disabled_state() {
+    let (_temp, launcher, id, working) = fixture(true);
+    let target = copy_target(&launcher, &id, &working, true);
+    let sources: Vec<_> = ["cat.jar", "ice.jar.disabled"]
+        .iter()
+        .map(|name| {
+            archive(
+                &working.join("mods").join(name),
+                &[(
+                    "fabric.mod.json",
+                    &format!(r#"{{"id":"{name}","version":"1"}}"#),
+                )],
+            );
+            ResourceCopySource {
+                kind: ResourceKind::Mods,
+                instance: id.clone(),
+                version: "1.20.1".into(),
+                file: (*name).into(),
+            }
+        })
+        .collect();
+    fs::write(target.join("mods/ice.jar.disabled"), b"conflict").unwrap();
+    let cancel = CancellationToken::new();
+    assert!(
+        launcher
+            .prepare_resource_copies(&sources, &id, "target", &cancel)
+            .is_err()
+    );
+    assert!(!target.join("mods/cat.jar").exists());
+    assert!(launcher.resource_plans(&id, "target").unwrap().is_empty());
+    fs::remove_file(target.join("mods/ice.jar.disabled")).unwrap();
+    let mut duplicates = sources.clone();
+    duplicates.push(sources[0].clone());
+    let plan = launcher
+        .prepare_resource_copies(&duplicates, &id, "target", &cancel)
+        .unwrap()
+        .unwrap();
+    assert_eq!(plan.entries.len(), 2);
+    install(&launcher, &plan).await.unwrap();
+    for source in &sources {
+        assert_eq!(
+            fs::read(working.join("mods").join(&source.file)).unwrap(),
+            fs::read(target.join("mods").join(&source.file)).unwrap()
+        );
+    }
+    assert!(
+        launcher
+            .prepare_resource_copies(&sources, &id, "target", &cancel)
+            .unwrap()
+            .is_none()
+    );
+}

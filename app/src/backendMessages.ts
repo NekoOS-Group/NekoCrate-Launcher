@@ -1,5 +1,6 @@
 /** Launcher-owned messages only. Game output and user-supplied values are never translated. */
 export const backendEnglish: Readonly<Record<string, string>> = {
+  "环境变量名称重复：{name}": "Duplicate environment variable: {name}",
   "Java 版玩家名称须为 3–16 位英文字母、数字或下划线":
     "Use 3–16 letters, numbers or underscores for your Java Edition name",
   "改名请求未完成，请刷新账户确认结果后再试":

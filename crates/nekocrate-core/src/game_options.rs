@@ -2,26 +2,68 @@ use crate::{language, model::Settings, storage};
 use anyhow::{Context, Result, bail};
 use std::{fs, io::ErrorKind, path::Path};
 
+#[cfg(test)]
 pub fn apply_language(game: &Path, settings: &Settings) -> Result<()> {
     apply_language_for_locale(game, settings, &language::system_locale())
 }
 
+#[cfg(test)]
 fn apply_language_for_locale(game: &Path, settings: &Settings, system: &str) -> Result<()> {
-    if !settings.apply_language_to_game {
+    apply_options(
+        game,
+        settings,
+        &crate::launch_options::LaunchOptions::default(),
+        system,
+    )
+}
+
+pub fn apply_launch(
+    game: &Path,
+    settings: &Settings,
+    options: &crate::launch_options::LaunchOptions,
+) -> Result<()> {
+    options.validate()?;
+    apply_options(game, settings, options, &language::system_locale())
+}
+fn apply_options(
+    game: &Path,
+    settings: &Settings,
+    options: &crate::launch_options::LaunchOptions,
+    system: &str,
+) -> Result<()> {
+    use crate::launch_options::WindowMode;
+    let mut values = Vec::new();
+    if settings.apply_language_to_game {
+        if !["system", "zh-CN", "en-US"].contains(&settings.language.as_str()) {
+            bail!("不支持的游戏语言");
+        }
+        values.push((
+            "lang",
+            match language::resolve(&settings.language, system) {
+                "zh-CN" => "zh_cn",
+                _ => "en_us",
+            }
+            .to_owned(),
+        ));
+    }
+    if options.window_mode != WindowMode::Default {
+        values.push((
+            "fullscreen",
+            (options.window_mode == WindowMode::Fullscreen).to_string(),
+        ));
+        if options.window_mode == WindowMode::Windowed {
+            values.push(("overrideWidth", options.width.to_string()));
+            values.push(("overrideHeight", options.height.to_string()));
+        }
+    }
+    if values.is_empty() {
         return Ok(());
     }
-    if !["system", "zh-CN", "en-US"].contains(&settings.language.as_str()) {
-        bail!("不支持的游戏语言");
-    }
-    let option = match language::resolve(&settings.language, system) {
-        "zh-CN" => "lang:zh_cn",
-        _ => "lang:en_us",
-    };
     let path = game.join("options.txt");
     let original = match fs::read_to_string(&path) {
         Ok(text) => text,
         Err(error) if error.kind() == ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(error).context("无法读取游戏语言设置"),
+        Err(error) => return Err(error).context("无法读取游戏设置"),
     };
     let newline = if original.contains("\r\n") {
         "\r\n"
@@ -29,7 +71,7 @@ fn apply_language_for_locale(game: &Path, settings: &Settings, system: &str) -> 
         "\n"
     };
     let mut output = String::new();
-    let mut found = false;
+    let mut found = std::collections::HashSet::new();
     for line in original.split_inclusive('\n') {
         let body = line.trim_end_matches(['\r', '\n']);
         let prefix = if body.starts_with('\u{feff}') {
@@ -37,22 +79,25 @@ fn apply_language_for_locale(game: &Path, settings: &Settings, system: &str) -> 
         } else {
             ""
         };
-        if body.strip_prefix(prefix).unwrap().starts_with("lang:") {
-            if !found {
+        if let Some((key, value)) = values.iter().find(|(key, _)| {
+            body.strip_prefix(prefix)
+                .unwrap()
+                .starts_with(&format!("{key}:"))
+        }) {
+            if found.insert(*key) {
                 output.push_str(prefix);
-                output.push_str(option);
+                output.push_str(&format!("{key}:{value}"));
                 output.push_str(&line[body.len()..]);
-                found = true;
             }
         } else {
             output.push_str(line);
         }
     }
-    if !found {
+    for (key, value) in values.iter().filter(|(key, _)| !found.contains(key)) {
         if !output.is_empty() && !output.ends_with('\n') {
             output.push_str(newline);
         }
-        output.push_str(option);
+        output.push_str(&format!("{key}:{value}"));
         output.push_str(newline);
     }
     if output != original {
@@ -61,7 +106,7 @@ fn apply_language_for_locale(game: &Path, settings: &Settings, system: &str) -> 
             output.as_bytes(),
             &game.join("options.txt.nekocrate.bak"),
         )
-        .context("无法保存游戏语言设置")?;
+        .context("无法保存游戏设置")?;
     }
     Ok(())
 }
@@ -69,6 +114,48 @@ fn apply_language_for_locale(game: &Path, settings: &Settings, system: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn window_settings_preserve_unrelated_options_and_default_is_noop() {
+        use crate::launch_options::{LaunchOptions, WindowMode};
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("options.txt");
+        let original =
+            "fullscreen:true\r\noverrideWidth:900\r\noverrideWidth:800\r\nfov:0.5\r\nlang:zh_cn";
+        fs::write(&path, original).unwrap();
+        let options = LaunchOptions {
+            window_mode: WindowMode::Windowed,
+            width: 1440,
+            height: 900,
+            ..Default::default()
+        };
+        apply_launch(temp.path(), &Settings::default(), &options).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            text,
+            "fullscreen:false\r\noverrideWidth:1440\r\nfov:0.5\r\nlang:zh_cn\r\noverrideHeight:900\r\n"
+        );
+        assert_eq!(
+            fs::read_to_string(temp.path().join("options.txt.nekocrate.bak")).unwrap(),
+            original
+        );
+        apply_launch(temp.path(), &Settings::default(), &LaunchOptions::default()).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
+        apply_launch(
+            temp.path(),
+            &Settings::default(),
+            &LaunchOptions {
+                window_mode: WindowMode::Fullscreen,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            fs::read_to_string(path)
+                .unwrap()
+                .starts_with("fullscreen:true")
+        );
+    }
+
     #[test]
     fn language_sync_preserves_other_options_and_keeps_backup() {
         let temp = tempfile::tempdir().unwrap();

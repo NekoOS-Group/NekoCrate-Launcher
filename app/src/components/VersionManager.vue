@@ -30,6 +30,15 @@ import {
   X,
 } from "lucide-vue-next";
 import VersionMetadataPanel from "./VersionMetadataPanel.vue";
+import ResourceSelectionBar from "./ResourceSelectionBar.vue";
+import {
+  useResourceSelection,
+  changeSelectedMods,
+} from "../useResourceSelection";
+import {
+  isResourceDragKind,
+  type ResourceCopySource,
+} from "../useResourceTransfer";
 import VersionContentItem from "./VersionContentItem.vue";
 import InstanceTarget from "./InstanceTarget.vue";
 import AnimatedCount from "./AnimatedCount.vue";
@@ -261,6 +270,88 @@ const filteredFiles = computed(() => {
     ) || []
   );
 });
+const selection = useResourceSelection(
+  () =>
+    (isResourceDragKind(tab.value) ? filteredFiles.value : []).filter(
+      (file) => !file.declaration || file.declaration.status === "local",
+    ),
+  contentRowKey,
+);
+const batchSaving = ref(false);
+const selectedFiles = selection.selected;
+const selectedHasEnabled = computed(() =>
+  selectedFiles.value.some((file) => file.enabled),
+);
+const selectedHasDisabled = computed(() =>
+  selectedFiles.value.some((file) => !file.enabled),
+);
+watch([selected, tab, query, () => props.instance.id], () => selection.clear());
+function selectResource(event: MouseEvent, file: LocalContentFile) {
+  return batchSaving.value || selection.click(event, file);
+}
+function selectionKeyboard(event: KeyboardEvent) {
+  if (!batchSaving.value && isResourceDragKind(tab.value))
+    selection.keyboard(event);
+}
+function selectedDragSources(file: LocalContentFile): ResourceCopySource[] {
+  if (!isResourceDragKind(tab.value)) return [];
+  const kind = tab.value;
+  return selection
+    .drag(file)
+    .map((item) => ({
+      kind,
+      instance: props.instance.id,
+      version: selected.value,
+      file: item.file_name,
+      name: item.name,
+    }));
+}
+async function setSelectedEnabled(enabled: boolean) {
+  if (
+    props.locked ||
+    batchSaving.value ||
+    !props.modActions ||
+    tab.value !== "mods"
+  )
+    return;
+  const id = props.instance.id,
+    version = selected.value,
+    scope = request;
+  const files = [...selectedFiles.value];
+  batchSaving.value = true;
+  emit("busy", true);
+  try {
+    const failures = await changeSelectedMods(
+      files,
+      enabled,
+      (f) => f.enabled,
+      (f, state) =>
+        props.modActions!.setEnabled(id, version, f.file_name, state),
+      (file, name) => {
+        if (scope !== request || !content.value) return;
+        content.value = {
+          ...content.value,
+          files: content.value.files.map((item) =>
+            item.file_name === file.file_name
+              ? { ...item, file_name: name, enabled }
+              : item,
+          ),
+        };
+      },
+    );
+    if (scope === request) await reload(true);
+    if (failures.length)
+      emit(
+        "error",
+        failures
+          .map(({ item, error }) => `${item.name}: ${String(error)}`)
+          .join("\n"),
+      );
+  } finally {
+    batchSaving.value = false;
+    emit("busy", false);
+  }
+}
 const filteredLibraries = computed(() => {
   const words = query.value
     .trim()
@@ -568,6 +659,7 @@ defineExpose({ refresh });
     :data-resource-instance="instance.id"
     :data-resource-version="selected"
     data-drop-kind="version"
+    @keydown="selectionKeyboard"
   >
     <header ref="header" class="modal-header">
       <h2 class="dialog-heading" tabindex="-1" autofocus>
@@ -869,7 +961,10 @@ defineExpose({ refresh });
                       :kind="tab as ContentKind"
                       :icon="activeTab.icon"
                       :mod-actions="modActions"
-                      :locked="locked"
+                      :locked="locked || batchSaving"
+                      :selected="selection.contains(file)"
+                      :select="selectResource"
+                      :drag-sources="() => selectedDragSources(file)"
                       @changed="(name) => contentChanged(file, name)"
                       :load-metadata="loadContentMetadata"
                       :open-folder="openContentFolder"
@@ -897,6 +992,15 @@ defineExpose({ refresh });
                       content?.directory
                     }}</span>
                   </button>
+                  <ResourceSelectionBar
+                    :count="selectedFiles.length"
+                    :mods="tab === 'mods'"
+                    :busy="locked || batchSaving"
+                    :enable="selectedHasDisabled"
+                    :disable="selectedHasEnabled"
+                    @clear="selection.clear"
+                    @enabled="setSelectedEnabled"
+                  />
                   <div class="version-manager-search">
                     <Search :size="12" /><input
                       v-model="query"

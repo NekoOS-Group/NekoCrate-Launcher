@@ -193,15 +193,29 @@ impl JavaRequirement {
         game: &Path,
         explicit: Option<&str>,
     ) -> Result<Self> {
+        Self::for_working_directory(
+            version,
+            &crate::version::working_directory(game, version)?,
+            explicit,
+        )
+        .await
+    }
+    pub async fn for_working_directory(
+        version: &crate::model::Version,
+        working: &Path,
+        explicit: Option<&str>,
+    ) -> Result<Self> {
         let mut requirement = Self::for_version(version);
         if explicit.is_some_and(|path| !path.is_empty()) {
             return Ok(requirement);
         }
         let version = version.clone();
-        let game = game.to_owned();
+        let working = working.to_owned();
         requirement.compatibility = Some(
-            tokio::task::spawn_blocking(move || crate::java_compatibility::assess(&version, &game))
-                .await??,
+            tokio::task::spawn_blocking(move || {
+                crate::java_compatibility::assess_in_directory(&version, &working)
+            })
+            .await??,
         );
         Ok(requirement)
     }

@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 pub(crate) struct Install<'a> {
     pub root: &'a Path,
     pub game: &'a Path,
+    pub working_directory: &'a Path,
     pub minecraft: &'a str,
     pub loader: Option<&'a ModLoader>,
     pub id: &'a str,
@@ -94,8 +95,12 @@ impl Install<'_> {
         sink(Event::workflow("java", "准备 Java"));
         let runtime = java::ensure(
             root,
-            java::JavaRequirement::for_instance(&resolved.version, game, self.explicit_java)
-                .await?,
+            java::JavaRequirement::for_working_directory(
+                &resolved.version,
+                self.working_directory,
+                self.explicit_java,
+            )
+            .await?,
             self.explicit_java,
             self.auto_java,
             downloader,
@@ -309,9 +314,9 @@ impl Install<'_> {
             let mut runtime_profile = profile.clone();
             runtime_profile["id"] = json!(self.id);
             let resolved = version::resolve_chain(&[serde_json::to_value(base)?, runtime_profile])?;
-            let requirement = java::JavaRequirement::for_instance(
+            let requirement = java::JavaRequirement::for_working_directory(
                 &resolved.version,
-                self.game,
+                self.working_directory,
                 self.explicit_java,
             )
             .await?;
@@ -638,6 +643,7 @@ mod tests {
         let result = Install {
             root: temp.path(),
             game: &game,
+            working_directory: &game,
             minecraft: "1.12.2",
             loader: Some(&loader),
             id: "1.12.2-forge-14.23.5.2860",

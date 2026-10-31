@@ -195,28 +195,32 @@ impl Launcher {
 
     pub fn resource_plans(&self, id: &str, version: &str) -> Result<Vec<ResourcePlan>> {
         let target = self.resource_target(id, version)?;
-        let directory = safe_join(&target.directory, ".nekocrate/resource-tasks")?;
-        if !directory.is_dir() {
-            return Ok(Vec::new());
-        }
-        let mut plans = Vec::new();
-        for entry in fs::read_dir(directory)?.take(512) {
-            let entry = entry?;
-            if entry.file_type()?.is_dir() {
-                let path = safe_join(&entry.path(), "plan.json")?;
-                if let Ok(plan) = storage::read_json::<ResourcePlan>(&path)
-                    && plan.started
-                    && !plan.complete
-                    && plan.target.version == version
-                    && plan.target.instance == id
-                {
-                    plans.push(plan);
-                }
+        pending_plans(&target.directory, id, version)
+    }
+}
+
+pub(crate) fn pending_plans(working: &Path, id: &str, version: &str) -> Result<Vec<ResourcePlan>> {
+    let directory = safe_join(working, ".nekocrate/resource-tasks")?;
+    if !directory.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut plans = Vec::new();
+    for entry in fs::read_dir(directory)?.take(512) {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            let path = safe_join(&entry.path(), "plan.json")?;
+            if let Ok(plan) = storage::read_json::<ResourcePlan>(&path)
+                && plan.started
+                && !plan.complete
+                && plan.target.version == version
+                && plan.target.instance == id
+            {
+                plans.push(plan);
             }
         }
-        plans.sort_by_key(|p| std::cmp::Reverse(p.created_at));
-        Ok(plans)
     }
+    plans.sort_by_key(|p| std::cmp::Reverse(p.created_at));
+    Ok(plans)
 }
 
 fn component(name: &str) -> Result<()> {

@@ -15,6 +15,7 @@ import type {
 defineProps<{
   drag?: {
     source: ResourceCopySource;
+    sources?: ResourceCopySource[];
     x: number;
     y: number;
     target?: ResourceDestination;
@@ -27,7 +28,7 @@ defineProps<{
     <div
       v-if="drag && !drag.native"
       class="resource-drag-ghost glass-surface"
-      :class="{ ready: drag.target }"
+      :class="{ ready: drag.target, multiple: (drag.sources?.length || 0) > 1 }"
       :style="{
         transform: `translate3d(${drag.x + 16}px, ${drag.y + 16}px, 0)`,
       }"
@@ -45,6 +46,9 @@ defineProps<{
         :size="18"
       />
       <span>{{ drag.source.name }}</span
+      ><small v-if="(drag.sources?.length || 0) > 1" class="drag-count">{{
+        drag.sources?.length
+      }}</small
       ><Copy :size="13" />
     </div>
   </Teleport>
@@ -78,6 +82,17 @@ defineProps<{
   padding: 12px 15px;
   box-shadow: 0 8px 30px #0003;
   font-size: 12px;
+}
+.resource-drag-ghost.multiple {
+  box-shadow:
+    3px 3px 0 color-mix(in srgb, var(--blue) 25%, transparent),
+    6px 6px 0 color-mix(in srgb, var(--blue) 12%, transparent),
+    0 8px 30px #0003;
+}
+.drag-count {
+  padding: 2px 5px;
+  color: var(--blue);
+  font-variant-numeric: tabular-nums;
 }
 .resource-drag-ghost span {
   overflow: hidden;

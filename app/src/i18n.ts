@@ -27,6 +27,59 @@ export function setLanguage(preference: string, system: string) {
 
 /** Chinese source keys stay readable in templates; interpolate only after translation. */
 export const english: Readonly<Record<string, string>> = {
+  版本隔离: "Version isolation",
+  各版本独立: "Separate versions",
+  共享目录: "Shared directory",
+  日志行为: "Game logs",
+  崩溃时打开: "Open on crash",
+  启动时打开: "Open on launch",
+  手动查看: "Open manually",
+  启动参数: "Launch arguments",
+  游戏参数: "Game arguments",
+  环境变量: "Environment",
+  "原文件保留在原目录，不会自动迁移。":
+    "Existing files stay in their original directory.",
+  启动时优先显示日志: "Show game logs instead of minimizing on launch",
+  游戏参数过多或过长: "Too many or overly long game arguments",
+  游戏参数应每行一个: "Enter one game argument per line",
+  账户和游戏目录参数由启动器管理:
+    "Account and game directory arguments are managed by the launcher",
+  环境变量过多或过长: "Too many or overly long environment variables",
+  "环境变量应为 NAME=value，每行一项":
+    "Enter one NAME=value environment variable per line",
+  "环境变量名称只能包含字母、数字和下划线，且不能以数字开头":
+    "Environment variable names must use letters, digits or underscores, and cannot start with a digit",
+  "Java 环境参数请在 JVM 页中配置": "Configure Java options in the JVM tab",
+  "此版本有未完成的资源安装，请完成或删除任务后再更改隔离方式":
+    "Finish or remove this version’s pending resource installation before changing isolation",
+  启动后最小化: "Minimize on launch",
+  批量操作: "Batch actions",
+  "已选 {count} 项": "{count} selected",
+  "启用所选 Mods": "Enable selected Mods",
+  "禁用所选 Mods": "Disable selected Mods",
+  取消选择: "Clear selection",
+  "每次最多拖动 256 项资源": "Drag up to 256 resources at a time",
+  "已复制 {count} 项资源": "Copied {count} resources",
+  游戏窗口: "Game window",
+  跟随游戏: "Game default",
+  窗口: "Windowed",
+  全屏: "Fullscreen",
+  窗口宽度: "Window width",
+  窗口高度: "Window height",
+  游戏启动后最小化: "Minimize on launch",
+  "额外 JVM 参数": "Extra JVM arguments",
+  每行一个参数: "One argument per line",
+  "游戏窗口宽度应为 320–7680，高度应为 240–4320":
+    "Window width must be 320\u20137680 and height 240\u20134320",
+  "额外 JVM 参数过多或过长": "Too many or overly long JVM arguments",
+  "JVM 参数应每行一个，并以 - 开头":
+    "Enter one JVM argument per line, starting with -",
+  请通过启动内存设置调整内存: "Use the memory setting to adjust heap size",
+  "请勿在额外 JVM 参数中更改启动入口或类路径":
+    "Do not override the entry point or classpath in extra JVM arguments",
+  无法读取游戏设置: "Could not read game options",
+  无法保存游戏设置: "Could not save game options",
+
   没有可导入的文件: "No files to import",
   无法识别文件内容: "Could not identify the file contents",
   请拖到目标版本或对应的资源区域:

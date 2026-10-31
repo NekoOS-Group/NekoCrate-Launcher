@@ -382,8 +382,27 @@ pub fn client_path(game: &Path, version: &Version) -> Result<PathBuf> {
 /// Honour that layout without moving any saves/mods; ordinary profiles still
 /// share their instance's .minecraft directory.
 pub fn working_directory(game: &Path, version: &Version) -> Result<PathBuf> {
-    storage::safe_version(&version.id)?;
-    let directory = game.join("versions").join(&version.id);
+    existing_working_directory(game, &version.id)
+}
+pub fn instance_working_directory(
+    game: &Path,
+    instance: &crate::model::Instance,
+    id: &str,
+) -> Result<PathBuf> {
+    use crate::launch_options::IsolationMode;
+    storage::safe_version(id)?;
+    if instance.versions.iter().any(|v| v.id == id && v.modpack) {
+        return Ok(game.join("versions").join(id));
+    }
+    match instance.launch.isolation {
+        Some(IsolationMode::Shared) => Ok(game.to_owned()),
+        Some(IsolationMode::Version) => Ok(game.join("versions").join(id)),
+        None => existing_working_directory(game, id),
+    }
+}
+fn existing_working_directory(game: &Path, id: &str) -> Result<PathBuf> {
+    storage::safe_version(id)?;
+    let directory = game.join("versions").join(id);
     let config: Value =
         storage::read_json(&directory.join("hmclversion.cfg")).unwrap_or(Value::Null);
     if config["usesGlobal"].as_bool() == Some(false) {

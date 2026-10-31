@@ -935,3 +935,52 @@ test("Mod ID navigation clears filters, prefers enabled providers and stays with
     h.dispose();
   }
 });
+
+test("batch Mod changes retain selection and ordering, including partial failure", async () => {
+  const files = ["cat.jar", "ice.jar", "world.jar"].map((file_name) => ({
+    file_name,
+    name: file_name,
+    enabled: true,
+  }));
+  const calls = [];
+  const h = manager({
+    initialTab: "mods",
+    loadCounts: async () => ({ mods: 3 }),
+    loadContent: async () => ({ directory: "/mods", files: [...files] }),
+    modActions: {
+      setEnabled: async (id, version, file, enabled) => {
+        calls.push([id, version, file, enabled]);
+        if (file === "ice.jar") throw new Error("locked");
+        const row = files.find((f) => f.file_name === file);
+        row.file_name += "" + ".disabled";
+        row.enabled = false;
+        return row.file_name;
+      },
+    },
+  });
+  try {
+    await flush();
+    for (const file of h.ui.filteredFiles.value)
+      h.ui.selection.click({ ctrlKey: true }, file);
+    const before = h.ui.selectedFiles.value.map((file) =>
+      h.ui.contentRowKey(file),
+    );
+    await h.ui.setSelectedEnabled(false);
+    assert.equal(calls.length, 3);
+    assert.ok(
+      calls.every((call) => call[0] === "instance-a" && call[1] === "first"),
+    );
+    assert.deepEqual(
+      h.ui.filteredFiles.value.map((f) => f.name),
+      ["cat.jar", "ice.jar", "world.jar"],
+    );
+    assert.deepEqual(
+      h.ui.selectedFiles.value.map((f) => h.ui.contentRowKey(f)),
+      before,
+    );
+    assert.equal(h.events.filter((e) => e[0] === "error").length, 1);
+    assert.equal(h.ui.batchSaving.value, false);
+  } finally {
+    h.dispose();
+  }
+});

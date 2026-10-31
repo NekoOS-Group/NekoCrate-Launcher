@@ -524,6 +524,9 @@ impl Launcher {
             crate::loader::installer::Install {
                 root: self.root(),
                 game: &game,
+                working_directory: &version::instance_working_directory(
+                    &game, &instance, selected,
+                )?,
                 minecraft: &job.pack.minecraft,
                 loader: job.pack.loader.as_ref(),
                 id: selected,

@@ -34,6 +34,9 @@ pub(crate) fn bytecode_ceiling(v: &Version) -> Option<(u32, String)> {
 }
 
 pub fn assess(v: &Version, game: &Path) -> Result<Compatibility> {
+    assess_in_directory(v, &version::working_directory(game, v)?)
+}
+pub fn assess_in_directory(v: &Version, working: &Path) -> Result<Compatibility> {
     let baseline = v.java_version.as_ref().map_or(8, |j| j.major);
     let loader = version::detect_loader(&serde_json::to_value(v)?);
     let mut reasons = vec![];
@@ -75,7 +78,6 @@ pub fn assess(v: &Version, game: &Path) -> Result<Compatibility> {
     }
 
     if let Some(loader) = &loader {
-        let working = version::working_directory(game, v)?;
         let mods = working.join("mods");
         let overrides = loader.kind == "fabric"
             && working

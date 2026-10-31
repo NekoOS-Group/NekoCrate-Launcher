@@ -22,6 +22,7 @@ import { modFileName } from "../contentIdentity";
 import {
   resourceTransferKey,
   isResourceDragKind,
+  type ResourceCopySource,
 } from "../useResourceTransfer";
 import GlassSelect from "./GlassSelect.vue";
 import { locale, t, translateMessage } from "../i18n";
@@ -45,6 +46,9 @@ import {
   type ModConfigDocument,
 } from "../modManagement";
 const props = defineProps<{
+  selected?: boolean;
+  select?: (event: MouseEvent, file: LocalContentFile) => boolean;
+  dragSources?: () => ResourceCopySource[];
   modActions?: ModActions;
   locked?: boolean;
   file: LocalContentFile;
@@ -91,14 +95,28 @@ const draggableResource = computed(
     !modDownloading.value,
 );
 function beginResourceDrag(event: PointerEvent) {
-  if (!draggableResource.value || !isResourceDragKind(props.kind)) return;
-  transferResource?.(event, {
-    kind: props.kind,
-    instance: props.instanceId,
-    version: props.version,
-    file: props.file.file_name,
-    name: displayName.value,
-  });
+  if (
+    event.shiftKey ||
+    event.metaKey ||
+    event.ctrlKey ||
+    !draggableResource.value ||
+    !isResourceDragKind(props.kind)
+  )
+    return;
+  transferResource?.(
+    event,
+    props.dragSources?.() || {
+      kind: props.kind,
+      instance: props.instanceId,
+      version: props.version,
+      file: props.file.file_name,
+      name: displayName.value,
+    },
+  );
+}
+function selectOrExpand(event: MouseEvent) {
+  if (available.value && props.select?.(event, props.file)) return;
+  void toggle();
 }
 const highlighted = ref(false);
 let highlightTimer: ReturnType<typeof setTimeout> | undefined;
@@ -193,7 +211,14 @@ const modActionLabel = computed(() => {
   if (!available.value) return t("未下载 · 点击下载");
   return t(modEnabled.value ? "已启用 · 点击禁用" : "已禁用 · 点击启用");
 });
-async function activateMod() {
+async function activateMod(event?: MouseEvent) {
+  if (
+    event &&
+    available.value &&
+    (event.shiftKey || event.metaKey || event.ctrlKey) &&
+    props.select?.(event, props.file)
+  )
+    return;
   if (props.locked || modSaving.value || modDownloading.value) return;
   if (available.value) {
     await changeEnabled();
@@ -552,6 +577,7 @@ onBeforeUnmount(() => {
     class="content-item"
     :class="{
       'is-expanded': expanded,
+      'is-selected': selected,
       'is-targeted': highlighted,
       'is-pending': !available,
     }"
@@ -562,7 +588,7 @@ onBeforeUnmount(() => {
         disabled: available && (isMod ? !modEnabled : !file.enabled),
         'is-expandable': canExpand,
       }"
-      @click="toggle"
+      @click="selectOrExpand"
     >
       <button
         v-if="isMod && modActions"
@@ -629,7 +655,7 @@ onBeforeUnmount(() => {
           class="content-item-toggle"
           :aria-expanded="canExpand ? expanded : undefined"
           :aria-controls="canExpand ? panelId : undefined"
-          @click.stop="toggle"
+          @click.stop="selectOrExpand"
         >
           <strong :title="displayName">{{ displayName }}</strong>
           <span
@@ -980,6 +1006,19 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.content-item.is-selected .content-item-heading {
+  background: color-mix(in srgb, var(--blue) 10%, transparent);
+}
+.content-item.is-selected .content-item-icon,
+.content-item.is-selected .content-item-toggle {
+  color: var(--blue);
+  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--blue) 50%, transparent));
+}
+.content-item-heading {
+  user-select: none;
+  -webkit-user-select: none;
+  transition: background-color 140ms ease;
+}
 .content-item.is-pending .content-item-icon:not(.content-state-button) {
   opacity: 0.65;
   stroke-dasharray: 3 2;

@@ -125,6 +125,14 @@ import {
 import { versionName } from "./versionDescription";
 import { createVersionContentLoader } from "./versionContentLoader";
 import AccountAvatar from "./components/AccountAvatar.vue";
+import InstanceLaunchOptions from "./components/InstanceLaunchOptions.vue";
+import {
+  instanceLaunchOptions,
+  shouldOpenGameLogs,
+  type LaunchDirectory,
+  validLaunchSize,
+  createLaunchWindowBehavior,
+} from "./instanceLaunch";
 import InstanceHeader from "./components/InstanceHeader.vue";
 import DownloadSourceSelect from "./components/DownloadSourceSelect.vue";
 import GlassSelect from "./components/GlassSelect.vue";
@@ -580,10 +588,30 @@ const form = reactive({
   memory_mb: 2048,
   memory_mode: "auto" as MemoryMode,
   java_path: "",
+  launch: instanceLaunchOptions(),
   icon: 0,
   loader: "vanilla",
   loader_version: "",
 });
+const launchDirectory = ref<LaunchDirectory | null>(null);
+let directoryRequest = 0;
+watch(
+  () => [modal.value, editing.value?.id, form.launch.isolation] as const,
+  async ([view, id, isolation]) => {
+    const request = ++directoryRequest;
+    launchDirectory.value = null;
+    if (view !== "edit" || !id) return;
+    try {
+      const preview = await rpc<LaunchDirectory>("launch_directory", {
+        id,
+        isolation,
+      });
+      if (request === directoryRequest) launchDirectory.value = preview;
+    } catch {
+      /* The header still shows the linked directory when unavailable. */
+    }
+  },
+);
 const invalidCreationLocation = computed(
   () =>
     (modal.value === "create" ||
@@ -1500,6 +1528,8 @@ const resourceTransfer = useResourceTransfer({
   running: () => snapshot.value.running,
   busy: () => busy.value || libraryBusy.value || managing.value,
   copy: copyDraggedResource,
+  copyMany: copyDraggedResources,
+  exportMany: (sources) => rpc("export_resources", { sources }),
   export: (source) => rpc("export_resource", { source }),
   browse: browseDropTarget,
   finishBrowse: finishDropBrowse,
@@ -1507,6 +1537,25 @@ const resourceTransfer = useResourceTransfer({
     error.value = message(problem);
   },
 });
+async function copyDraggedResources(
+  sources: ResourceCopySource[],
+  target: ResourceDestination,
+) {
+  const copied = await action<boolean>("复制资源", "copy_resources", {
+    sources: sources.map(({ kind, instance, version, file }) => ({
+      kind,
+      instance,
+      version,
+      file,
+    })),
+    id: target.instance,
+    version: target.version,
+  });
+  if (copied === undefined) return;
+  if (copied) notify(t("已复制 {count} 项资源", { count: sources.length }));
+  await versionManager.value?.refresh();
+  await resourceManager.value?.refresh();
+}
 async function copyDraggedResource(
   source: ResourceCopySource,
   target: ResourceDestination,
@@ -2207,6 +2256,7 @@ async function edit(i: Instance) {
     memory_mb: i.memory_mb,
     memory_mode: i.memory_mode || "auto",
     java_path: i.java_path || "",
+    launch: instanceLaunchOptions(i.launch),
     icon: instanceMaterial(i),
   });
   editingDirectory.value = "";
@@ -2266,9 +2316,11 @@ async function chooseJava() {
 }
 async function saveEditedInstance() {
   if (modal.value !== "edit" || !editing.value || instanceSaving.value) return;
-  if (invalidCustomMemory.value) return;
+  if (invalidCustomMemory.value || !validLaunchSize(form.launch)) return;
   if (instanceHeader.value?.finishRename() === false) return;
   const id = editing.value.id;
+  const isolationChanged =
+    form.launch.isolation !== (editing.value.launch?.isolation ?? null);
   const session = modalSession;
   const isCurrentEditor = () =>
     modal.value === "edit" &&
@@ -2287,8 +2339,19 @@ async function saveEditedInstance() {
           : 2048,
       memory_mode: form.memory_mode,
       java_path: form.java_path || null,
+      launch: {
+        ...form.launch,
+        jvm_args: form.launch.jvm_args
+          .map((line) => line.trim())
+          .filter(Boolean),
+        game_args: form.launch.game_args
+          .map((line) => line.trim())
+          .filter(Boolean),
+        environment: form.launch.environment.filter((line) => line.trim()),
+      },
       icon: form.icon,
     });
+    if (isolationChanged) loadVersionContent.invalidate(id);
     await sync();
     if (isCurrentEditor()) modal.value = null;
   } catch (e) {
@@ -3123,6 +3186,12 @@ async function copy(text: string) {
     error.value = "无法访问剪贴板，请手动选择并复制。";
   }
 }
+const launchWindowBehavior = createLaunchWindowBehavior(
+  () => getCurrentWindow(),
+  (problem) => {
+    appendLog({ time: stamp(), kind: "warning", message: message(problem) });
+  },
+);
 function onEvent(e: LauncherEvent) {
   if (e.kind === "download_progress_recovered") {
     void sync();
@@ -3216,8 +3285,16 @@ function onEvent(e: LauncherEvent) {
       instanceId: e.instance_id,
     });
   }
-  if (e.kind === "game_crash") openLogs(e.instance_id || "all");
-  if (["game_started", "game_exit", "game_crash"].includes(e.kind)) void sync();
+  if (["game_started", "game_exit", "game_crash"].includes(e.kind)) {
+    const launchOptions = snapshot.value.database.instances.find(
+      (i) => i.id === e.instance_id,
+    )?.launch;
+    if (shouldOpenGameLogs(e.kind, launchOptions))
+      openLogs(e.instance_id || "all");
+    if (desktop && e.instance_id)
+      void launchWindowBehavior(e.kind, e.instance_id, launchOptions);
+    void sync();
+  }
 }
 onMounted(async () => {
   document.addEventListener("visibilitychange", updateVisibility);
@@ -4862,6 +4939,18 @@ onUnmounted(() => {
                     >{{ t("探测失败，仍可自动匹配或选择文件。") }}</small
                   >
                 </div>
+                <InstanceLaunchOptions
+                  v-model="form.launch"
+                  :directory="launchDirectory"
+                  :isolation-disabled="
+                    !!editing &&
+                    (hasInstanceTask(editing.id) ||
+                      snapshot.running.includes(editing.id))
+                  "
+                  :disabled="instanceSaving"
+                  class="list-reveal-item"
+                  :style="listRevealStyle(2)"
+                />
               </template>
             </div>
             <div
@@ -4909,7 +4998,9 @@ onUnmounted(() => {
                 class="button primary"
                 :disabled="
                   modal === 'edit'
-                    ? instanceSaving || invalidCustomMemory
+                    ? instanceSaving ||
+                      invalidCustomMemory ||
+                      !validLaunchSize(form.launch)
                     : busy ||
                       loaderUnavailable ||
                       invalidCreationLocation ||
