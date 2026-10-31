@@ -154,9 +154,11 @@ export interface Account {
 }
 export interface Snapshot {
   root: string;
+  portable?: boolean;
   system_locale: string;
   database: {
     settings: Settings;
+    ui_preferences?: Record<string, string>;
     instances: Instance[];
     accounts: Account[];
     selected_account: string | null;

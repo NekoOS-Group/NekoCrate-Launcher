@@ -162,7 +162,7 @@ impl std::ops::Deref for Receipts {
 pub(crate) fn recorded_sha256(root: &Path, paths: &[PathBuf]) -> HashMap<PathBuf, String> {
     let index = fs::read(root.join("cache/verified-files.json"))
         .ok()
-        .and_then(|bytes| serde_json::from_slice::<Index>(&bytes).ok())
+        .and_then(|bytes| crate::portable::from_slice::<Index>(root, &bytes).ok())
         .filter(|index| index.version == 1)
         .unwrap_or_default();
     paths
@@ -219,10 +219,11 @@ impl VerificationCache {
     async fn load(&self) {
         self.loaded
             .get_or_init(|| async {
+                let root = self.path.parent().unwrap().parent().unwrap();
                 let index = tokio::fs::read(&self.path)
                     .await
                     .ok()
-                    .and_then(|bytes| serde_json::from_slice::<Index>(&bytes).ok())
+                    .and_then(|bytes| crate::portable::from_slice::<Index>(root, &bytes).ok())
                     .filter(|index| index.version == 1)
                     .unwrap_or_default();
                 let mut receipts = Receipts::default();
@@ -370,7 +371,8 @@ impl VerificationCache {
                 entries: entries.paths.clone(),
             };
             drop(entries);
-            let bytes = serde_json::to_vec(&index)?;
+            let root = store.path.parent().unwrap().parent().unwrap();
+            let bytes = crate::portable::to_vec(root, &index)?;
             crate::storage::atomic_write(&store.path, &bytes)?;
             Ok::<_, anyhow::Error>(revision)
         })

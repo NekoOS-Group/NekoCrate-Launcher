@@ -7,7 +7,7 @@ pub(crate) fn load_database(root: &Path, path: &Path) -> Result<Database> {
     if !path.exists() {
         return Ok(Database::default());
     }
-    let mut value: serde_json::Value = storage::read_json(path)?;
+    let mut value: serde_json::Value = crate::portable::read_database(root, path)?;
     let schema = value.get("schema").and_then(|v| v.as_u64()).unwrap_or(1);
     if !(1..=3).contains(&schema) {
         bail!("不支持的数据格式版本 {schema}");
@@ -101,7 +101,7 @@ pub(crate) fn load_database(root: &Path, path: &Path) -> Result<Database> {
             fs::copy(path, backup)?;
         }
         db.schema = 3;
-        storage::write_json(path, &db)?;
+        crate::portable::write_database(root, path, &db)?;
     }
     Ok(db)
 }

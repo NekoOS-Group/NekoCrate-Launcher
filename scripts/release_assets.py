@@ -11,13 +11,14 @@ import struct
 import subprocess
 import tomllib
 from pathlib import Path
+import portable_bundle
 
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "artifacts" / "release"
 TARGETS = {
-    "aarch64-apple-darwin": ("mac-appsilicon", [".dmg"]),
-    "x86_64-pc-windows-msvc": ("win-amd64", ["-setup.exe"]),
-    "x86_64-unknown-linux-gnu": ("linux-amd64", [".deb", ".AppImage"]),
+    "aarch64-apple-darwin": ("mac-appsilicon", [".dmg", "-portable.zip"]),
+    "x86_64-pc-windows-msvc": ("win-amd64", ["-setup.exe", "-portable.zip"]),
+    "x86_64-unknown-linux-gnu": ("linux-amd64", [".deb", ".AppImage", "-portable.zip"]),
 }
 UPDATERS = {
     "aarch64-apple-darwin": ("darwin-aarch64", ".app.tar.gz", "macos"),
@@ -108,6 +109,7 @@ def build_info(tag, app_version, revision, builds, metadata_files):
             "platform": build["platform"], "target": build["target"],
             "files": sorted(item["name"] for item in build["files"]),
             "updater": {key: build["updater"][key] for key in ("target", "file")},
+            **({"portable_updater": {key: build["portable_updater"][key] for key in ("target", "file")}} if "portable_updater" in build else {}),
         } for build in builds],
     }
 
@@ -133,6 +135,22 @@ def verify_architecture(path, target):
                 valid = binary.read(6) == b"PE\x00\x00\x64\x86"
     if not valid:
         raise ValueError(f"Wrong executable architecture: {path} (expected {target})")
+
+
+def portable(tag, target):
+    version(tag)
+    platform, _ = TARGETS[target]
+    release = ROOT / "target" / target / "release"
+    bundles = release / "bundle"
+    if platform == "mac-appsilicon":
+        source, name = only(bundles / "macos", "*.app"), "NekoCrate Portable.app"
+    elif platform == "win-amd64":
+        source, name = release / "nekocrate-launcher.exe", "nekocrate-launcher.exe"
+    else:
+        source, name = only(bundles / "appimage", "*.AppImage"), "NekoCrate.AppImage"
+    destination = portable_bundle.archive_path(release, tag, platform)
+    portable_bundle.package(source, destination, name)
+    print(destination)
 
 
 def collect(tag, target):
@@ -161,6 +179,8 @@ def collect(tag, target):
         verify_architecture(release / "nekocrate-launcher", target)
         copy(only(bundles / "deb", "*.deb"), ".deb")
         copy(only(bundles / "appimage", "*.AppImage"), ".AppImage")
+    portable_archive = portable_bundle.archive_path(release, tag, platform)
+    copy(portable_archive, "-portable.zip")
     updater_target, updater_suffix, updater_directory = UPDATERS[target]
     updater_source = only(bundles / updater_directory, "*" + updater_suffix.removeprefix("-setup"))
     if updater_suffix not in TARGETS[target][1]:
@@ -174,6 +194,11 @@ def collect(tag, target):
         "updater": {"target": updater_target, "file": f"{prefix}{updater_suffix}", "signature": signature},
         "files": [file_info(path) for path in assets],
     }
+    if platform == "win-amd64":
+        manifest["portable_updater"] = {
+            "target": "windows-x86_64-portable", "file": f"{prefix}-portable.zip",
+            "signature": updater_signature(Path(str(portable_archive) + ".sig").read_text(encoding="utf-8"), app_version),
+        }
     write_json(OUTPUT / f"build-{platform}.json", manifest)
     print(json.dumps(manifest, ensure_ascii=False))
 
@@ -201,6 +226,13 @@ def verify(tag):
         if manifest.get("updater") != {"target": updater_target, "file": updater_file, "signature": signature}:
             raise ValueError(f"Updater metadata does not match release: {platform}")
         platforms[updater_target] = {"signature": signature, "url": f"{RELEASES_URL}/{tag}/{updater_file}"}
+        if platform == "win-amd64":
+            portable_info = manifest.get("portable_updater", {})
+            portable_signature = updater_signature(portable_info.get("signature"), app_version)
+            portable_file = f"NekoCrate-Launcher-{tag}-{platform}-portable.zip"
+            if portable_info != {"target": "windows-x86_64-portable", "file": portable_file, "signature": portable_signature}:
+                raise ValueError("Portable updater metadata does not match release")
+            platforms["windows-x86_64-portable"] = {"signature": portable_signature, "url": f"{RELEASES_URL}/{tag}/{portable_file}"}
         expected_assets.update(expected_names)
         builds.append(manifest)
     allowed_files = expected_assets | {"BUILDINFO.json", "latest.json"} | {
@@ -222,14 +254,14 @@ def verify(tag):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("operation", choices=["check-version", "collect", "verify"])
+    parser.add_argument("operation", choices=["check-version", "portable", "collect", "verify"])
     parser.add_argument("--tag", required=True)
     parser.add_argument("--target", choices=TARGETS)
     args = parser.parse_args()
-    if args.operation == "collect":
+    if args.operation in {"portable", "collect"}:
         if args.target is None:
             parser.error("collect requires --target")
-        collect(args.tag, args.target)
+        (portable if args.operation == "portable" else collect)(args.tag, args.target)
     elif args.operation == "verify":
         verify(args.tag)
     else:

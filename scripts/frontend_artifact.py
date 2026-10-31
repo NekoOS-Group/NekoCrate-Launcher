@@ -4,6 +4,9 @@ import argparse
 from html.parser import HTMLParser
 from pathlib import Path
 import subprocess
+import os
+import shutil
+import tempfile
 from urllib.parse import unquote, urlsplit
 
 
@@ -45,6 +48,22 @@ def embedded(target):
     binary = root / "target" / target / "release" / f"nekocrate-launcher{suffix}"
     subprocess.run([str(binary), "--verify-frontend"], check=True, timeout=30)
     print(f"Embedded frontend and IPC future size verified: {binary.name}")
+    with tempfile.TemporaryDirectory(prefix="NekoCrate-portable-") as temporary:
+        base = Path(temporary) / "NekoCrate 测试"
+        base.mkdir()
+        relative = Path("NekoCrate Portable.app/Contents/MacOS/nekocrate-launcher") if "apple" in target else Path(binary.name)
+        executable = base / relative
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(binary, executable)
+        (base / "nekocrate.portable.json").write_text('{"schema":1}\n')
+        environment = os.environ.copy()
+        environment.pop("NEKOCRATE_DATA_DIR", None)
+        environment.pop("APPIMAGE", None)
+        subprocess.run([str(executable), "--verify-portable"], check=True, timeout=30, env=environment)
+        moved = base.with_name("NekoCrate moved 测试")
+        base.rename(moved)
+        subprocess.run([str(moved / relative), "--verify-portable"], check=True, timeout=30, env=environment)
+    print("Portable startup and relocation verified")
 
 
 if __name__ == "__main__":

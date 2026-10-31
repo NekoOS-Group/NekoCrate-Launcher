@@ -13,6 +13,8 @@ mod folder_scan;
 mod import_picker;
 mod jobs;
 mod pausable;
+#[cfg(any(target_os = "windows", test))]
+mod portable_update;
 mod resource_manager;
 mod startup;
 mod updater;
@@ -144,6 +146,11 @@ enum Request {
         text: String,
     },
     Snapshot,
+    RefreshDirectories,
+    SaveUiPreference {
+        key: String,
+        value: String,
+    },
     Versions,
     FabricVersions {
         game_version: String,
@@ -451,6 +458,8 @@ fn dispatch<'a>(
                 json!(true)
             },
             Request::CopyText{text}=>{clipboard::write_text(&app, text)?;json!(true)},
+            Request::RefreshDirectories=>{let launcher=launcher.clone();tauri::async_runtime::spawn_blocking(move || launcher.refresh_directories()).await??;json!(true)},
+            Request::SaveUiPreference{key,value}=>{launcher.save_ui_preference(&key,&value)?;json!(true)},
             Request::Snapshot=>{
                 let recovery = launcher.clone();
                 let notify = sink.clone();
@@ -733,11 +742,29 @@ fn command_future_size() -> usize {
 }
 
 pub fn run() {
+    #[cfg(target_os = "windows")]
+    if portable_update::run_helper() {
+        return;
+    }
+    if std::env::args_os().any(|arg| arg == "--verify-portable") {
+        let launcher = Launcher::open(None).expect("portable data initialization failed");
+        assert!(launcher.is_portable(), "portable marker was not detected");
+        let snapshot = launcher.snapshot();
+        assert_eq!(snapshot.database.instances.len(), 1);
+        assert_eq!(
+            snapshot.database.instances[0].game_dir(launcher.root()),
+            launcher.root().parent().unwrap().join(".minecraft")
+        );
+        #[cfg(target_os = "windows")]
+        portable_update::verify_native_swap(launcher.root()).expect("portable update swap failed");
+        println!("Portable data and adjacent Minecraft directory verified");
+        return;
+    }
     let verifying = std::env::args_os().any(|arg| arg == "--verify-frontend");
     if !verifying {
         startup::install();
     }
-    let context = tauri::generate_context!();
+    let mut context = tauri::generate_context!();
     // Exercise the actual embedded asset map without opening a window or user data.
     // This runs on each release runner using the already-built executable.
     if verifying {
@@ -772,16 +799,38 @@ pub fn run() {
         );
         return;
     }
+    startup::phase("opening_launcher_data");
+    let launcher = match Launcher::open(None) {
+        Ok(launcher) => launcher,
+        Err(error) => {
+            startup::failure("startup_data", &error);
+            eprintln!("{error:#}");
+            rfd::MessageDialog::new()
+                .set_title("猫咪盒子启动器 · NekoCrate Launcher")
+                .set_description(format!("{error:#}"))
+                .set_level(rfd::MessageLevel::Error)
+                .show();
+            return;
+        }
+    };
+    if launcher.is_portable() {
+        context.config_mut().app.app_directories_override = Some(
+            tauri::utils::config::AppDirectoriesOverride::Root(launcher.root().to_owned()),
+        );
+        #[cfg(target_os = "macos")]
+        for window in &mut context.config_mut().app.windows {
+            // WKWebView does not support relocating its data directory. A private
+            // store avoids writing portable UI state into the installed app store.
+            window.incognito = true;
+        }
+    }
     startup::phase("initializing_tauri");
     let app = tauri::Builder::default()
         .plugin(clipboard::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
-        .setup(|app| {
-            startup::phase("opening_launcher_data");
-            let launcher = Launcher::open(None)
-                .inspect_err(|error| startup::failure("startup_data", error))?;
+        .setup(move |app| {
             app.manage(AppState {
                 launcher,
                 jobs: jobs::Jobs::default(),

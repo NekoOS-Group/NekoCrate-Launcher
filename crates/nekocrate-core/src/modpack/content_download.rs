@@ -12,7 +12,7 @@ impl Launcher {
         sink: &EventSink,
     ) -> Result<String> {
         let _guard = self.0.operation.lock().await;
-        self.idle(id)?;
+        let _directory_guard = self.idle(id)?;
         let game = self.available_game_dir(id)?;
         let (working, _) = self.content_location(id, version_id)?;
         let sink = Event::scoped(sink, id, None);

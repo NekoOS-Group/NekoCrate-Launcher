@@ -9,7 +9,7 @@ on:
       tag:
         description: Existing preview tag to build
         required: true
-        default: dev0.9.3
+        default: dev0.9.4
         type: string
 
 permissions:
@@ -255,6 +255,16 @@ jobs:
         working-directory: app
         env:
           APPIMAGE_EXTRACT_AND_RUN: "1"
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      - name: Package portable distributions without recompiling
+        run: python scripts/release_assets.py portable --tag "$RELEASE_TAG" --target "${{ matrix.target }}"
+      - name: Sign Windows portable updater
+        if: runner.os == 'Windows'
+        run: |
+          APP_VERSION=$(node -p 'require("./app/package.json").version')
+          node "$RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" signer sign --app-version "$APP_VERSION" "target/${{ matrix.target }}/release/bundle/portable/NekoCrate-Launcher-$RELEASE_TAG-${{ matrix.platform }}-portable.zip"
+        env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
       - name: Verify embedded frontend and IPC future size in the native executable

@@ -24,6 +24,10 @@ tokio.workspace = true
 tokio-util.workspace = true
 tauri-plugin-updater = "~2.14.0"
 reqwest.workspace = true
+base64 = "0.23.1"
+minisign-verify = "0.3"
+semver = "1"
+rfd = { version = "0.16", default-features = false, features = ["gtk3"] }
 # Text only; retain the same X11/Wayland/native clipboard backend.
 arboard = { version = "3.7", default-features = false, features = ["wayland-data-control"] }
 
@@ -37,6 +41,9 @@ gtk = "0.18"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSOpenPanel", "NSPanel", "NSResponder", "NSSavePanel", "NSWindow"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSURL"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }

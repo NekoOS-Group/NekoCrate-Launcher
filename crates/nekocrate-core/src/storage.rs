@@ -15,12 +15,20 @@ pub fn now() -> u64 {
 /// Resolve the path without opening/locking the database, so early startup
 /// failures can be logged to the same directory.
 pub fn data_root(root: Option<PathBuf>) -> Result<PathBuf> {
-    root.or_else(|| std::env::var_os("NEKOCRATE_DATA_DIR").map(PathBuf::from))
-        .or_else(|| {
-            directories::ProjectDirs::from("dev", "NekoCrate", "NekoCrate")
-                .map(|p| p.data_local_dir().to_owned())
-        })
-        .context("无法确定数据目录")
+    let explicit = root.or_else(|| std::env::var_os("NEKOCRATE_DATA_DIR").map(PathBuf::from));
+    if let Some(root) = explicit {
+        return Ok(root);
+    }
+    if let Some(root) =
+        crate::portable::detect(&crate::portable::executable()?, std::env::consts::OS)?
+    {
+        return Ok(root);
+    }
+    None.or_else(|| {
+        directories::ProjectDirs::from("dev", "NekoCrate", "NekoCrate")
+            .map(|p| p.data_local_dir().to_owned())
+    })
+    .context("无法确定数据目录")
 }
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     serde_json::from_slice(&fs::read(path).with_context(|| format!("无法读取 {}", path.display()))?)

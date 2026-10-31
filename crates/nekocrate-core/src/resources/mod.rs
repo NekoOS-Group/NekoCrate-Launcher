@@ -209,7 +209,7 @@ pub(crate) fn pending_plans(working: &Path, id: &str, version: &str) -> Result<V
         let entry = entry?;
         if entry.file_type()?.is_dir() {
             let path = safe_join(&entry.path(), "plan.json")?;
-            if let Ok(plan) = storage::read_json::<ResourcePlan>(&path)
+            if let Ok(plan) = read_plan(&path, working)
                 && plan.started
                 && !plan.complete
                 && plan.target.version == version
@@ -316,7 +316,34 @@ pub(crate) fn records(root: &Path) -> Result<Records> {
 fn save_plan(plan: &ResourcePlan) -> Result<()> {
     let directory = task_dir(&plan.target, &plan.id)?;
     fs::create_dir_all(&directory)?;
-    storage::write_json(&safe_join(&directory, "plan.json")?, plan)
+    let mut saved = plan.clone();
+    for entry in &mut saved.entries {
+        if let Input::Local { path, .. } = &mut entry.input
+            && let Ok(relative) = path.strip_prefix(&plan.target.directory)
+        {
+            *path = PathBuf::from(relative.to_string_lossy().replace('\\', "/"));
+        }
+    }
+    saved.target.directory = PathBuf::from(".");
+    storage::write_json(&safe_join(&directory, "plan.json")?, &saved)
+}
+fn read_plan(path: &Path, working: &Path) -> Result<ResourcePlan> {
+    let mut plan: ResourcePlan = storage::read_json(path)?;
+    let old = plan.target.directory.clone();
+    for entry in &mut plan.entries {
+        if let Input::Local { path, .. } = &mut entry.input {
+            if !path.is_absolute() {
+                *path = safe_join(working, &path.to_string_lossy().replace('\\', "/"))?;
+            } else if old.is_absolute()
+                && old != working
+                && let Ok(relative) = path.strip_prefix(&old)
+            {
+                *path = safe_join(working, &relative.to_string_lossy().replace('\\', "/"))?;
+            }
+        }
+    }
+    plan.target.directory = working.into();
+    Ok(plan)
 }
 fn new_plan(target: ResourceTarget) -> ResourcePlan {
     ResourcePlan {

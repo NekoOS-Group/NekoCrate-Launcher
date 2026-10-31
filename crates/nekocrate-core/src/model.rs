@@ -153,6 +153,7 @@ pub struct AccountSkin {
 #[serde(default)]
 pub struct Database {
     pub schema: u32,
+    pub ui_preferences: std::collections::BTreeMap<String, String>,
     pub settings: Settings,
     pub instances: Vec<Instance>,
     pub accounts: Vec<Account>,
@@ -166,6 +167,7 @@ impl Default for Database {
     fn default() -> Self {
         Self {
             schema: 3,
+            ui_preferences: Default::default(),
             settings: Settings::default(),
             instances: vec![],
             accounts: vec![],

@@ -116,7 +116,7 @@ impl Launcher {
         cancel: &CancellationToken,
     ) -> Result<Instance> {
         let _guard = self.0.operation.lock().await;
-        self.idle(id)?;
+        let _directory_guard = self.idle(id)?;
         let game = self.available_game_dir(id)?;
         let profile = profile_id(game_version, &loader)?;
         let directory = game.join("versions").join(&profile);
@@ -185,7 +185,7 @@ impl Launcher {
         repair: bool,
     ) -> Result<()> {
         let _guard = self.0.operation.lock().await;
-        self.idle(id)?;
+        let _directory_guard = self.idle(id)?;
         let game = self.available_game_dir(id)?;
         let mut record = read_record(&game, selected)?;
         let instance = self.instance(id)?;

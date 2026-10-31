@@ -96,6 +96,9 @@ impl Launcher {
     /// Runs with the data-directory lock, before the launcher accepts UI work.
     pub(crate) fn migrate_modpack_records(&self) {
         for instance in self.snapshot().database.instances {
+            let Ok(_directory_guard) = self.idle(&instance.id) else {
+                continue;
+            };
             for version in &instance.versions {
                 if !version.modpack {
                     continue;

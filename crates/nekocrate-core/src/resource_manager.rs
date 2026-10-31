@@ -48,9 +48,8 @@ fn owned(root: &Path, relative: &Path) -> Result<PathBuf> {
     Ok(result)
 }
 pub(crate) fn registered_java(root: &Path) -> Vec<PathBuf> {
-    fs::read(root.join("java-paths.json"))
+    crate::portable::read_json(root, &root.join("java-paths.json"))
         .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default()
 }
 #[derive(Serialize)]
@@ -118,8 +117,12 @@ pub struct SavedSkin {
 }
 
 impl Launcher {
-    pub(crate) fn resource_directory_idle(&self, id: &str, version: &str) -> Result<()> {
-        self.idle(id)?;
+    pub(crate) fn resource_directory_idle(
+        &self,
+        id: &str,
+        version: &str,
+    ) -> Result<Option<std::sync::Arc<crate::directory_lock::DirectoryLock>>> {
+        let _directory_guard = self.idle(id)?;
         let running = self
             .0
             .games
@@ -129,7 +132,7 @@ impl Launcher {
             .cloned()
             .collect::<Vec<_>>();
         if running.is_empty() {
-            return Ok(());
+            return Ok(_directory_guard);
         }
         let (working, _) = self.content_location(id, version)?;
         let working = identity(&working);
@@ -143,7 +146,7 @@ impl Launcher {
                 );
             }
         }
-        Ok(())
+        Ok(_directory_guard)
     }
 
     fn runtime_users(&self, java_path: &Path) -> Vec<String> {
@@ -274,7 +277,7 @@ impl Launcher {
         }
         storage::atomic_write(
             &self.root().join("java-paths.json"),
-            &serde_json::to_vec_pretty(&paths)?,
+            &crate::portable::to_vec(self.root(), &paths)?,
         )?;
         Ok(info)
     }
@@ -302,7 +305,7 @@ impl Launcher {
         }
         storage::atomic_write(
             &self.root().join("java-paths.json"),
-            &serde_json::to_vec_pretty(&registered)?,
+            &crate::portable::to_vec(self.root(), &registered)?,
         )?;
         Ok(())
     }

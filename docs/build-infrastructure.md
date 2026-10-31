@@ -68,12 +68,13 @@ Fork PR 在普通 Ubuntu runner 上安装依赖，避免依赖外部贡献者没
 | --- | --- | --- |
 | macOS `.dmg` | 面向用户的拖拽安装介质 | 手动安装入口 |
 | macOS `.app.tar.gz` | Tauri updater 使用的应用归档 | 是 |
-| Windows `.exe` / Linux `.AppImage` | 手动安装与自动更新共用 | 是 |
+| Windows `-setup.exe` / Linux `.AppImage` | 手动安装与自动更新共用 | 是 |
+| 三平台 `-portable.zip` | 同一编译结果的便携发行包；Windows 也用于便携自动更新 | 是 |
 | Linux `.deb` | 发行版包管理器安装 | 当前自动更新不使用 |
 | `latest.json` | 版本、各平台包地址及内嵌签名 | 是 |
 | `BUILDINFO.json` | 提交、平台，以及统一的文件大小与 SHA-256 校验清单 | 否，供校验与追溯 |
 
-从 dev0.5 的附件精简开始，共公开五个安装/更新包和两个 JSON 文件，不再提供
+从 dev0.9.4 开始，共公开八个安装/更新/便携包和两个 JSON 文件。便携包只增加归档步骤，不重复编译；Windows 便携 ZIP 单独签名并写入更新清单的 `windows-x86_64-portable`。不再提供
 `.app.zip`、独立 `.sig` 或 `SHA256SUMS`。Tauri 仍在原生 bundle 目录生成 `.sig`，
 收集时检查签名对应的公钥及版本，将内容写入内部平台清单；发布时再次检查并
 内嵌到 `latest.json`。客户端读取内嵌签名，安装前的数字签名验证不变。

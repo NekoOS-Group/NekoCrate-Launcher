@@ -119,7 +119,7 @@ impl DownloadTask {
         let path = record_path(root, instance, version, task);
         checked_path(root, &path)?;
         let record = if path.try_exists()? {
-            let record: Record = storage::read_json(&path)?;
+            let record: Record = crate::portable::read_json(root, &path)?;
             ensure!(
                 record.instance == instance
                     && record.game == game
@@ -177,7 +177,7 @@ impl DownloadTask {
             }
             record.files.extend(paths);
             record.complete = false;
-            storage::write_json(&this.path, &*record)
+            crate::portable::write_json(&this.root, &this.path, &*record)
         })
         .await?
     }
@@ -187,7 +187,7 @@ impl DownloadTask {
         tokio::task::spawn_blocking(move || {
             let mut record = this.record.lock().unwrap();
             record.complete = true;
-            storage::write_json(&this.path, &*record)?;
+            crate::portable::write_json(&this.root, &this.path, &*record)?;
             release(&this.root, |path, _| path == this.path)
         })
         .await?
@@ -202,7 +202,7 @@ impl DownloadTask {
             }
             record.files.extend(paths);
             record.complete = false;
-            storage::write_json(&this.path, &*record)
+            crate::portable::write_json(&this.root, &this.path, &*record)
         })
         .await?
     }
@@ -219,7 +219,7 @@ fn records(root: &Path) -> Result<Vec<(PathBuf, Record)>> {
         if !entry.file_type()?.is_file() || entry.path().extension().is_none_or(|e| e != "json") {
             continue;
         }
-        let record: Record = storage::read_json(&entry.path())?;
+        let record: Record = crate::portable::read_json(root, &entry.path())?;
         storage::safe_id(&record.instance)?;
         storage::safe_version(&record.version)?;
         ensure!(

@@ -176,7 +176,7 @@ impl Launcher {
         optional: &[String],
     ) -> Result<Instance> {
         let _guard = self.0.operation.lock().await;
-        self.idle(id)?;
+        let _directory_guard = self.idle(id)?;
         let version = pack_folder_name(name)?.to_owned();
         let game = self.available_game_dir(id)?;
         check_duplicate(&self.instance(id)?, &game, &version)?;
@@ -373,7 +373,7 @@ impl Launcher {
         {
             bail!("请等待当前任务完成。");
         }
-        self.idle(id)?;
+        let _directory_guard = self.idle(id)?;
         let job = self.pack_job(id, version)?;
         if job.completed {
             bail!("整合包已完成安装");
@@ -431,7 +431,7 @@ impl Launcher {
         let _guard = self.0.operation.lock().await;
         *self.0.active_modpack.lock().unwrap() = Some((id.into(), selected.into()));
         let _active = ActiveModpack(&self.0.active_modpack);
-        self.idle(id)?;
+        let _directory_guard = self.idle(id)?;
         let mut job = self.pack_job(id, selected)?;
         let game = self.available_game_dir(id)?;
         let target = game.join("versions").join(selected);

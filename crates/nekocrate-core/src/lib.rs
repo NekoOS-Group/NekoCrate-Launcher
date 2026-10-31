@@ -3,6 +3,7 @@ pub mod auth;
 pub mod crash;
 mod curseforge;
 pub mod diagnostics;
+mod directory_lock;
 pub mod download;
 mod download_concurrency;
 mod download_stall;
@@ -28,6 +29,7 @@ mod modloader_tests;
 pub mod modpack;
 pub mod network;
 mod pack_content;
+pub mod portable;
 mod proxy_credentials;
 mod recycle;
 pub mod resource_manager;
@@ -57,6 +59,8 @@ use tokio_util::sync::CancellationToken;
 
 struct Shared {
     root: PathBuf,
+    directory_locks: directory_lock::Locks,
+    portable: bool,
     _lock: fs::File,
     db: Mutex<Database>,
     operation: tokio::sync::Mutex<()>,
@@ -82,6 +86,7 @@ pub struct Launcher(Arc<Shared>);
 #[derive(Serialize)]
 pub struct Snapshot {
     pub root: String,
+    pub portable: bool,
     pub system_locale: String,
     pub database: Database,
     pub running: Vec<String>,
@@ -105,6 +110,7 @@ impl Launcher {
             .open(root.join("launcher.lock"))?;
         lock.try_lock()
             .context("该数据目录已被另一个 NekoCrate 进程占用，请先关闭它")?;
+        let portable = portable::initialize(&root)?;
         let dbpath = root.join("database.json");
         let db = migration::load_database(&root, &dbpath)?;
         for dir in [
@@ -120,6 +126,8 @@ impl Launcher {
         }
         let launcher = Self(Arc::new(Shared {
             root,
+            directory_locks: directory_lock::Locks::default(),
+            portable: portable.is_some(),
             _lock: lock,
             db: Mutex::new(db),
             operation: tokio::sync::Mutex::new(()),
@@ -133,8 +141,29 @@ impl Launcher {
             modpack_migration_issues: Mutex::default(),
             sessions: auth::SessionCache::default(),
         }));
+        if let Some(mut portable) = portable
+            && !portable.game_linked
+        {
+            let game = launcher
+                .root()
+                .parent()
+                .context("便携目录无效")?
+                .join(".minecraft");
+            fs::create_dir_all(&game).context("便携游戏目录不可写，请先解压到可写的位置")?;
+            if !launcher
+                .snapshot()
+                .database
+                .instances
+                .iter()
+                .any(|i| i.game_dir(launcher.root()) == game)
+            {
+                launcher.import_unlocked(game, String::new(), String::new())?;
+            }
+            portable.game_linked = true;
+            storage::write_json(&launcher.root().join("portable.json"), &portable)?;
+        }
         launcher.migrate_modpack_records();
-        launcher.refresh_local_versions()?;
+        launcher.refresh_local_versions(false)?;
         launcher.clean_old_java_archives();
         if let Err(error) =
             download_tasks::reconcile(launcher.root(), &launcher.snapshot().database.instances)
@@ -143,16 +172,29 @@ impl Launcher {
         }
         Ok(launcher)
     }
+    pub fn is_portable(&self) -> bool {
+        self.0.portable
+    }
     pub fn root(&self) -> &Path {
         &self.0.root
     }
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
             root: self.root().to_string_lossy().into(),
+            portable: self.is_portable(),
             system_locale: language::system_locale(),
             database: self.0.db.lock().unwrap().clone(),
             running: self.0.games.lock().unwrap().keys().cloned().collect(),
         }
+    }
+    pub fn save_ui_preference(&self, key: &str, value: &str) -> Result<()> {
+        if !matches!(key, "theme" | "selected_instance") || value.len() > 80 {
+            bail!("界面设置无效");
+        }
+        self.mutate(|db| {
+            db.ui_preferences.insert(key.into(), value.into());
+            Ok(())
+        })
     }
     pub fn settings(&self) -> Settings {
         self.0.db.lock().unwrap().settings.clone()
@@ -160,19 +202,33 @@ impl Launcher {
     pub fn memory_options(&self, id: &str) -> Result<memory::MemoryOptions> {
         Ok(memory::options(self.root(), &self.instance(id)?))
     }
-    /// Reconcile linked/managed profiles once at startup, not on every UI snapshot.
+    /// Refresh on focus, never on each frame/log snapshot. Busy directories are
+    /// skipped so a second launcher cannot observe an installation half committed.
+    pub fn refresh_directories(&self) -> Result<()> {
+        let Ok(_operation) = self.0.operation.try_lock() else {
+            return Ok(());
+        };
+        self.refresh_local_versions(true)
+    }
+    /// Reconcile linked/managed profiles at startup and when returning to the window.
     /// Existing packs become launchable without installing them again.
-    fn refresh_local_versions(&self) -> Result<()> {
+    fn refresh_local_versions(&self, prune: bool) -> Result<()> {
         let mut updates = Vec::new();
         for instance in self.snapshot().database.instances {
             let game = instance.game_dir(self.root());
             if !game.is_dir() {
                 continue;
             }
+            let Ok(_directory_guard) = self.idle(&instance.id) else {
+                continue;
+            };
             let Ok(discovered) = self.discover_versions(&game, "") else {
                 continue;
             };
             let mut versions = instance.versions.clone();
+            if prune {
+                versions.retain(|v| !v.installed || game.join("versions").join(&v.id).is_dir());
+            }
             for mut found in discovered {
                 if let Some(existing) = versions.iter_mut().find(|v| v.id == found.id) {
                     if found.modpack || loader::has_record(&game, &found.id) {
@@ -207,7 +263,7 @@ impl Launcher {
                 for (id, versions) in updates {
                     if let Some(instance) = db.instances.iter_mut().find(|i| i.id == id) {
                         instance.versions = versions;
-                        if instance.selected_version.is_none() {
+                        if instance.selected().is_none() {
                             instance.selected_version =
                                 instance.versions.first().map(|v| v.id.clone());
                         }
@@ -276,15 +332,17 @@ impl Launcher {
         let mut db = self.0.db.lock().unwrap();
         let mut candidate = db.clone();
         let result = operation(&mut candidate)?;
-        storage::write_json(&self.root().join("database.json"), &candidate)?;
+        portable::write_database(self.root(), &self.root().join("database.json"), &candidate)?;
         *db = candidate;
         Ok(result)
     }
-    fn idle(&self, id: &str) -> Result<()> {
+    fn idle(&self, id: &str) -> Result<Option<Arc<directory_lock::DirectoryLock>>> {
         if self.0.games.lock().unwrap().contains_key(id) {
             bail!("游戏运行中，请先停止该实例再修改或修复");
         }
-        Ok(())
+        self.0
+            .directory_locks
+            .acquire(&self.instance(id)?.game_dir(self.root()))
     }
     pub fn instance(&self, id: &str) -> Result<Instance> {
         storage::safe_id(id)?;
@@ -349,7 +407,7 @@ impl Launcher {
             .operation
             .try_lock()
             .context("有任务正在运行，请稍后添加版本")?;
-        self.idle(id)?;
+        let _directory_guard = self.idle(id)?;
         storage::safe_version(version)?;
         self.mutate(|db| {
             let instance = db
@@ -374,7 +432,7 @@ impl Launcher {
             .operation
             .try_lock()
             .context("有任务正在运行，请稍后切换版本")?;
-        self.idle(id)?;
+        let _directory_guard = self.idle(id)?;
         self.mutate(|db| {
             let instance = db
                 .instances
@@ -588,7 +646,7 @@ impl Launcher {
         // Metadata-only edits use the database lock. Install/launch already own
         // an Instance snapshot; saving preferences must not wait for downloads
         // or overwrite their version state, directory or installation plan.
-        self.idle(id)?;
+        let _directory_guard = self.idle(id)?;
         if name.trim().is_empty()
             || name.chars().count() > 80
             || !(512..=65536).contains(&memory_mb)
@@ -688,7 +746,7 @@ impl Launcher {
     /// Previously installed versions must exist unchanged at the new location.
     pub async fn relink_instance(&self, id: &str, source: PathBuf) -> Result<Instance> {
         let _guard = self.0.operation.lock().await;
-        self.idle(id)?;
+        let _directory_guard = self.idle(id)?;
         let previous = self.instance(id)?;
         let source = self.linkable_directory(&source, Some(id))?;
         let old_game = previous.game_dir(self.root());
@@ -801,7 +859,7 @@ impl Launcher {
     }
     pub async fn clone_instance(&self, id: &str) -> Result<Instance> {
         let _guard = self.0.operation.lock().await;
-        self.idle(id)?;
+        let _directory_guard = self.idle(id)?;
         let original = self.instance(id)?;
         let source = self.available_game_dir(id)?;
         let i = self.create_unlocked(&format!("{} · 副本", original.name), "", None)?;
@@ -837,7 +895,7 @@ impl Launcher {
             .operation
             .try_lock()
             .context("有任务正在运行，请稍后移除实例")?;
-        self.idle(id)?;
+        let _directory_guard = self.idle(id)?;
         let instance = self.instance(id)?;
         let source = self.instance_dir(id)?;
         storage::write_json(&source.join("instance.json"), &instance)?;
@@ -892,7 +950,7 @@ impl Launcher {
         sink: &EventSink,
     ) -> Result<Instance> {
         let _guard = self.0.operation.lock().await;
-        self.idle(id)?;
+        let _directory_guard = self.idle(id)?;
         let game = self.available_game_dir(id)?;
         let profile_id = fabric::version_id(game_version, loader_version)?;
         let path = version::metadata_path(&game, &profile_id)?;
@@ -987,7 +1045,7 @@ impl Launcher {
             }
         }
         let _guard = self.0.operation.lock().await;
-        self.idle(id)?;
+        let _directory_guard = self.idle(id)?;
         let sink = Event::scoped(sink, id, None);
         sink(Event::workflow("metadata", "解析游戏版本"));
         let instance = self.instance(id)?;
@@ -1289,7 +1347,7 @@ impl Launcher {
         sink: EventSink,
     ) -> Result<u32> {
         let _guard = self.0.operation.lock().await;
-        self.idle(id)?;
+        let _directory_guard = self.idle(id)?;
         let sink = Event::scoped(&sink, id, None);
         sink(Event::workflow("prepare", "检查启动配置"));
         let instance = self.instance(id)?;
@@ -1446,6 +1504,7 @@ impl Launcher {
             ..Event::new("game_started", format!("游戏已启动 · PID {pid}"))
         });
         tokio::spawn(async move {
+            let _directory_guard = _directory_guard;
             let (status, stopped) = tokio::select! {
                 r=child.wait()=>(r, false),
                 _=cancel.cancelled()=>{let _=child.kill().await;(child.wait().await, true)}
@@ -1522,10 +1581,7 @@ impl Launcher {
         sink: &EventSink,
     ) -> Result<()> {
         let _guard = self.0.operation.lock().await;
-        if let Some(id) = id {
-            self.instance(id)?;
-            self.idle(id)?;
-        }
+        let _directory_guard = id.map(|id| self.idle(id)).transpose()?;
         file.run(cancel, sink).await
     }
     pub fn stop_game(&self, id: &str) -> Result<()> {

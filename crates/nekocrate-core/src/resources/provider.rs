@@ -504,7 +504,7 @@ impl Launcher {
         world: Option<&str>,
         cancel: &CancellationToken,
     ) -> Result<ResourcePlan> {
-        self.idle(&scope.id)?;
+        let _directory_guard = self.idle(&scope.id)?;
         let target = self.resource_target(&scope.id, &scope.version)?;
         let api = Provider::new(self, scope.platform)?;
         let root = api.version(Some(project), version, cancel).await?;

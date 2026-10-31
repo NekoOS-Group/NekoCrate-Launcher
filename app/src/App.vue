@@ -958,6 +958,7 @@ function previewInstance(event: MouseEvent | FocusEvent, instance: Instance) {
 }
 function setTheme(id: string) {
   theme.value = id;
+  persistPortablePreference("theme", id);
   try {
     localStorage.setItem("nekocrate.theme", id);
   } catch {
@@ -1307,6 +1308,7 @@ function instanceMaterial(instance: Instance) {
 }
 function selectInstance(id: string) {
   selectedInstanceId.value = id;
+  persistPortablePreference("selected_instance", id);
   try {
     localStorage.setItem("nekocrate.selected-instance", id);
   } catch {
@@ -1902,6 +1904,13 @@ async function listenForFolders() {
 }
 let snapshotRequest = 0;
 let accountRevision = 0;
+function persistPortablePreference(key: string, value: string) {
+  if (desktop && snapshot.value.portable)
+    void rpc("save_ui_preference", { key, value }).catch((e) => {
+      error.value = message(e);
+    });
+}
+let portablePreferencesLoaded = false;
 async function sync() {
   const request = ++snapshotRequest;
   const accountsAtStart = accountRevision;
@@ -1927,6 +1936,18 @@ async function sync() {
     });
   }
   snapshot.value = response.state;
+  if (snapshot.value.portable && !portablePreferencesLoaded) {
+    portablePreferencesLoaded = true;
+    const preferences = snapshot.value.database.ui_preferences || {};
+    if (themes.some((t) => t.id === preferences.theme))
+      theme.value = preferences.theme;
+    if (
+      snapshot.value.database.instances.some(
+        (i) => i.id === preferences.selected_instance,
+      )
+    )
+      selectedInstanceId.value = preferences.selected_instance;
+  }
   if (utility.value !== "settings") hydrateSettings();
   manifest.value = response.manifest;
 }
@@ -3296,7 +3317,17 @@ function onEvent(e: LauncherEvent) {
     void sync();
   }
 }
+async function refreshDirectories() {
+  if (!desktop) return;
+  try {
+    await rpc("refresh_directories");
+    await sync();
+  } catch (e) {
+    error.value = message(e);
+  }
+}
 onMounted(async () => {
+  window.addEventListener("focus", refreshDirectories);
   document.addEventListener("visibilitychange", updateVisibility);
   try {
     selectedInstanceId.value =
@@ -3342,6 +3373,7 @@ onUnmounted(() => {
   logStore.dispose();
   unlisten?.();
   unlistenUpdate?.();
+  window.removeEventListener("focus", refreshDirectories);
   document.removeEventListener("visibilitychange", updateVisibility);
 });
 </script>
@@ -4344,7 +4376,14 @@ onUnmounted(() => {
                     >
                       <FolderOpen :size="20" />
                       <span>
-                        <strong> {{ t("启动器目录") }} </strong>
+                        <strong>
+                          {{ t("启动器目录")
+                          }}<small
+                            v-if="snapshot.portable"
+                            class="portable-mode"
+                            >{{ t("便携模式") }}</small
+                          >
+                        </strong>
                         <small>{{
                           snapshot.root || t("使用系统应用数据目录")
                         }}</small>

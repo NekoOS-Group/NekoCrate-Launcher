@@ -196,7 +196,7 @@ impl Launcher {
         version: &str,
         cancel: &CancellationToken,
     ) -> Result<Option<ResourcePlan>> {
-        self.idle(id)?;
+        let _directory_guard = self.idle(id)?;
         anyhow::ensure!(
             !sources.is_empty() && sources.len() <= 256,
             "每次可导入 1–256 个文件或目录"
@@ -281,7 +281,7 @@ impl Launcher {
         cancel: &CancellationToken,
         listed_mod: bool,
     ) -> Result<ResourcePlan> {
-        self.idle(id)?;
+        let _directory_guard = self.idle(id)?;
         if inputs.is_empty() || inputs.len() > 256 {
             bail!("每次可导入 1–256 个文件或目录");
         }

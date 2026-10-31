@@ -135,12 +135,35 @@ pub async fn check(
         .json()
         .await
         .context("无法读取更新信息")?;
-    select_release(
+    let mut status = select_release(
         &releases,
         env!("CARGO_PKG_VERSION"),
         std::env::consts::OS,
         std::env::consts::ARCH,
-    )
+    )?;
+    if crate::portable::identity(root).is_some() {
+        let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
+            ("macos", "aarch64") => "mac-appsilicon",
+            ("windows", "x86_64") => "win-amd64",
+            ("linux", "x86_64") => "linux-amd64",
+            _ => "unsupported",
+        };
+        let expected = format!(
+            "NekoCrate-Launcher-{}-{platform}-portable.zip",
+            status.latest_version
+        );
+        status.download_url = releases
+            .iter()
+            .find(|r| r.tag_name == status.latest_version)
+            .and_then(|r| {
+                r.assets.iter().find(|a| {
+                    a.name == expected && is_update_artifact(&a.browser_download_url, &r.tag_name)
+                })
+            })
+            .map(|a| a.browser_download_url.clone())
+            .unwrap_or_else(|| format!("{RELEASES_URL}tag/{}", status.latest_version));
+    }
+    Ok(status)
 }
 
 #[cfg(test)]

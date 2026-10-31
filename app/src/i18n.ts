@@ -663,6 +663,9 @@ export const english: Readonly<Record<string, string>> = {
   "最新版为 {version} · 点击更新": "{version} available · Update",
   打开启动器数据目录: "Open launcher data folder",
   启动器目录: "Launcher folder",
+  便携模式: "Portable",
+  "此游戏目录正由另一个猫咪盒子启动器使用，请等待其任务结束或关闭游戏":
+    "This game folder is in use by another NekoCrate Launcher. Wait for its task or game to finish.",
   使用系统应用数据目录: "Using the system app data folder",
   下载源: "Download source",
   游戏本体下载源: "Game download source",

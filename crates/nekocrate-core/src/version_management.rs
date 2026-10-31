@@ -150,7 +150,7 @@ impl Launcher {
             .operation
             .try_lock()
             .context("有任务正在运行，请稍后删除版本")?;
-        self.idle(id)?;
+        let _directory_guard = self.idle(id)?;
         storage::safe_version(version_id)?;
         let instance = self.instance(id)?;
         if !instance.versions.iter().any(|v| v.id == version_id) {

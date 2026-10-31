@@ -220,14 +220,14 @@ impl Launcher {
         sink: &EventSink,
     ) -> Result<()> {
         let _operation = self.0.operation.lock().await;
-        self.idle(id)?;
+        let _directory_guard = self.idle(id)?;
         let (mut plan, directory) = {
             // Serialize the target snapshot/checkpoint with isolation edits. No network work
             // or await holds this short lock, and unrelated settings remain editable.
             let _layout = self.0.layout.lock().unwrap();
             let target = self.resource_target(id, version)?;
             let directory = task_dir(&target, task)?;
-            let mut plan: ResourcePlan = storage::read_json(&safe_join(&directory, "plan.json")?)?;
+            let mut plan = read_plan(&safe_join(&directory, "plan.json")?, &target.directory)?;
             if plan.target.instance != id
                 || plan.target.version != version
                 || plan.target.directory != target.directory
@@ -363,8 +363,9 @@ impl Launcher {
         // Staging and plans remain on failure so a restart can reuse verified downloads.
         let token = cancel.clone();
         let plan = tokio::task::spawn_blocking(move || {
+            let working = plan.target.directory.clone();
             commit(plan, &directory, token)?;
-            storage::read_json::<ResourcePlan>(&safe_join(&directory, "plan.json")?)
+            read_plan(&safe_join(&directory, "plan.json")?, &working)
         })
         .await??;
         index_plan(&downloader, &plan).await?;

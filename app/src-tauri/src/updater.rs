@@ -203,6 +203,10 @@ impl UpdateManager {
                     builder
                 }
             });
+        #[cfg(target_os = "windows")]
+        if launcher.is_portable() {
+            builder = builder.target("windows-x86_64-portable");
+        }
         // HTTPS and signatures are enforced by the plugin; no insecure overrides.
         builder = builder.restart_after_install(true);
         let mut update = builder
@@ -214,6 +218,12 @@ impl UpdateManager {
             .context("更新版本已变化，请重新检查更新")?;
         if update.version != release.version
             || !updates::is_update_artifact(update.download_url.as_str(), tag)
+            || (cfg!(target_os = "windows")
+                && launcher.is_portable()
+                && !update
+                    .download_url
+                    .path()
+                    .ends_with("-win-amd64-portable.zip"))
         {
             bail!("更新清单与发布版本不一致");
         }
@@ -254,6 +264,23 @@ impl UpdateManager {
             package
         };
         self.publish(app, |_| {});
+        #[cfg(target_os = "windows")]
+        if launcher.is_portable() {
+            if let Err(error) =
+                super::portable_update::stage(launcher.root(), &package.update, &package.bytes)
+            {
+                self.0.lock().unwrap().package = Some(package);
+                self.publish(app, |p| {
+                    p.stage = Stage::Ready;
+                    p.error = Some(format!("{error:#}"));
+                });
+                return Err(error);
+            }
+            self.publish(app, |p| p.stage = Stage::Restarting);
+            launcher.release_data_lock_for_restart()?;
+            app.exit(0);
+            return Ok(());
+        }
         let installed = tauri::async_runtime::spawn_blocking(move || {
             let result = package.update.install(&package.bytes);
             (package, result)

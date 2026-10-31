@@ -285,7 +285,10 @@ async fn exchange_at(
 
 fn secret_account(root: &std::path::Path, id: &str) -> String {
     use ring::digest::{SHA256, digest};
-    let namespace = hex::encode(digest(&SHA256, root.to_string_lossy().as_bytes()));
+    let identity = crate::portable::identity(root)
+        .map(|p| format!("portable:{}", p.id))
+        .unwrap_or_else(|| root.to_string_lossy().into_owned());
+    let namespace = hex::encode(digest(&SHA256, identity.as_bytes()));
     format!("{}-{id}", &namespace[..16])
 }
 pub fn secret_entry(root: &std::path::Path, id: &str) -> Result<keyring::Entry> {
@@ -348,6 +351,26 @@ pub fn remove_secret(root: &std::path::Path, id: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn portable_credential_namespace_survives_moving_without_touching_keychain() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().join("old");
+        let root = base.join(crate::portable::DATA_DIRECTORY);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(base.join(crate::portable::MARKER), r#"{"schema":1}"#).unwrap();
+        crate::portable::initialize(&root).unwrap();
+        let before = super::secret_account(&root, "account");
+        let moved = temp.path().join("moved");
+        std::fs::rename(base, &moved).unwrap();
+        assert_eq!(
+            before,
+            super::secret_account(&moved.join(crate::portable::DATA_DIRECTORY), "account")
+        );
+        assert_ne!(
+            before,
+            super::secret_account(&temp.path().join("installed"), "account")
+        );
+    }
     use super::*;
 
     #[tokio::test]

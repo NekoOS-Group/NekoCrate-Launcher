@@ -79,6 +79,12 @@ fn locations(
 
 impl Launcher {
     pub fn suggested_instances(&self, executable: &Path) -> Vec<SuggestedInstance> {
+        if self.is_portable() {
+            return self.suggestions_at(vec![(
+                self.root().parent().unwrap().join(".minecraft"),
+                DirectorySource::Portable,
+            )]);
+        }
         let base = BaseDirs::new();
         self.suggestions_at(locations(
             std::env::consts::OS,

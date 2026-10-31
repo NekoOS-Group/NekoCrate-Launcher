@@ -191,7 +191,7 @@ impl Launcher {
             .operation
             .try_lock()
             .context("文件任务正在运行，请完成后修改 Mod")?;
-        self.resource_directory_idle(id, version)?;
+        let _directory_guard = self.resource_directory_idle(id, version)?;
         let (working, entry) = self.listed_mod(id, version, file)?;
         if entry.enabled == enabled {
             return Ok(file.into());
@@ -321,7 +321,7 @@ impl Launcher {
             .operation
             .try_lock()
             .context("文件任务正在运行，请完成后保存配置")?;
-        self.resource_directory_idle(id, version)?;
+        let _directory_guard = self.resource_directory_idle(id, version)?;
         if text.len() > TEXT_LIMIT || text.contains('\0') {
             bail!("配置内容无效或超过 512 KiB");
         }
