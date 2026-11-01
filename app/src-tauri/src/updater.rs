@@ -54,12 +54,12 @@ pub struct Status {
     install_support: Option<&'static str>,
 }
 
-fn unsupported_reason() -> Option<&'static str> {
+fn unsupported_reason(_launcher: &Launcher) -> Option<&'static str> {
     if cfg!(debug_assertions) {
         return Some("development");
     }
     #[cfg(target_os = "linux")]
-    if std::env::var_os("APPIMAGE").is_none() {
+    if !_launcher.is_portable() {
         return Some("package_manager");
     }
     #[cfg(target_os = "macos")]
@@ -75,7 +75,7 @@ fn unsupported_reason() -> Option<&'static str> {
 pub async fn check(launcher: &Launcher) -> Result<Status> {
     Ok(Status {
         release: updates::check(launcher.root(), &launcher.settings()).await?,
-        install_support: unsupported_reason(),
+        install_support: unsupported_reason(launcher),
     })
 }
 
@@ -104,7 +104,7 @@ impl UpdateManager {
     }
 
     pub async fn download(&self, app: &AppHandle, launcher: &Launcher, tag: &str) -> Result<()> {
-        if unsupported_reason().is_some() {
+        if unsupported_reason(launcher).is_some() {
             bail!("当前运行方式不支持自动安装，请安装发布版或使用系统软件包管理器");
         }
         let cancel = CancellationToken::new();
@@ -205,7 +205,17 @@ impl UpdateManager {
             });
         #[cfg(target_os = "windows")]
         if launcher.is_portable() {
-            builder = builder.target("windows-x86_64-portable");
+            builder = builder.target("windows-x86_64-portable-exe");
+        }
+        #[cfg(target_os = "macos")]
+        if launcher.is_portable() {
+            builder = builder.target("darwin-aarch64-portable");
+        }
+        #[cfg(target_os = "linux")]
+        {
+            builder = builder
+                .target("linux-x86_64-elf")
+                .executable_path(std::env::current_exe()?);
         }
         // HTTPS and signatures are enforced by the plugin; no insecure overrides.
         builder = builder.restart_after_install(true);
@@ -216,14 +226,17 @@ impl UpdateManager {
             .map_err(|error| nekocrate_core::network::explain_error(error.into()))
             .context("无法读取更新信息")?
             .context("更新版本已变化，请重新检查更新")?;
+        let expected_suffix = match std::env::consts::OS {
+            "windows" if launcher.is_portable() => "-win-amd64-portable.exe",
+            "windows" => "-win-amd64-setup.exe",
+            "macos" if launcher.is_portable() => "-mac-appsilicon-portable.app.tar.gz",
+            "macos" => "-mac-appsilicon.app.tar.gz",
+            "linux" => "-linux-amd64.elf",
+            _ => unreachable!(),
+        };
         if update.version != release.version
             || !updates::is_update_artifact(update.download_url.as_str(), tag)
-            || (cfg!(target_os = "windows")
-                && launcher.is_portable()
-                && !update
-                    .download_url
-                    .path()
-                    .ends_with("-win-amd64-portable.zip"))
+            || !update.download_url.path().ends_with(expected_suffix)
         {
             bail!("更新清单与发布版本不一致");
         }
@@ -320,10 +333,14 @@ mod tests {
     const SIGNATURE: &str = include_str!("../tests/fixtures/updater/test.app.tar.gz.sig");
 
     fn updater(path: &std::path::Path) -> Updater {
+        updater_with_key(path, PUBLIC)
+    }
+
+    fn updater_with_key(path: &std::path::Path, public: &str) -> Updater {
         let mut context = tauri::test::mock_context(tauri::test::noop_assets());
         context.config_mut().plugins.0.insert(
             "updater".into(),
-            json!({ "pubkey": PUBLIC.trim(), "requireSignedVersion": true }),
+            json!({ "pubkey": public.trim(), "requireSignedVersion": true }),
         );
         let app = tauri::test::mock_builder()
             .plugin(tauri_plugin_updater::Builder::new().build())
@@ -370,6 +387,57 @@ mod tests {
                 .verify(PACKAGE)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn standalone_elf_payload_is_signed_and_version_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let binary = dir.path().join("renamed-launcher");
+        std::fs::write(&binary, b"old executable").unwrap();
+        let updater = updater_with_key(
+            &binary,
+            include_str!("../tests/fixtures/updater/elf-test.pub"),
+        );
+        let mut meta = metadata("9.9.9");
+        meta["platforms"]["test"]["signature"] =
+            json!(include_str!("../tests/fixtures/updater/test.elf.sig").trim());
+        meta["platforms"]["test"]["url"] = json!("https://example.invalid/test.elf");
+        let update = updater.restore_update(meta.clone()).unwrap().unwrap();
+        let bytes = include_bytes!("../tests/fixtures/updater/test.elf");
+        update.verify(bytes).unwrap();
+        assert!(update.verify(b"modified ELF").is_err());
+        meta["version"] = json!("9.9.10");
+        assert!(
+            updater
+                .restore_update(meta)
+                .unwrap()
+                .unwrap()
+                .verify(bytes)
+                .is_err()
+        );
+        #[cfg(target_os = "linux")]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let game = dir.path().join(".minecraft");
+            std::fs::create_dir(&game).unwrap();
+            std::fs::write(game.join("save"), b"keep world").unwrap();
+            assert!(update.install(b"modified ELF").is_err());
+            assert_eq!(std::fs::read(&binary).unwrap(), b"old executable");
+            update.install(bytes).unwrap();
+            assert_eq!(std::fs::read(&binary).unwrap(), bytes);
+            assert_eq!(
+                std::fs::metadata(&binary).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+            assert!(
+                std::process::Command::new(&binary)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            assert_eq!(std::fs::read(game.join("save")).unwrap(), b"keep world");
+        }
     }
 
     #[cfg(target_os = "macos")]

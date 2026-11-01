@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Only the desktop entry point differs; core and third-party crates are reused.
+portable = []
+
 [lib]
 name = "nekocrate_desktop"
 # Desktop binaries only need the Rust library; mobile library outputs add links.

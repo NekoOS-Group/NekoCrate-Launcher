@@ -611,11 +611,7 @@ fn dispatch<'a>(
             Request::SuggestedInstances=>{
                 let launcher = launcher.clone();
                 json!(tauri::async_runtime::spawn_blocking(move || -> anyhow::Result<_> {
-                    // AppImage's running binary is inside a temporary mount.
-                    let executable = if cfg!(target_os = "linux") {
-                        std::env::var_os("APPIMAGE").map(PathBuf::from)
-                            .filter(|path| path.is_absolute() && path.is_file())
-                    } else { None }.map(Ok).unwrap_or_else(std::env::current_exe)?;
+                    let executable = nekocrate_core::portable::executable()?;
                     Ok(launcher.suggested_instances(&executable))
                 }).await??)
             },
@@ -742,13 +738,26 @@ fn command_future_size() -> usize {
 }
 
 pub fn run() {
+    if cfg!(feature = "portable") {
+        nekocrate_core::portable::enable();
+    }
     #[cfg(target_os = "windows")]
     if portable_update::run_helper() {
         return;
     }
+    if std::env::args_os().any(|arg| arg == "--verify-installed") {
+        let launcher = Launcher::open(None).expect("installed data initialization failed");
+        assert!(
+            !launcher.is_portable(),
+            "installed binary unexpectedly enabled portable mode"
+        );
+        assert!(launcher.snapshot().database.instances.is_empty());
+        println!("Installed mode remains independent of the adjacent game directory");
+        return;
+    }
     if std::env::args_os().any(|arg| arg == "--verify-portable") {
         let launcher = Launcher::open(None).expect("portable data initialization failed");
-        assert!(launcher.is_portable(), "portable marker was not detected");
+        assert!(launcher.is_portable(), "portable mode was not enabled");
         let snapshot = launcher.snapshot();
         assert_eq!(snapshot.database.instances.len(), 1);
         assert_eq!(

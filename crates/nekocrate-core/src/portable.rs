@@ -22,14 +22,15 @@ pub struct Identity {
 }
 
 pub fn executable() -> Result<PathBuf> {
-    if cfg!(target_os = "linux")
-        && let Some(path) = std::env::var_os("APPIMAGE").map(PathBuf::from)
-        && path.is_absolute()
-        && path.is_file()
-    {
-        return Ok(path);
-    }
     Ok(std::env::current_exe()?)
+}
+
+static PORTABLE_BUILD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Called once by the portable desktop entry point, before opening any data.
+/// The mode travels with the executable, independently of its name or location.
+pub fn enable() {
+    PORTABLE_BUILD.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 pub fn package_directory(executable: &Path, platform: &str) -> Result<PathBuf> {
@@ -48,23 +49,29 @@ pub fn package_directory(executable: &Path, platform: &str) -> Result<PathBuf> {
 }
 
 pub fn detect(executable: &Path, platform: &str) -> Result<Option<PathBuf>> {
+    detect_mode(
+        executable,
+        platform,
+        PORTABLE_BUILD.load(std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+fn detect_mode(executable: &Path, platform: &str, portable: bool) -> Result<Option<PathBuf>> {
     let base = package_directory(executable, platform)?;
     let marker = base.join(MARKER);
-    if !marker.try_exists()? {
-        ensure!(
-            platform != "macos"
-                || !executable
-                    .ancestors()
-                    .any(|p| p.file_name().is_some_and(|n| n == "NekoCrate Portable.app")),
-            "未找到便携目录。请完整解压 portable 压缩包，将 NekoCrate Portable.app 用 Finder 移到目标文件夹，并将 nekocrate.portable.json 放在它旁边后重新打开。macOS 可能正在临时隔离目录中运行此应用。\nPortable folder not found. Extract the complete package, move the app in Finder, and keep nekocrate.portable.json beside it."
-        );
+    if !portable && !marker.try_exists()? {
         return Ok(None);
     }
-    let value: Value = storage::read_json(&marker).context("便携模式标记无效")?;
     ensure!(
-        value.get("schema").and_then(Value::as_u64) == Some(1),
-        "不支持的便携模式版本"
+        platform != "macos"
+            || !base
+                .components()
+                .any(|part| part.as_os_str() == "AppTranslocation"),
+        "macOS 正在临时隔离目录中运行此应用。请关闭启动器，用 Finder 将 .app 移到目标游戏文件夹后重新打开。\nmacOS is running this app in a temporary location. Close it, move the .app in Finder to your game folder, then reopen it."
     );
+    if !portable {
+        validate_marker(&marker)?;
+    }
     let root = base.join(DATA_DIRECTORY);
     if let Ok(meta) = fs::symlink_metadata(&root) {
         ensure!(
@@ -76,16 +83,24 @@ pub fn detect(executable: &Path, platform: &str) -> Result<Option<PathBuf>> {
 }
 
 pub fn initialize(root: &Path) -> Result<Option<Identity>> {
-    if root.file_name().is_none_or(|name| name != DATA_DIRECTORY)
-        || !root.parent().is_some_and(|p| p.join(MARKER).is_file())
-    {
+    let embedded = PORTABLE_BUILD.load(std::sync::atomic::Ordering::Relaxed)
+        && detect(&executable()?, std::env::consts::OS)?
+            .and_then(|path| path.canonicalize().ok())
+            .is_some_and(|path| path == root);
+    initialize_mode(root, embedded)
+}
+
+fn initialize_mode(root: &Path, embedded: bool) -> Result<Option<Identity>> {
+    if root.file_name().is_none_or(|name| name != DATA_DIRECTORY) {
         return Ok(None);
     }
-    let marker: Value = storage::read_json(&root.parent().unwrap().join(MARKER))?;
-    ensure!(
-        marker.get("schema").and_then(Value::as_u64) == Some(1),
-        "不支持的便携模式版本"
-    );
+    if !embedded {
+        let marker = root.parent().unwrap().join(MARKER);
+        if !marker.try_exists()? {
+            return Ok(None);
+        }
+        validate_marker(&marker)?;
+    }
     let path = root.join("portable.json");
     let identity = if path.try_exists()? {
         let identity: Identity = storage::read_json(&path)?;
@@ -99,11 +114,20 @@ pub fn initialize(root: &Path) -> Result<Option<Identity>> {
             game_linked: false,
         };
         storage::write_json(&path, &identity)
-            .context("便携目录不可写，请将整个便携文件夹解压到可写的位置后重试")?;
+            .context("便携目录不可写，请将启动器移到可写的文件夹后重试")?;
         identity
     };
     cleanup_updates(root);
     Ok(Some(identity))
+}
+
+fn validate_marker(path: &Path) -> Result<()> {
+    let value: Value = storage::read_json(path).context("便携模式标记无效")?;
+    ensure!(
+        value.get("schema").and_then(Value::as_u64) == Some(1),
+        "不支持的便携模式版本"
+    );
+    Ok(())
 }
 
 fn cleanup_updates(root: &Path) {
@@ -242,26 +266,31 @@ pub(crate) fn write_database(root: &Path, path: &Path, db: &crate::model::Databa
     storage::write_json(path, &value)
 }
 
-/// Read the one executable from a signed Windows portable archive. No archive
-/// path is ever extracted onto the filesystem, so traversal entries cannot write.
+/// Validate a signed portable EXE. Legacy ZIP payloads remain readable during migration.
 pub fn windows_executable(bytes: &[u8]) -> Result<Vec<u8>> {
     use std::io::Read;
-    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
-    let name = "NekoCrate/nekocrate-launcher.exe";
-    ensure!(
-        archive.file_names().filter(|n| *n == name).count() == 1,
-        "便携更新包缺少唯一的启动器程序"
-    );
-    let mut entry = archive.by_name(name)?;
-    ensure!(
-        entry.is_file() && entry.size() <= 128 * 1024 * 1024,
-        "便携程序大小无效"
-    );
-    let mut binary = Vec::new();
-    entry
-        .by_ref()
-        .take(128 * 1024 * 1024 + 1)
-        .read_to_end(&mut binary)?;
+    ensure!(bytes.len() <= 128 * 1024 * 1024, "便携程序大小无效");
+    let binary = if bytes.starts_with(b"MZ") {
+        bytes.to_vec()
+    } else {
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
+        let name = "NekoCrate/nekocrate-launcher.exe";
+        ensure!(
+            archive.file_names().filter(|n| *n == name).count() == 1,
+            "便携更新包缺少唯一的启动器程序"
+        );
+        let mut entry = archive.by_name(name)?;
+        ensure!(
+            entry.is_file() && entry.size() <= 128 * 1024 * 1024,
+            "便携程序大小无效"
+        );
+        let mut binary = Vec::new();
+        entry
+            .by_ref()
+            .take(128 * 1024 * 1024 + 1)
+            .read_to_end(&mut binary)?;
+        binary
+    };
     ensure!(
         binary.len() <= 128 * 1024 * 1024 && binary.get(..2) == Some(b"MZ"),
         "便携程序不是 Windows 可执行文件"
@@ -287,6 +316,41 @@ mod tests {
     }
 
     #[test]
+    fn embedded_portable_mode_follows_the_application_without_a_marker() {
+        let temp = tempfile::tempdir().unwrap();
+        for (platform, name) in [
+            ("windows", "User renamed.exe"),
+            ("linux", "user-renamed"),
+            ("macos", "User renamed.app/Contents/MacOS/launcher"),
+        ] {
+            let executable = temp.path().join(name);
+            assert!(detect_mode(&executable, platform, false).unwrap().is_none());
+            assert_eq!(
+                detect_mode(&executable, platform, true).unwrap(),
+                Some(temp.path().join(DATA_DIRECTORY))
+            );
+        }
+        let root = temp.path().join(DATA_DIRECTORY);
+        fs::create_dir(&root).unwrap();
+        let first = initialize_mode(&root, true).unwrap().unwrap();
+        assert_eq!(initialize_mode(&root, true).unwrap().unwrap().id, first.id);
+        assert!(!temp.path().join(MARKER).exists());
+        assert!(
+            initialize_mode(&temp.path().join("explicit-data"), true)
+                .unwrap()
+                .is_none()
+        );
+        let next = temp.path().join("next folder").join(DATA_DIRECTORY);
+        fs::create_dir_all(&next).unwrap();
+        assert_ne!(initialize_mode(&next, true).unwrap().unwrap().id, first.id);
+    }
+
+    #[test]
+    fn portable_mac_refuses_a_translocated_directory() {
+        assert!(detect_mode(Path::new("/private/var/folders/test/AppTranslocation/random/d/Any.app/Contents/MacOS/launcher"), "macos", true).is_err());
+    }
+
+    #[test]
     fn detects_only_explicit_packages_and_uses_outer_bundle_directory() {
         let temp = tempfile::tempdir().unwrap();
         fs::create_dir(temp.path().join(".minecraft")).unwrap();
@@ -298,7 +362,7 @@ mod tests {
         let root = package(temp.path());
         for (platform, name) in [
             ("windows", "launcher.exe"),
-            ("linux", "Launcher.AppImage"),
+            ("linux", "launcher.elf"),
             ("macos", "Neko.app/Contents/MacOS/launcher"),
         ] {
             assert_eq!(
@@ -367,6 +431,8 @@ mod tests {
         binary[..2].copy_from_slice(b"MZ");
         binary[60..64].copy_from_slice(&64_u32.to_le_bytes());
         binary[64..].copy_from_slice(b"PE\0\0\x64\x86");
+        assert_eq!(windows_executable(&binary).unwrap(), binary);
+        assert!(windows_executable(b"MZ incomplete").is_err());
         assert_eq!(
             windows_executable(&make("NekoCrate/nekocrate-launcher.exe", &binary)).unwrap(),
             binary

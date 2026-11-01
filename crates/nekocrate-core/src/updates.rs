@@ -63,7 +63,7 @@ fn select_release(
     let suffix = match (os, arch) {
         ("macos", "aarch64") => "-mac-appsilicon.dmg",
         ("windows", "x86_64") => "-win-amd64-setup.exe",
-        ("linux", "x86_64") => "-linux-amd64.AppImage",
+        ("linux", "x86_64") => "-linux-amd64.deb",
         _ => "",
     };
     if !release.html_url.starts_with(&format!("{RELEASES_URL}tag/")) {
@@ -108,6 +108,15 @@ pub fn is_update_artifact(url: &str, tag: &str) -> bool {
     })
 }
 
+fn portable_asset(os: &str, arch: &str) -> &'static str {
+    match (os, arch) {
+        ("macos", "aarch64") => "mac-appsilicon-portable.app.tar.gz",
+        ("windows", "x86_64") => "win-amd64-portable.exe",
+        ("linux", "x86_64") => "linux-amd64.elf",
+        _ => "unsupported",
+    }
+}
+
 pub async fn check(
     root: &std::path::Path,
     settings: &crate::model::Settings,
@@ -142,16 +151,8 @@ pub async fn check(
         std::env::consts::ARCH,
     )?;
     if crate::portable::identity(root).is_some() {
-        let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
-            ("macos", "aarch64") => "mac-appsilicon",
-            ("windows", "x86_64") => "win-amd64",
-            ("linux", "x86_64") => "linux-amd64",
-            _ => "unsupported",
-        };
-        let expected = format!(
-            "NekoCrate-Launcher-{}-{platform}-portable.zip",
-            status.latest_version
-        );
+        let suffix = portable_asset(std::env::consts::OS, std::env::consts::ARCH);
+        let expected = format!("NekoCrate-Launcher-{}-{suffix}", status.latest_version);
         status.download_url = releases
             .iter()
             .find(|r| r.tag_name == status.latest_version)
@@ -212,7 +213,7 @@ mod tests {
             assets: [
                 "mac-appsilicon.dmg",
                 "win-amd64-setup.exe",
-                "linux-amd64.AppImage",
+                "linux-amd64.deb",
             ]
             .into_iter()
             .map(|suffix| Asset {
@@ -325,7 +326,7 @@ mod tests {
         for (os, arch, suffix) in [
             ("macos", "aarch64", "mac-appsilicon.dmg"),
             ("windows", "x86_64", "win-amd64-setup.exe"),
-            ("linux", "x86_64", "linux-amd64.AppImage"),
+            ("linux", "x86_64", "linux-amd64.deb"),
         ] {
             let update = select_release(&releases, "0.3.2-dev.1", os, arch).unwrap();
             assert!(update.available);
@@ -345,7 +346,7 @@ mod tests {
         for (os, arch, ending) in [
             ("macos", "aarch64", ".dmg"),
             ("windows", "x86_64", ".exe"),
-            ("linux", "x86_64", ".AppImage"),
+            ("linux", "x86_64", ".deb"),
         ] {
             assert!(
                 select_release(&releases, "0.1.0", os, arch)

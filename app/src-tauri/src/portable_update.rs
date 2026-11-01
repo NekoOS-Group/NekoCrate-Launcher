@@ -55,9 +55,7 @@ fn target(stage: &Path, name: &str) -> Result<PathBuf> {
     let root = updates.parent().context("便携更新目录无效")?;
     let base = root.parent().context("便携更新目录无效")?;
     ensure!(
-        updates.file_name().is_some_and(|n| n == "updates")
-            && portable::identity(root).is_some()
-            && base.join(portable::MARKER).is_file(),
+        updates.file_name().is_some_and(|n| n == "updates") && portable::identity(root).is_some(),
         "便携更新不在当前便携目录内"
     );
     for path in [stage, updates, root] {
@@ -84,7 +82,7 @@ pub fn stage(root: &Path, update: &tauri_plugin_updater::Update, bytes: &[u8]) -
         process::{Command, Stdio},
     };
     update.verify(bytes)?;
-    // Validate archive structure before stopping the running launcher.
+    // Validate the executable before stopping the running launcher.
     portable::windows_executable(bytes)?;
     let executable = std::env::current_exe()?;
     ensure!(
@@ -120,7 +118,7 @@ pub fn stage(root: &Path, update: &tauri_plugin_updater::Update, bytes: &[u8]) -
         signature: update.signature.clone(),
     };
     target(&stage, &request.executable)?;
-    let mut package = fs::File::create(stage.join("package.zip"))?;
+    let mut package = fs::File::create(stage.join("package.bin"))?;
     package.write_all(bytes)?;
     package.sync_all()?;
     storage::write_json(&stage.join("request.json"), &request)?;
@@ -224,7 +222,7 @@ fn replace(
         return Err(error.context("便携更新失败，已恢复旧程序"));
     }
     let _ = fs::remove_file(backup);
-    let _ = fs::remove_file(stage.join("package.zip"));
+    let _ = fs::remove_file(stage.join("package.bin"));
     fs::write(stage.join("complete"), b"ok")?;
     Ok(())
 }
@@ -264,7 +262,7 @@ pub fn run_helper() -> bool {
         let target = target(stage, &request.executable)?;
         wait_for_parent(request.parent_pid)?;
         let config: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json"))?;
-        let bytes = fs::read(stage.join("package.zip"))?;
+        let bytes = fs::read(stage.join("package.bin"))?;
         verify(
             &bytes,
             &request.signature,

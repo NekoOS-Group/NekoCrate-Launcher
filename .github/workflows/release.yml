@@ -9,7 +9,7 @@ on:
       tag:
         description: Existing preview tag to build
         required: true
-        default: dev0.9.4
+        default: dev0.9.5
         type: string
 
 permissions:
@@ -177,7 +177,7 @@ jobs:
             platform: linux-amd64
             image: ghcr.io/nekoos-group/nekocrate-linux-builder@sha256:28ed1cb76480e7a82a7dbf0b534640ddacca72e2da47c85b41532b2aadec5ce4
             target: x86_64-unknown-linux-gnu
-            bundles: deb,appimage
+            bundles: deb
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
@@ -242,9 +242,6 @@ jobs:
           merge-multiple: true
       - name: Verify frontend before compiling Rust
         run: python scripts/frontend_artifact.py verify app/dist
-      - name: Ensure AppImage packaging tools
-        if: runner.os == 'Linux'
-        run: file --version
       - name: Compile the release executable
         run: node "$RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" build --verbose --config src-tauri/tauri.release.conf.json --target "${{ matrix.target }}" --no-bundle --ci -- --locked --timings
         working-directory: app
@@ -254,21 +251,27 @@ jobs:
         run: node "$RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" bundle --verbose --config src-tauri/tauri.release.conf.json --target "${{ matrix.target }}" --bundles "${{ matrix.bundles }}" --ci
         working-directory: app
         env:
-          APPIMAGE_EXTRACT_AND_RUN: "1"
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-      - name: Package portable distributions without recompiling
+      - name: Verify installed executable
+        run: python scripts/frontend_artifact.py embedded --target "${{ matrix.target }}"
+      - name: Build portable entry point using the same dependency cache
+        run: node "$RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" build --verbose --config src-tauri/tauri.release.conf.json --config src-tauri/tauri.portable.conf.json --features portable --target "${{ matrix.target }}" --no-bundle --ci -- --locked --timings
+        working-directory: app
+        env:
+          CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
+      - name: Package portable application
         run: python scripts/release_assets.py portable --tag "$RELEASE_TAG" --target "${{ matrix.target }}"
-      - name: Sign Windows portable updater
-        if: runner.os == 'Windows'
+      - name: Sign portable updater
         run: |
           APP_VERSION=$(node -p 'require("./app/package.json").version')
-          node "$RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" signer sign --app-version "$APP_VERSION" "target/${{ matrix.target }}/release/bundle/portable/NekoCrate-Launcher-$RELEASE_TAG-${{ matrix.platform }}-portable.zip"
+          PORTABLE_FILE=$(python -c 'import sys; sys.path.insert(0, "scripts"); from portable_bundle import archive_path; from pathlib import Path; print(archive_path(Path("target") / sys.argv[1] / "release", sys.argv[2], sys.argv[3]))' "${{ matrix.target }}" "$RELEASE_TAG" "${{ matrix.platform }}")
+          node "$RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" signer sign --app-version "$APP_VERSION" "$PORTABLE_FILE"
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-      - name: Verify embedded frontend and IPC future size in the native executable
-        run: python scripts/frontend_artifact.py embedded --target "${{ matrix.target }}"
+      - name: Verify portable startup and relocation without a marker
+        run: python scripts/frontend_artifact.py embedded --portable --target "${{ matrix.target }}"
       - name: Collect and verify architecture
         run: python scripts/release_assets.py collect --tag "$RELEASE_TAG" --target "${{ matrix.target }}"
       - uses: actions/upload-artifact@v4
@@ -323,7 +326,7 @@ jobs:
           gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' > "$RUNNER_TEMP/release-assets.txt"
           while IFS= read -r asset; do
             case "$asset" in
-              NekoCrate-Launcher-"$RELEASE_TAG"-*.sig|NekoCrate-Launcher-"$RELEASE_TAG"-*.app.zip|SHA256SUMS)
+              NekoCrate-Launcher-"$RELEASE_TAG"-*.sig|NekoCrate-Launcher-"$RELEASE_TAG"-*.app.zip|NekoCrate-Launcher-"$RELEASE_TAG"-*-portable.zip|NekoCrate-Launcher-"$RELEASE_TAG"-*.AppImage|SHA256SUMS)
                 gh release delete-asset "$RELEASE_TAG" "$asset" --yes ;;
             esac
           done < "$RUNNER_TEMP/release-assets.txt"

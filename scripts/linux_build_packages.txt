@@ -4,6 +4,4 @@ libssl-dev
 librsvg2-dev
 libayatana-appindicator3-dev
 libdbus-1-dev
-libfuse2
-patchelf
 file

@@ -42,12 +42,24 @@ def verify(directory):
     print(f"Frontend entry and {len(parser.references)} resources verified in {root}")
 
 
-def embedded(target):
+def embedded(target, portable=False):
     root = Path(__file__).resolve().parents[1]
     suffix = ".exe" if "windows" in target else ""
-    binary = root / "target" / target / "release" / f"nekocrate-launcher{suffix}"
+    binary = root / "target" / target / "release" / f"{'nekocrate-portable' if portable else 'nekocrate-launcher'}{suffix}"
     subprocess.run([str(binary), "--verify-frontend"], check=True, timeout=30)
     print(f"Embedded frontend and IPC future size verified: {binary.name}")
+    if not portable:
+        with tempfile.TemporaryDirectory(prefix="NekoCrate-installed-") as temporary:
+            base = Path(temporary)
+            relative = Path("Launcher.app/Contents/MacOS/launcher") if "apple" in target else Path(binary.name)
+            executable = base / relative
+            executable.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(binary, executable)
+            (base / ".minecraft").mkdir()
+            environment = os.environ.copy()
+            environment["NEKOCRATE_DATA_DIR"] = str(base / ".nekocrate")
+            subprocess.run([str(executable), "--verify-installed"], check=True, timeout=30, env=environment)
+        return
     with tempfile.TemporaryDirectory(prefix="NekoCrate-portable-") as temporary:
         base = Path(temporary) / "NekoCrate 测试"
         base.mkdir()
@@ -55,15 +67,24 @@ def embedded(target):
         executable = base / relative
         executable.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(binary, executable)
-        (base / "nekocrate.portable.json").write_text('{"schema":1}\n')
         environment = os.environ.copy()
         environment.pop("NEKOCRATE_DATA_DIR", None)
-        environment.pop("APPIMAGE", None)
         subprocess.run([str(executable), "--verify-portable"], check=True, timeout=30, env=environment)
+        identity = (base / ".nekocrate/portable.json").read_bytes()
         moved = base.with_name("NekoCrate moved 测试")
         base.rename(moved)
         subprocess.run([str(moved / relative), "--verify-portable"], check=True, timeout=30, env=environment)
-    print("Portable startup and relocation verified")
+        assert (moved / ".nekocrate/portable.json").read_bytes() == identity
+        # Moving only the application into a new folder selects that new folder.
+        fresh = Path(temporary) / "Fresh 游戏"
+        renamed = Path("User renamed.app/Contents/MacOS/launcher") if "apple" in target else Path("User renamed" + suffix)
+        another = fresh / renamed
+        another.parent.mkdir(parents=True)
+        shutil.copy2(binary, another)
+        subprocess.run([str(another), "--verify-portable"], check=True, timeout=30, env=environment)
+        assert (fresh / ".nekocrate/portable.json").read_bytes() != identity
+        assert not (fresh / "nekocrate.portable.json").exists()
+    print("Marker-free portable startup, rename, relocation and fresh directory verified")
 
 
 if __name__ == "__main__":
@@ -71,6 +92,7 @@ if __name__ == "__main__":
     parser.add_argument("operation", choices=["verify", "embedded"])
     parser.add_argument("directory", nargs="?")
     parser.add_argument("--target")
+    parser.add_argument("--portable", action="store_true")
     args = parser.parse_args()
     if args.operation == "verify":
         if not args.directory:
@@ -79,4 +101,4 @@ if __name__ == "__main__":
     else:
         if not args.target:
             parser.error("embedded requires --target")
-        embedded(args.target)
+        embedded(args.target, args.portable)

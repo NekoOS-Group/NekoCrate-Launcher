@@ -16,14 +16,18 @@ import portable_bundle
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "artifacts" / "release"
 TARGETS = {
-    "aarch64-apple-darwin": ("mac-appsilicon", [".dmg", "-portable.zip"]),
-    "x86_64-pc-windows-msvc": ("win-amd64", ["-setup.exe", "-portable.zip"]),
-    "x86_64-unknown-linux-gnu": ("linux-amd64", [".deb", ".AppImage", "-portable.zip"]),
+    "aarch64-apple-darwin": ("mac-appsilicon", [".dmg", "-portable.app.tar.gz"]),
+    "x86_64-pc-windows-msvc": ("win-amd64", ["-setup.exe", "-portable.exe"]),
+    "x86_64-unknown-linux-gnu": ("linux-amd64", [".deb", ".elf"]),
 }
 UPDATERS = {
     "aarch64-apple-darwin": ("darwin-aarch64", ".app.tar.gz", "macos"),
     "x86_64-pc-windows-msvc": ("windows-x86_64", "-setup.exe", "nsis"),
-    "x86_64-unknown-linux-gnu": ("linux-x86_64", ".AppImage", "appimage"),
+    "x86_64-unknown-linux-gnu": ("linux-x86_64-elf", ".elf", "portable"),
+}
+PORTABLE_UPDATERS = {
+    "aarch64-apple-darwin": "darwin-aarch64-portable",
+    "x86_64-pc-windows-msvc": "windows-x86_64-portable-exe",
 }
 RELEASES_URL = "https://github.com/NekoOS-Group/NekoCrate-Launcher/releases/download"
 
@@ -142,14 +146,11 @@ def portable(tag, target):
     platform, _ = TARGETS[target]
     release = ROOT / "target" / target / "release"
     bundles = release / "bundle"
-    if platform == "mac-appsilicon":
-        source, name = only(bundles / "macos", "*.app"), "NekoCrate Portable.app"
-    elif platform == "win-amd64":
-        source, name = release / "nekocrate-launcher.exe", "nekocrate-launcher.exe"
-    else:
-        source, name = only(bundles / "appimage", "*.AppImage"), "NekoCrate.AppImage"
+    binary = release / ("nekocrate-portable.exe" if platform == "win-amd64" else "nekocrate-portable")
+    verify_architecture(binary, target)
+    app = only(bundles / "macos", "*.app") if platform == "mac-appsilicon" else None
     destination = portable_bundle.archive_path(release, tag, platform)
-    portable_bundle.package(source, destination, name)
+    portable_bundle.package(binary, destination, app)
     print(destination)
 
 
@@ -178,9 +179,8 @@ def collect(tag, target):
     else:
         verify_architecture(release / "nekocrate-launcher", target)
         copy(only(bundles / "deb", "*.deb"), ".deb")
-        copy(only(bundles / "appimage", "*.AppImage"), ".AppImage")
     portable_archive = portable_bundle.archive_path(release, tag, platform)
-    copy(portable_archive, "-portable.zip")
+    copy(portable_archive, portable_bundle.SUFFIXES[platform])
     updater_target, updater_suffix, updater_directory = UPDATERS[target]
     updater_source = only(bundles / updater_directory, "*" + updater_suffix.removeprefix("-setup"))
     if updater_suffix not in TARGETS[target][1]:
@@ -194,9 +194,9 @@ def collect(tag, target):
         "updater": {"target": updater_target, "file": f"{prefix}{updater_suffix}", "signature": signature},
         "files": [file_info(path) for path in assets],
     }
-    if platform == "win-amd64":
+    if target in PORTABLE_UPDATERS:
         manifest["portable_updater"] = {
-            "target": "windows-x86_64-portable", "file": f"{prefix}-portable.zip",
+            "target": PORTABLE_UPDATERS[target], "file": f"{prefix}{portable_bundle.SUFFIXES[platform]}",
             "signature": updater_signature(Path(str(portable_archive) + ".sig").read_text(encoding="utf-8"), app_version),
         }
     write_json(OUTPUT / f"build-{platform}.json", manifest)
@@ -226,13 +226,14 @@ def verify(tag):
         if manifest.get("updater") != {"target": updater_target, "file": updater_file, "signature": signature}:
             raise ValueError(f"Updater metadata does not match release: {platform}")
         platforms[updater_target] = {"signature": signature, "url": f"{RELEASES_URL}/{tag}/{updater_file}"}
-        if platform == "win-amd64":
+        if target in PORTABLE_UPDATERS:
             portable_info = manifest.get("portable_updater", {})
             portable_signature = updater_signature(portable_info.get("signature"), app_version)
-            portable_file = f"NekoCrate-Launcher-{tag}-{platform}-portable.zip"
-            if portable_info != {"target": "windows-x86_64-portable", "file": portable_file, "signature": portable_signature}:
+            portable_file = f"NekoCrate-Launcher-{tag}-{platform}{portable_bundle.SUFFIXES[platform]}"
+            portable_target = PORTABLE_UPDATERS[target]
+            if portable_info != {"target": portable_target, "file": portable_file, "signature": portable_signature}:
                 raise ValueError("Portable updater metadata does not match release")
-            platforms["windows-x86_64-portable"] = {"signature": portable_signature, "url": f"{RELEASES_URL}/{tag}/{portable_file}"}
+            platforms[portable_target] = {"signature": portable_signature, "url": f"{RELEASES_URL}/{tag}/{portable_file}"}
         expected_assets.update(expected_names)
         builds.append(manifest)
     allowed_files = expected_assets | {"BUILDINFO.json", "latest.json"} | {

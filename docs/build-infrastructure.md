@@ -32,8 +32,8 @@ python3 scripts/cache_cleanup.py --snapshot caches.json --default-branch neko_de
 
 `scripts/linux_build_packages.txt` 是镜像与 apt 基准测试共用的依赖清单。
 镜像不包含项目源码、账户或签名密钥。镜像内 `/opt/nekocrate/dpkg-manifest.txt`
-记录实际安装的系统包版本。镜像验证会执行 `file`，避免编译和 DEB 打包成功后才
-发现 AppImage 工具缺失；容器发布步骤只将当前 `$GITHUB_WORKSPACE` 加入 Git
+记录实际安装的系统包版本。镜像验证会检查 WebKit 原生链接及 ELF 产物；
+容器发布步骤只将当前 `$GITHUB_WORKSPACE` 加入 Git
 的 `safe.directory`，使产物清单能读取实际检出提交。
 
 `Build Linux dependency image` 在 Dockerfile、依赖清单或相关脚本变更时运行，
@@ -68,16 +68,25 @@ Fork PR 在普通 Ubuntu runner 上安装依赖，避免依赖外部贡献者没
 | --- | --- | --- |
 | macOS `.dmg` | 面向用户的拖拽安装介质 | 手动安装入口 |
 | macOS `.app.tar.gz` | Tauri updater 使用的应用归档 | 是 |
-| Windows `-setup.exe` / Linux `.AppImage` | 手动安装与自动更新共用 | 是 |
-| 三平台 `-portable.zip` | 同一编译结果的便携发行包；Windows 也用于便携自动更新 | 是 |
+| Windows `-setup.exe` | 安装版下载与自动更新共用 | 是 |
+| Windows `-portable.exe` / Linux `.elf` | 单个便携程序，下载与更新共用 | 是 |
+| macOS `-portable.app.tar.gz` | 内置便携模式的 `.app`，下载与更新共用 | 是 |
 | Linux `.deb` | 发行版包管理器安装 | 当前自动更新不使用 |
 | `latest.json` | 版本、各平台包地址及内嵌签名 | 是 |
 | `BUILDINFO.json` | 提交、平台，以及统一的文件大小与 SHA-256 校验清单 | 否，供校验与追溯 |
 
-从 dev0.9.4 开始，共公开八个安装/更新/便携包和两个 JSON 文件。便携包只增加归档步骤，不重复编译；Windows 便携 ZIP 单独签名并写入更新清单的 `windows-x86_64-portable`。不再提供
-`.app.zip`、独立 `.sig` 或 `SHA256SUMS`。Tauri 仍在原生 bundle 目录生成 `.sig`，
-收集时检查签名对应的公钥及版本，将内容写入内部平台清单；发布时再次检查并
-内嵌到 `latest.json`。客户端读取内嵌签名，安装前的数字签名验证不变。
+从 dev0.9.5 开始，共公开七个安装/更新/便携文件和两个 JSON 文件，不再构建或发布
+AppImage 和 portable ZIP。普通桌面构建与 `portable` feature 构建共用 Core、前端
+和第三方依赖缓存，只增加桌面 crate 的编译与链接。便携模式随程序携带，不依赖
+文件名或外部标记。macOS 便携 `.app` 换入便携二进制后重新进行 ad hoc 签名。
+
+便携更新目标为 `darwin-aarch64-portable`、`windows-x86_64-portable-exe`、
+`linux-x86_64-elf`。保留安装版 macOS/Windows 的原目标；Linux DEB 交由包管理器
+维护。旧 AppImage 和 dev0.9.4 便携用户手动迁移一次，不把旧目标指向不兼容格式。
+
+不提供 `.app.zip`、独立 `.sig` 或 `SHA256SUMS`。构建在产物旁生成 `.sig`，
+收集时检查签名对应的公钥及版本，发布时内嵌到 `latest.json`。客户端安装前验证
+数字签名及版本绑定；Linux ELF 复用现有更新器的 ELF 验签与文件替换实现。
 数字签名证明更新包由持有私钥的一方签发；普通 SHA-256 校验和本身不提供发布者
 身份保证。Tauri 更新签名也不同于 Apple 公证或 Windows 发布者代码签名。
 
@@ -117,14 +126,13 @@ CurseForge 会提示使用官方发行版。本地开发或自建发行版可在
 | macOS 本机开发签名 | `NekoCrate Local Development` 自签身份，私钥在本机用户钥匙串且不可导出 | `cargo ui` 编译完成后签名再执行；重载继续使用相同身份 |
 | macOS 公开发布者签名 | 尚未配置，现有 Release 仍为 ad hoc | 后续使用独立的 Developer ID Application 身份和公证配置，不上传本机开发私钥 |
 | Windows 公开发布者签名 | 尚未配置 Authenticode；现有更新包已有上面的更新签名 | 后续通过 Tauri `signCommand` 接入云签名或硬件密钥；CI 获得签名权限，私钥留在服务/HSM 中 |
-| Linux 包/仓库签名 | 当前 AppImage 使用上面的更新签名；DEB 用于手动安装 | 若增加 AppImage GPG 或 APT 仓库，使用独立、持久的 GPG 签名密钥；不每次构建重新生成 |
+| Linux 包/仓库签名 | 当前 ELF 使用上面的更新签名；DEB 用于手动安装 | 若增加 APT 仓库，使用独立、持久的 GPG 签名密钥；不每次构建重新生成 |
 
 Windows 的发布者证书与更新包签名不同。自签证书可以用于本机测试，但不能让其他
 用户的 Windows 自动信任发布者或保证消除 SmartScreen 提示。正式发布可使用
 [Tauri 支持的云签名/硬件密钥方式](https://v2.tauri.app/distribute/sign/windows/)。
-Linux 没有要求普通应用持有类似 macOS 的本机签名证书；可按分发渠道增加
-[AppImage GPG 签名](https://v2.tauri.app/distribute/sign/linux/)，但 AppImage
-本身不会自动验证该签名，不能替代启动器现有的更新签名验证。
+Linux ELF 使用同一套更新签名验证；未来如增加 APT 仓库，可另行配置仓库 GPG
+签名，不能用普通文件校验和替代发布者签名。
 
 固定更新私钥应在仓库外保留加密备份。更换该密钥需要处理已安装客户端内置公钥的
 迁移，不能简单重生成。签名 Secrets 只供受信任的发布工作流使用，PR 测试不需要，
