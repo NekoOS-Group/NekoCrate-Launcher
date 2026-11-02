@@ -9,7 +9,20 @@ import {
   shallowRef,
   watch,
 } from "vue";
-import { Terminal, Copy, Trash2, X, Search, ArrowDown } from "lucide-vue-next";
+import {
+  Terminal,
+  Copy,
+  Trash2,
+  X,
+  Search,
+  ArrowDown,
+  Settings2,
+  Coffee,
+  MemoryStick,
+  Package,
+  Wrench,
+  FileText,
+} from "lucide-vue-next";
 import { t, translateMessage, locale } from "../i18n";
 import GlassSelect from "./GlassSelect.vue";
 import {
@@ -21,15 +34,40 @@ import type { LogStore } from "../logStore";
 import { LogViewport } from "../logViewport";
 import { createViewportMotion } from "../viewportMotion";
 import { listRevealStyle } from "../listMotion";
+import {
+  recoveryLabels,
+  type LaunchRecovery,
+  type RecoveryAction,
+} from "../launchRecovery";
 
 const props = defineProps<{
   store: LogStore;
   instances: readonly { id: string; name: string }[];
   initialScope: string;
   session: number;
+  recoveries?: readonly LaunchRecovery[];
+  busy?: boolean;
 }>();
-const emit = defineEmits<{ close: []; copy: [text: string] }>();
+const emit = defineEmits<{
+  close: [];
+  copy: [text: string];
+  recover: [recovery: LaunchRecovery, action: RecoveryAction];
+  clear: [scope: string];
+}>();
 const filter = reactive({ scope: props.initialScope, level: "all", query: "" });
+const recovery = computed(() =>
+  props.recoveries?.find(
+    (item) => filter.scope === "all" || item.instanceId === filter.scope,
+  ),
+);
+const recoveryIcons = {
+  java: Coffee,
+  memory: MemoryStick,
+  mods: Package,
+  repair: Wrench,
+  settings: Settings2,
+  report: FileText,
+};
 const raw = shallowRef(props.store.snapshot());
 const presenter = createLogPresenter();
 const rows = computed(() =>
@@ -129,6 +167,7 @@ function refresh() {
 function clear() {
   reveal();
   props.store.clear(filter.scope);
+  emit("clear", filter.scope);
   refresh();
 }
 watch(
@@ -287,6 +326,34 @@ onBeforeUnmount(() => {
           :placeholder="t('搜索正文或来源')"
           spellcheck="false"
       /></label>
+    </div>
+    <div v-if="recovery" class="log-recovery">
+      <span
+        class="log-recovery-target"
+        :title="`${recovery.instanceName} · ${recovery.versionName}`"
+        >{{ recovery.instanceName }} · {{ recovery.versionName }}</span
+      >
+      <div class="log-recovery-actions">
+        <button
+          v-for="action in recovery.actions"
+          :key="action"
+          class="text-button"
+          :disabled="busy && action !== 'report'"
+          @click="emit('recover', recovery, action)"
+        >
+          <component :is="recoveryIcons[action]" :size="14" />
+          {{
+            t(
+              action === "report" &&
+                /^(crash-reports[/\\]|hs_err_pid)/.test(
+                  recovery.report.file?.path || "",
+                )
+                ? "打开崩溃报告"
+                : recoveryLabels[action],
+            )
+          }}
+        </button>
+      </div>
     </div>
     <div class="log-stage">
       <div

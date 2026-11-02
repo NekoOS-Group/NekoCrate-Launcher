@@ -44,6 +44,7 @@ const eventLevels: Record<string, LogLevel> = {
   retry: "WARN",
   error: "ERROR",
   game_crash: "ERROR",
+  launch_failed: "ERROR",
 };
 
 /** Presentation only: the original stream remains untouched for copying/debugging. */

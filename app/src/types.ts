@@ -176,6 +176,8 @@ export interface CrashReport {
   time: number;
   exit: string;
   sources: string[];
+  file?: { path: string; launcher_log: boolean } | null;
+  repairable?: boolean;
   findings: {
     code: string;
     title: string;

@@ -1,5 +1,5 @@
-//! Evidence-based Java selection. A minimum version is not proof that every
-//! future JVM is compatible. Unknown constraints never widen automatic choices.
+//! Hard incompatibilities and recommendations are separate. Missing mod metadata
+//! is not an upper bound on the JVM; known loader and mod constraints still apply.
 use crate::{model::Version, version};
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
@@ -15,6 +15,27 @@ use std::{
 pub struct Compatibility {
     pub majors: Vec<u32>,
     pub reasons: Vec<String>,
+    pub requires_jdk: bool,
+    pub fingerprint: String,
+    constraints: Vec<(String, Constraint)>,
+}
+
+impl Compatibility {
+    pub fn rejection(&self, major: u32, version: &str) -> Option<String> {
+        if !self.majors.contains(&major) {
+            return Some(format!("Java {major} 不在游戏与加载器的兼容范围内"));
+        }
+        let number = java_version_number(version)?;
+        self.constraints.iter().find_map(|(source, constraint)| {
+            (constraint.allows_version(number) == Some(false)).then(|| {
+                format!(
+                    "{source} 的 Java 约束{} {}",
+                    if constraint.deny { "排除" } else { "要求" },
+                    constraint.ranges.join(" 或 ")
+                )
+            })
+        })
+    }
 }
 
 pub(crate) fn bytecode_ceiling(v: &Version) -> Option<(u32, String)> {
@@ -39,126 +60,178 @@ pub fn assess(v: &Version, game: &Path) -> Result<Compatibility> {
 pub fn assess_in_directory(v: &Version, working: &Path) -> Result<Compatibility> {
     let baseline = v.java_version.as_ref().map_or(8, |j| j.major);
     let loader = version::detect_loader(&serde_json::to_value(v)?);
-    let mut reasons = vec![];
-    let mut majors = if !v.compatible_java_majors.is_empty() {
-        reasons.push("版本配置明确声明了 Java 兼容列表".into());
-        v.compatible_java_majors.clone()
-    } else if let Some(loader) = &loader {
-        let ceiling = verified_loader_ceiling(&loader.kind, &loader.version, baseline);
-        if ceiling > baseline {
-            reasons.push(format!(
-                "{} {} 的已核实 Java 支持范围",
+    let mut result = Compatibility {
+        majors: if v.compatible_java_majors.is_empty() {
+            (baseline..=64).collect()
+        } else {
+            v.compatible_java_majors.clone()
+        },
+        reasons: vec![format!("游戏最低 Java {baseline}；优先复用本地推荐版本")],
+        requires_jdk: false,
+        fingerprint: String::new(),
+        constraints: Vec::new(),
+    };
+    result
+        .majors
+        .retain(|major| *major >= baseline && *major <= 64);
+    result.majors.sort_unstable();
+    result.majors.dedup();
+    if !v.compatible_java_majors.is_empty() {
+        result
+            .reasons
+            .push("已应用版本配置声明的 Java 兼容列表".into());
+    }
+    if let Some((maximum, source)) = bytecode_ceiling(v) {
+        result.majors.retain(|major| *major <= maximum);
+        result.reasons.push(format!("{source} 最高 Java {maximum}"));
+    }
+    let game_id = v
+        .jar
+        .as_deref()
+        .or(v.inherits_from.as_deref())
+        .unwrap_or(&v.id);
+    if baseline <= 8 && legacy_java8(v, game_id, cfg!(target_os = "linux")) {
+        result.majors.retain(|major| *major <= 8);
+        result
+            .reasons
+            .push("旧版游戏或 Linux 原生库需要 Java 8".into());
+    }
+    if let Some(loader) = &loader {
+        // Versioned exclusions, not an allowlist of a handful of loader releases.
+        // References: PCL ModJava.GetJavaRequirement and HMCL JavaVersionConstraint.
+        // https://github.com/Meloong-Git/PCL/blob/93ede5d9e638c99fcec853a9ba1eecd91ceee7f5/Plain%20Craft%20Launcher%202/Modules/Minecraft/ModJava.vb
+        if let Some((maximum, patch_limit)) = loader_limit(&loader.kind, &loader.version) {
+            result.majors.retain(|major| *major <= maximum);
+            result.reasons.push(format!(
+                "{} {} 最高 Java {maximum}",
                 loader.kind, loader.version
             ));
-        } else {
-            reasons.push("缺少更新 Java 的兼容依据，保留游戏声明的版本".into());
-        }
-        (baseline..=ceiling.max(baseline)).collect()
-    } else {
-        reasons.push("缺少更新 Java 的兼容依据，保留游戏声明的版本".into());
-        vec![baseline]
-    };
-    // Reject malformed/unbounded declarations and never undercut the game minimum.
-    majors.retain(|major| *major >= baseline && *major <= 64);
-    majors.sort_unstable();
-    majors.dedup();
-    if v.main_class == "net.minecraft.launchwrapper.Launch" {
-        majors.retain(|major| *major <= 8);
-        reasons.push("LaunchWrapper 使用旧类加载器，自动匹配限制为 Java 8".into());
-    }
-    if loader.is_some() {
-        for library in &v.libraries {
-            if let Some(asm) = library.name.strip_prefix("org.ow2.asm:asm:")
-                && let Some(max) = asm_java_ceiling(asm)
-            {
-                majors.retain(|major| *major <= max);
-                reasons.push(format!("ASM {asm} 最多识别 Java {max} 字节码"));
+            if let Some(range) = patch_limit {
+                result.constraints.push((
+                    format!("{} {}", loader.kind, loader.version),
+                    Constraint {
+                        ranges: vec![range.into()],
+                        deny: false,
+                        maven: true,
+                    },
+                ));
             }
         }
     }
 
+    let overrides_path = working.join("config/fabric_loader_dependencies.json");
+    let overrides: Value =
+        if loader.as_ref().is_some_and(|l| l.kind == "fabric") && overrides_path.is_file() {
+            let value: Value = crate::storage::read_json(&overrides_path)?;
+            anyhow::ensure!(
+                value["version"] == 1 && value["overrides"].is_object(),
+                "无法识别 Fabric Java 依赖覆盖配置"
+            );
+            result.reasons.push("已应用 Fabric 依赖覆盖配置".into());
+            value
+        } else {
+            Value::Null
+        };
+    let mut fingerprint = ring::digest::Context::new(&ring::digest::SHA256);
+    fingerprint.update(&serde_json::to_vec(v)?);
+    fingerprint.update(&serde_json::to_vec(&overrides)?);
     if let Some(loader) = &loader {
         let mods = working.join("mods");
-        let overrides = loader.kind == "fabric"
-            && working
-                .join("config/fabric_loader_dependencies.json")
-                .exists();
         let mut uncertain = 0;
         let mut declared = 0;
         if mods.exists() {
-            for entry in std::fs::read_dir(&mods).context("无法检查模组的 Java 兼容性")? {
-                let path = entry?.path();
+            let mut paths = std::fs::read_dir(&mods)
+                .context("无法检查模组的 Java 兼容性")?
+                .map(|e| e.map(|e| e.path()))
+                .collect::<std::io::Result<Vec<_>>>()?;
+            paths.sort();
+            for path in paths {
                 if !path
                     .extension()
                     .is_some_and(|ext| ext.eq_ignore_ascii_case("jar"))
                 {
                     continue;
                 }
-                let evidence = inspect_cached(&path, &loader.kind);
-                if evidence.uncertain {
-                    uncertain += 1;
-                }
-                if !evidence.constraints.is_empty() {
-                    declared += 1;
-                }
-                for constraint in evidence.constraints.iter().filter(|_| !overrides) {
-                    majors.retain(|major| constraint.allows(*major) != Some(false));
-                    if majors
-                        .iter()
-                        .any(|major| constraint.allows(*major).is_none())
-                    {
-                        uncertain += 1;
-                    }
-                }
-                if majors.is_empty() {
-                    bail!("模组 Java 要求与已知兼容范围冲突：{}", path.display());
+                let metadata = path.metadata()?;
+                fingerprint.update(path.file_name().unwrap().as_encoded_bytes());
+                fingerprint.update(&metadata.len().to_le_bytes());
+                fingerprint.update(
+                    &metadata
+                        .modified()?
+                        .duration_since(SystemTime::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_nanos()
+                        .to_le_bytes(),
+                );
+                let evidence = inspect_cached(&path, &loader.kind, &overrides);
+                uncertain += usize::from(evidence.uncertain);
+                declared += usize::from(!evidence.constraints.is_empty());
+                result.requires_jdk |= evidence.requires_jdk;
+                let source = path.file_name().unwrap().to_string_lossy().into_owned();
+                for constraint in &evidence.constraints {
+                    uncertain +=
+                        usize::from(constraint.allows_version([baseline, 0, 0, 0]).is_none());
+                    // Patch-level ranges must be checked against the actual JVM,
+                    // not against a fictional x.0.0 JVM for the whole major.
+                    result
+                        .constraints
+                        .push((source.clone(), constraint.clone()));
                 }
             }
         }
-        // Dependency overrides can replace/remove Java constraints. Until their
-        // full semantics are resolved, do not upgrade a pack based on stale ones.
-        if overrides {
-            uncertain += 1;
-        }
         if declared > 0 {
-            reasons.push(format!("已应用 {declared} 个模组的 Java 版本约束"));
+            result
+                .reasons
+                .push(format!("已应用 {declared} 个模组的 Java 版本约束"));
         }
         if uncertain > 0 {
-            majors.retain(|major| *major == baseline);
-            reasons.push(format!(
-                "{uncertain} 项模组兼容信息不完整，暂不自动跨 Java 主版本"
+            result.reasons.push(format!(
+                "{uncertain} 项模组的 Java 兼容信息不完整；保留满足已知约束的本地候选"
             ));
         }
+        if result.requires_jdk {
+            result
+                .reasons
+                .push("Preloading Tricks 3.5.6 需要完整 JDK，避免精简 JRE 缺少类调试信息".into());
+        }
     }
-    if majors.is_empty() {
-        bail!(
-            "没有同时满足游戏、加载器和模组约束的 Java：{}",
-            reasons.join("；")
-        );
-    }
-    Ok(Compatibility { majors, reasons })
+    anyhow::ensure!(
+        !result.majors.is_empty(),
+        "没有同时满足游戏与加载器约束的 Java：{}",
+        result.reasons.join("；")
+    );
+    result.fingerprint = hex::encode(fingerprint.finish());
+    Ok(result)
 }
 
-// Narrow, versioned evidence; never infer compatibility of future loader releases.
-// Fabric 0.18.6 CI tests Java 21/25 and its Mixin service declares JAVA_25:
-// https://github.com/FabricMC/fabric-loader/blob/0.18.6/.github/workflows/build.yml
-// Forge 1.20.1 gained Java 25 support in 47.4.9 (ASM upgrade, PR #10664):
-// https://github.com/MinecraftForge/MinecraftForge/pull/10664
-fn verified_loader_ceiling(kind: &str, version: &str, baseline: u32) -> u32 {
-    let Ok(v) = semver::Version::parse(version) else {
-        return baseline;
-    };
-    if !v.pre.is_empty() {
-        return baseline;
-    }
+fn legacy_java8(v: &Version, game: &str, linux: bool) -> bool {
+    let parts: Vec<_> = game.split('.').map(str::parse::<u32>).collect();
+    let older_than_16 = matches!(parts.as_slice(), [Ok(1), Ok(minor), ..] if *minor < 6);
+    matches!(v.kind.as_str(), "old_alpha" | "old_beta")
+        || older_than_16
+        || (linux
+            && v.libraries
+                .iter()
+                .any(|library| library.name.starts_with("org.lwjgl.lwjgl:")))
+}
+
+fn loader_limit(kind: &str, version: &str) -> Option<(u32, Option<&'static str>)> {
+    // Forge's fourth version component is not SemVer (e.g. 14.23.5.2860).
+    let v = java_version_number(version)?;
     match kind {
-        "fabric" if v == semver::Version::new(0, 18, 6) && baseline >= 17 => 25,
-        "forge"
-            if v.major == 47 && v.minor == 4 && (9..=10).contains(&v.patch) && baseline == 17 =>
-        {
-            25
+        "forge" if v[0] <= 14 => Some((8, None)),
+        "forge" if v[0] <= 28 => Some((10, None)),
+        "forge" if v[0] <= 31 => Some((15, None)),
+        "forge" if ([34, 0, 0, 0]..=[36, 2, 25, 0]).contains(&v) => Some((8, Some("(,8.0.320]"))),
+        "forge" if v[0] == 36 && v >= [36, 2, 26, 0] => Some((23, None)),
+        "forge" if v[0] == 37 && v <= [37, 0, 79, 0] => Some((16, None)),
+        "forge" if ([45, 0, 21, 0]..=[45, 0, 65, 0]).contains(&v) => Some((19, None)),
+        "forge" if ([45, 0, 66, 0]..=[47, 4, 8, 0]).contains(&v) => Some((21, None)),
+        "neoforge" if v <= [20, 2, 62, 0] && !version.contains("25w14craftmine") => {
+            Some((21, None))
         }
-        _ => baseline,
+        "fabric" if v < [0, 17, 0, 0] => Some((24, None)),
+        _ => None,
     }
 }
 
@@ -195,13 +268,13 @@ struct Constraint {
     maven: bool,
 }
 impl Constraint {
-    fn allows(&self, major: u32) -> Option<bool> {
+    fn allows_version(&self, version: [u32; 4]) -> Option<bool> {
         let mut unknown = false;
         for range in &self.ranges {
             let result = if self.maven {
-                maven_matches(range, major)
+                maven_matches_version(range, version)
             } else {
-                fabric_matches(range, major)
+                fabric_matches_version(range, version)
             };
             match result {
                 Some(true) => return Some(!self.deny),
@@ -213,7 +286,28 @@ impl Constraint {
     }
 }
 
-fn fabric_matches(range: &str, major: u32) -> Option<bool> {
+/// Numeric Java release, excluding vendor/build metadata; normalizes 1.8.0_321.
+/// Also accepts the quoted version lines retained in older runtime indexes.
+pub(crate) fn java_version_number(value: &str) -> Option<[u32; 4]> {
+    let value = value.split('"').nth(1).unwrap_or(value).trim();
+    let value = value.split(['-', '+', ' ']).next()?;
+    let mut parts = value
+        .split(['.', '_'])
+        .map(str::parse::<u32>)
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .ok()?;
+    if parts.len() >= 2 && parts[0] == 1 && parts[1] <= 8 {
+        parts.remove(0);
+    }
+    if parts.is_empty() || parts.len() > 4 {
+        return None;
+    }
+    let mut result = [0; 4];
+    result[..parts.len()].copy_from_slice(&parts);
+    Some(result)
+}
+
+fn fabric_matches_version(range: &str, version: [u32; 4]) -> Option<bool> {
     let mut terms = vec![];
     for term in range.split_whitespace() {
         let term = if term.chars().next()?.is_ascii_digit() && !term.contains(['x', 'X', '*']) {
@@ -232,10 +326,14 @@ fn fabric_matches(range: &str, major: u32) -> Option<bool> {
         return None;
     }
     let req = semver::VersionReq::parse(&terms.join(", ")).ok()?;
-    Some(req.matches(&semver::Version::new(major.into(), 0, 0)))
+    Some(req.matches(&semver::Version::new(
+        version[0].into(),
+        version[1].into(),
+        version[2].into(),
+    )))
 }
 
-fn maven_matches(range: &str, major: u32) -> Option<bool> {
+fn maven_matches_version(range: &str, version: [u32; 4]) -> Option<bool> {
     let range = range.trim();
     if !range.starts_with(['[', '(']) || !range.ends_with([']', ')']) {
         return None;
@@ -245,40 +343,36 @@ fn maven_matches(range: &str, major: u32) -> Option<bool> {
         let lower = if lower.trim().is_empty() {
             true
         } else {
-            let n = major_bound(lower.trim())?;
+            let n = java_version_number(lower.trim())?;
             if range.starts_with('[') {
-                major >= n
+                version >= n
             } else {
-                major > n
+                version > n
             }
         };
         let upper = if upper.trim().is_empty() {
             true
         } else {
-            let n = major_bound(upper.trim())?;
+            let n = java_version_number(upper.trim())?;
             if range.ends_with(']') {
-                major <= n
+                version <= n
             } else {
-                major < n
+                version < n
             }
         };
         Some(lower && upper)
     } else if range.starts_with('[') && range.ends_with(']') {
-        Some(major == major_bound(body)?)
+        Some(version == java_version_number(body)?)
     } else {
         None
     }
-}
-fn major_bound(value: &str) -> Option<u32> {
-    let mut parts = value.split('.');
-    let major = parts.next()?.parse().ok()?;
-    parts.all(|p| p == "0").then_some(major)
 }
 
 #[derive(Clone, Debug, Default)]
 struct ModEvidence {
     constraints: Vec<Constraint>,
     uncertain: bool,
+    requires_jdk: bool,
 }
 #[derive(Hash, PartialEq, Eq)]
 struct CacheKey {
@@ -286,8 +380,9 @@ struct CacheKey {
     loader: String,
     size: u64,
     modified: SystemTime,
+    overrides: String,
 }
-fn inspect_cached(path: &Path, loader: &str) -> Arc<ModEvidence> {
+fn inspect_cached(path: &Path, loader: &str, overrides: &Value) -> Arc<ModEvidence> {
     static CACHE: OnceLock<Mutex<HashMap<CacheKey, Arc<ModEvidence>>>> = OnceLock::new();
     let result = || -> Result<Arc<ModEvidence>> {
         let metadata = path.metadata()?;
@@ -296,6 +391,7 @@ fn inspect_cached(path: &Path, loader: &str) -> Arc<ModEvidence> {
             loader: loader.into(),
             size: metadata.len(),
             modified: metadata.modified()?,
+            overrides: overrides.to_string(),
         };
         let cache = CACHE.get_or_init(Default::default);
         if let Some(value) = cache.lock().unwrap().get(&key) {
@@ -303,7 +399,14 @@ fn inspect_cached(path: &Path, loader: &str) -> Arc<ModEvidence> {
         }
         let mut zip = zip::ZipArchive::new(std::fs::File::open(path)?)?;
         let mut budget = 64 * 1024 * 1024;
-        let value = Arc::new(inspect_archive(&mut zip, loader, true, 0, &mut budget)?);
+        let value = Arc::new(inspect_archive(
+            &mut zip,
+            loader,
+            true,
+            0,
+            &mut budget,
+            overrides,
+        )?);
         let mut cache = cache.lock().unwrap();
         cache.retain(|k, _| k.path != path || k.loader != loader);
         if cache.len() >= 2048 {
@@ -345,20 +448,31 @@ fn inspect_archive<R: Read + Seek>(
     root: bool,
     depth: u32,
     budget: &mut u64,
+    overrides: &Value,
 ) -> Result<ModEvidence> {
     if depth > 4 {
         bail!("嵌套模组过深");
     }
     let mut result = ModEvidence::default();
     let mut nested = vec![];
+    let fabric = read_entry(zip, "fabric.mod.json", 1024 * 1024)?
+        .map(|bytes| serde_json::from_slice::<Value>(&bytes))
+        .transpose()?;
+    // Some Forge packs load this Fabric mod through a bridge. Inspect its identity
+    // independently of the selected loader; do not require a JDK for all mods.
+    result.requires_jdk = fabric.as_ref().is_some_and(|meta| {
+        meta["id"] == "preloading_tricks"
+            && meta["version"] == "3.5.6"
+            && meta["environment"] != "server"
+    });
     if loader == "fabric" {
-        if let Some(bytes) = read_entry(zip, "fabric.mod.json", 1024 * 1024)? {
-            let meta: Value = serde_json::from_slice(&bytes)?;
+        if let Some(mut meta) = fabric {
+            apply_fabric_overrides(&mut meta, overrides);
             if meta["environment"] == "server" {
                 return Ok(result);
             }
             result.uncertain = meta["depends"]["java"].is_null();
-            for (key, deny) in [("depends", false), ("breaks", true), ("conflicts", true)] {
+            for (key, deny) in [("depends", false), ("breaks", true)] {
                 let value = &meta[key]["java"];
                 if value.is_null() {
                     continue;
@@ -447,17 +561,44 @@ fn inspect_archive<R: Read + Seek>(
                 .checked_sub(bytes.len() as u64)
                 .context("嵌套模组过大")?;
             let mut child = zip::ZipArchive::new(Cursor::new(bytes))?;
-            inspect_archive(&mut child, loader, false, depth + 1, budget)
+            inspect_archive(&mut child, loader, false, depth + 1, budget, overrides)
         })();
         match child {
             Ok(evidence) => {
                 result.uncertain |= evidence.uncertain;
+                result.requires_jdk |= evidence.requires_jdk;
                 result.constraints.extend(evidence.constraints);
             }
             Err(_) => result.uncertain = true,
         }
     }
     Ok(result)
+}
+
+// Fabric applies replacement, removal, and addition to each mod independently.
+fn apply_fabric_overrides(meta: &mut Value, overrides: &Value) {
+    let Some(id) = meta["id"].as_str() else {
+        return;
+    };
+    let patch = &overrides["overrides"][id];
+    for kind in ["depends", "breaks"] {
+        if let Some(replacement) = patch.get(kind) {
+            meta[kind] = replacement.clone();
+        }
+        if let Some(remove) = patch.get(format!("-{kind}")).and_then(Value::as_object)
+            && let Some(deps) = meta.get_mut(kind).and_then(Value::as_object_mut)
+        {
+            for name in remove.keys() {
+                deps.remove(name);
+            }
+        }
+        if let Some(add) = patch.get(format!("+{kind}")).and_then(Value::as_object) {
+            if !meta[kind].is_object() {
+                meta[kind] = serde_json::json!({});
+            }
+            meta[kind].as_object_mut().unwrap().extend(add.clone());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -495,6 +636,15 @@ mod tests {
         .unwrap()
     }
 
+    fn accepted(v: &Version, dir: &Path) -> Vec<u32> {
+        let c = assess(v, dir).unwrap();
+        c.majors
+            .iter()
+            .copied()
+            .filter(|m| c.rejection(*m, &format!("{m}.0.0")).is_none())
+            .collect()
+    }
+
     #[test]
     fn explicit_17_to_26_support_allows_26_and_mod_constraints_intersect() {
         let temp = tempfile::tempdir().unwrap();
@@ -507,10 +657,7 @@ mod tests {
                 fabric_meta(json!(">=17 <27"), Value::Null),
             )],
         );
-        assert_eq!(
-            assess(&v, temp.path()).unwrap().majors,
-            (17..=26).collect::<Vec<_>>()
-        );
+        assert_eq!(accepted(&v, temp.path()), (17..=26).collect::<Vec<_>>());
         install_mod(
             temp.path(),
             "other.jar",
@@ -519,21 +666,18 @@ mod tests {
                 fabric_meta(json!(["17.x", ">=21 <27"]), json!("26.x")),
             )],
         );
-        assert_eq!(
-            assess(&v, temp.path()).unwrap().majors,
-            vec![17, 21, 22, 23, 24, 25]
-        );
+        assert_eq!(accepted(&v, temp.path()), vec![17, 21, 22, 23, 24, 25]);
     }
 
     #[test]
     fn asm_is_an_upper_bound_not_positive_evidence_of_compatibility() {
         let temp = tempfile::tempdir().unwrap();
         let mut v = profile("net.minecraftforge:forge:1.20.1-47.4.4", "9.7.1");
-        assert_eq!(assess(&v, temp.path()).unwrap().majors.last(), Some(&24));
+        assert_eq!(accepted(&v, temp.path()).last(), Some(&21));
         v.compatible_java_majors.clear();
-        assert_eq!(assess(&v, temp.path()).unwrap().majors, vec![17]);
+        assert_eq!(accepted(&v, temp.path()), (17..=21).collect::<Vec<_>>());
         v.libraries[1].name = "org.ow2.asm:asm:9.9".into();
-        assert_eq!(assess(&v, temp.path()).unwrap().majors, vec![17]);
+        assert_eq!(accepted(&v, temp.path()), (17..=21).collect::<Vec<_>>());
     }
 
     #[test]
@@ -552,7 +696,7 @@ mod tests {
             "parent.jar",
             &[("fabric.mod.json", parent), ("nested.jar", child)],
         );
-        assert_eq!(assess(&v, temp.path()).unwrap().majors.last(), Some(&21));
+        assert_eq!(accepted(&v, temp.path()).last(), Some(&21));
         install_mod(
             temp.path(),
             "parent.jar",
@@ -561,13 +705,13 @@ mod tests {
                 fabric_meta(json!(">=17 <=26"), Value::Null),
             )],
         );
-        assert_eq!(assess(&v, temp.path()).unwrap().majors.last(), Some(&26));
+        assert_eq!(accepted(&v, temp.path()).last(), Some(&26));
         install_mod(
             temp.path(),
             "unknown.jar",
             &[("fabric.mod.json", b"{\"id\":\"unknown\"}".to_vec())],
         );
-        assert_eq!(assess(&v, temp.path()).unwrap().majors, vec![17]);
+        assert_eq!(accepted(&v, temp.path()).last(), Some(&26));
     }
 
     #[test]
@@ -592,10 +736,7 @@ mod tests {
                     b"[[mods]]\nmodId='test'\n[features.test]\njavaVersion='[17,22)'\n".to_vec(),
                 )],
             );
-            assert_eq!(
-                assess(&v, temp.path()).unwrap().majors,
-                vec![17, 18, 19, 20, 21]
-            );
+            assert_eq!(accepted(&v, temp.path()), vec![17, 18, 19, 20, 21]);
         }
     }
 
@@ -608,17 +749,140 @@ mod tests {
             "mod.jar",
             &[("fabric.mod.json", fabric_meta(json!(">=30"), Value::Null))],
         );
-        assert!(assess(&v, temp.path()).is_err());
+        assert!(accepted(&v, temp.path()).is_empty());
         std::fs::create_dir_all(temp.path().join("config")).unwrap();
         std::fs::write(
             temp.path().join("config/fabric_loader_dependencies.json"),
-            "{}",
+            r#"{"version":1,"overrides":{"fixture":{"-depends":{"java":""}}}}"#,
         )
         .unwrap();
-        assert_eq!(assess(&v, temp.path()).unwrap().majors, vec![17]);
-        assert_eq!(fabric_matches("something unsupported", 26), None);
-        assert_eq!(maven_matches("[17.0.8,)", 17), None);
-        assert_eq!(fabric_matches("17", 17), Some(true));
-        assert_eq!(fabric_matches("17", 18), Some(false));
+        assert_eq!(accepted(&v, temp.path()), (17..=26).collect::<Vec<_>>());
+        assert_eq!(
+            fabric_matches_version("something unsupported", [26, 0, 0, 0]),
+            None
+        );
+        assert_eq!(
+            maven_matches_version("[17.0.8,)", [17, 0, 7, 0]),
+            Some(false)
+        );
+        assert_eq!(fabric_matches_version("17", [17, 0, 0, 0]), Some(true));
+        assert_eq!(fabric_matches_version("17", [18, 0, 0, 0]), Some(false));
+    }
+
+    #[test]
+    fn missing_java_metadata_does_not_reject_newer_jvms_and_only_specific_mods_need_jdk() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut v = profile("net.minecraftforge:forge:1.20.1-47.4.4", "9.7.1");
+        v.compatible_java_majors.clear();
+        install_mod(
+            temp.path(),
+            "ordinary.jar",
+            &[(
+                "META-INF/mods.toml",
+                b"[[mods]]\nmodId='ordinary'\n".to_vec(),
+            )],
+        );
+        let original = assess(&v, temp.path()).unwrap();
+        assert!(original.rejection(21, "21.0.7").is_none());
+        assert!(original.rejection(26, "26.0.2").is_some());
+        assert!(!original.requires_jdk);
+        install_mod(
+            temp.path(),
+            "preloading.jar",
+            &[(
+                "fabric.mod.json",
+                br#"{"id":"preloading_tricks","version":"3.5.6"}"#.to_vec(),
+            )],
+        );
+        let changed = assess(&v, temp.path()).unwrap();
+        assert!(changed.requires_jdk);
+        assert_ne!(original.fingerprint, changed.fingerprint);
+        std::fs::rename(
+            temp.path().join("mods/preloading.jar"),
+            temp.path().join("mods/preloading.jar.disabled"),
+        )
+        .unwrap();
+        assert!(!assess(&v, temp.path()).unwrap().requires_jdk);
+        assert_eq!(
+            original.fingerprint,
+            assess(&v, temp.path()).unwrap().fingerprint
+        );
+    }
+
+    #[test]
+    fn java_patch_constraints_and_fabric_soft_conflicts_are_not_major_version_bans() {
+        let temp = tempfile::tempdir().unwrap();
+        let v = profile("net.fabricmc:fabric-loader:0.18.6", "9.9");
+        install_mod(
+            temp.path(),
+            "mod.jar",
+            &[(
+                "fabric.mod.json",
+                br#"{"id":"test","depends":{"java":">=17.0.8 <22"},"conflicts":{"java":"21.x"}}"#
+                    .to_vec(),
+            )],
+        );
+        let compatibility = assess(&v, temp.path()).unwrap();
+        assert!(compatibility.rejection(17, "17.0.7").is_some());
+        assert!(compatibility.rejection(17, "17.0.8").is_none());
+        assert!(compatibility.rejection(21, "21.0.7").is_none());
+        assert!(compatibility.rejection(25, "25.0.1").is_some());
+        assert_eq!(
+            maven_matches_version("[17.0.8.1,21)", [17, 0, 8, 0]),
+            Some(false)
+        );
+        assert_eq!(
+            maven_matches_version("[17.0.8.1,21)", [17, 0, 8, 1]),
+            Some(true)
+        );
+        assert_eq!(java_version_number("1.8.0_321-b07"), Some([8, 0, 321, 0]));
+    }
+
+    #[test]
+    fn loader_exclusions_preserve_legacy_and_patch_level_incompatibilities() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut v = profile("net.minecraftforge:forge:1.16.5-36.2.20", "9.1");
+        v.java_version = Some(crate::model::JavaVersion { major: 8 });
+        v.compatible_java_majors.clear();
+        let c = assess(&v, temp.path()).unwrap();
+        assert!(c.rejection(8, "1.8.0_320").is_none());
+        assert!(c.rejection(8, "1.8.0_321").is_some());
+        v.main_class = "net.minecraft.launchwrapper.Launch".into();
+        assert_eq!(assess(&v, temp.path()).unwrap().majors, vec![8]);
+        assert_eq!(loader_limit("fabric", "0.16.14"), Some((24, None)));
+        assert_eq!(loader_limit("neoforge", "20.2.62-beta"), Some((21, None)));
+        assert_eq!(loader_limit("neoforge", "21.1.200"), None);
+    }
+
+    #[test]
+    fn fabric_overrides_only_change_the_targeted_mod_and_dependency_kind() {
+        let temp = tempfile::tempdir().unwrap();
+        let v = profile("net.fabricmc:fabric-loader:0.18.6", "9.9");
+        install_mod(
+            temp.path(),
+            "first.jar",
+            &[(
+                "fabric.mod.json",
+                br#"{"id":"first","depends":{"java":">=30"}}"#.to_vec(),
+            )],
+        );
+        install_mod(
+            temp.path(),
+            "second.jar",
+            &[(
+                "fabric.mod.json",
+                br#"{"id":"second","breaks":{"java":"21.x"}}"#.to_vec(),
+            )],
+        );
+        std::fs::create_dir_all(temp.path().join("config")).unwrap();
+        std::fs::write(
+            temp.path().join("config/fabric_loader_dependencies.json"),
+            br#"{"version":1,"overrides":{"first":{"+depends":{"java":">=17"}}}}"#,
+        )
+        .unwrap();
+        let c = assess(&v, temp.path()).unwrap();
+        assert!(c.rejection(17, "17.0.8").is_none());
+        assert!(c.rejection(21, "21.0.7").is_some());
+        assert!(c.rejection(25, "25.0.1").is_none());
     }
 }

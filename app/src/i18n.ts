@@ -27,6 +27,32 @@ export function setLanguage(preference: string, system: string) {
 
 /** Chinese source keys stay readable in templates; interpolate only after translation. */
 export const english: Readonly<Record<string, string>> = {
+  资源预选: "Select resources",
+  资源分类: "Resource categories",
+  加载更多: "Load more",
+  "目标版本已变化，请重新选择资源":
+    "The target version changed; select resources again",
+  "请预选 1–128 项资源": "Select 1–128 resources",
+  此资源类型不支持预选安装: "This resource type cannot be preselected",
+  资源名称过长: "Resource name is too long",
+  "请先选择 Mod 加载器": "Select a Mod loader first",
+  "此版本已有待安装资源，请先继续原安装任务":
+    "This version has pending resources; resume its installation first",
+  "预选资源尚未安装完成，请继续下载":
+    "Selected resources are not fully installed; resume the download",
+
+  预选资源: "Selected resources",
+  尚未预选资源: "No resources selected",
+  "最多预选 128 项资源": "Select up to 128 resources",
+  此资源没有兼容版本: "No compatible version of this resource",
+  没有找到兼容资源: "No compatible resources found",
+  预选资源将随此版本一起安装:
+    "Selected resources will be installed with this version",
+  完成选择: "Done",
+  "版本或加载器已变化，请重新预选资源":
+    "Game or loader changed; please select compatible resources again",
+  解析预选资源依赖: "Resolve selected resource dependencies",
+
   版本隔离: "Version isolation",
   各版本独立: "Separate versions",
   共享目录: "Shared directory",
@@ -231,6 +257,26 @@ export const english: Readonly<Record<string, string>> = {
   "按 Mod ID 匹配配置；保存保留原文并创建备份。":
     "Matched by mod ID. Saving preserves your text and creates a backup.",
   崩溃诊断: "Crash diagnosis",
+  启动中: "Launching",
+  "选择 Java": "Choose Java",
+  调整内存: "Adjust memory",
+  "管理 Mods": "Manage mods",
+  修复游戏文件: "Repair game files",
+  检查实例设置: "Check settings",
+  打开日志文件: "Open log file",
+  打开崩溃报告: "Open crash report",
+  "Java 无法用于本次启动": "Java cannot be used for this launch",
+  "选择兼容的 Java，或改为自动匹配后重试。":
+    "Choose a compatible Java runtime, or switch to automatic selection and retry.",
+  启动文件缺失或损坏: "Missing or damaged launch files",
+  "校验并修复游戏文件；外部安装的加载器若无法修复，请使用原安装方式补全文件。":
+    "Verify and repair the game files. For unsupported external loader installations, restore the files using the original installer.",
+  未找到本次启动的日志文件: "The log file for this launch was not found",
+  "此日志已被新的启动记录替换，请重新打开日志":
+    "A newer launch has replaced this report. Reopen the logs.",
+  无效的日志文件路径: "Invalid log file path",
+  日志文件不在此实例目录内: "The log file is outside this game directory",
+  此游戏版本已被移除: "This game version has been removed",
   "Java 模块冲突": "Conflicting Java modules",
   "检查启动类路径中是否重复包含游戏本体或依赖 JAR，并核对加载器的 ignoreList；错误中引用该包的 Mod 不一定是冲突来源。":
     "Check for duplicate game or library JARs on the classpath and the loader's ignoreList. The mod referencing that package is not necessarily the source of the conflict.",

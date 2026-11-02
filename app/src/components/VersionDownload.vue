@@ -2,8 +2,8 @@
 import { computed, ref } from "vue";
 import {
   Archive,
-  Box,
   Package,
+  ChevronRight,
   Download,
   LoaderCircle,
   X,
@@ -14,12 +14,18 @@ import VersionCube from "./VersionCube.vue";
 import GlassSelect from "./GlassSelect.vue";
 import ContentSwitch from "./ContentSwitch.vue";
 import { listRevealStyle } from "../listMotion";
-import { versionCategories, versionCategory } from "../versionCatalog";
+import {
+  versionCategories,
+  versionCategory,
+  type VersionCategory,
+} from "../versionCatalog";
 import { t } from "../i18n";
 import type { Instance, VersionManifest } from "../types";
+import type { ResourceSelection } from "../resources";
 
 const props = defineProps<{
   section?: "game" | "modpacks" | "resources";
+  resources: readonly ResourceSelection[];
   target: Instance | null;
   instances: readonly Instance[];
   manifest: VersionManifest | null;
@@ -41,7 +47,7 @@ const props = defineProps<{
   picking: boolean;
   running: boolean;
 }>();
-defineEmits<{
+const emit = defineEmits<{
   "update:section": [value: "game" | "modpacks" | "resources"];
   "update:version": [value: string];
   "update:loader": [value: string];
@@ -49,6 +55,7 @@ defineEmits<{
   "update:name": [value: string];
   "update:icon": [value: number];
   importPack: [];
+  removeResource: [value: ResourceSelection];
   retryLoader: [];
   "update:location": [value: string];
   target: [id: string | null];
@@ -58,11 +65,11 @@ defineEmits<{
   close: [];
 }>();
 const destination = ref<InstanceType<typeof DownloadDestination>>();
-const sections = [
-  { id: "game", label: "游戏版本", icon: Box },
-  { id: "modpacks", label: "整合包", icon: Archive },
-  { id: "resources", label: "资源", icon: Package },
-] as const;
+const category = ref<VersionCategory>("release");
+function chooseCategory(value: VersionCategory) {
+  category.value = value;
+  emit("update:section", "game");
+}
 const loaderKinds = [
   { id: "vanilla", label: "原版" },
   { id: "fabric", label: "Fabric" },
@@ -132,19 +139,33 @@ const selectionColor = computed(() =>
         <X :size="16" />
       </button>
     </header>
-    <nav class="addition-sections" :aria-label="t('添加内容')">
+    <nav class="catalog-filter" :aria-label="t('版本分类')">
       <button
-        v-for="(item, index) in sections"
+        v-for="(item, index) in versionCategories"
         :key="item.id"
         type="button"
         class="list-reveal-item"
-        :style="listRevealStyle(index)"
-        :class="{ active: (section || 'game') === item.id }"
-        :aria-pressed="(section || 'game') === item.id"
+        :style="{ '--category-accent': item.color, ...listRevealStyle(index) }"
+        :class="{
+          active: (!section || section === 'game') && category === item.id,
+        }"
+        :aria-pressed="(!section || section === 'game') && category === item.id"
         :disabled="disabled"
-        @click="$emit('update:section', item.id)"
+        @click="chooseCategory(item.id)"
       >
-        <component :is="item.icon" :size="16" />{{ t(item.label) }}
+        <VersionCube :variant="item.id" /><span>{{ t(item.label) }}</span>
+      </button>
+      <span class="catalog-divider" aria-hidden="true" />
+      <button
+        type="button"
+        class="catalog-modpacks list-reveal-item"
+        :style="{ '--category-accent': 'var(--blue)', ...listRevealStyle(4) }"
+        :class="{ active: section === 'modpacks' }"
+        :aria-pressed="section === 'modpacks'"
+        :disabled="disabled"
+        @click="$emit('update:section', 'modpacks')"
+      >
+        <Archive :size="20" /><span>{{ t("整合包") }}</span>
       </button>
     </nav>
     <ContentSwitch :content-key="section || 'game'">
@@ -155,6 +176,7 @@ const selectionColor = computed(() =>
       >
         <div class="version-download-body">
           <VersionBrowser
+            :category="category"
             :model-value="version"
             :manifest="manifest"
             :loading="versionsLoading"
@@ -222,6 +244,39 @@ const selectionColor = computed(() =>
                 </div>
               </Transition>
             </div>
+            <button
+              type="button"
+              class="download-resources list-reveal-item"
+              :style="listRevealStyle(3)"
+              :disabled="
+                disabled ||
+                !selected ||
+                loaderLoading ||
+                (loader !== 'vanilla' && !loaderVersion)
+              "
+              @click="$emit('update:section', 'resources')"
+            >
+              <Package :size="17" /><span>{{ t("资源") }}</span
+              ><small v-if="resources.length">{{ resources.length }}</small
+              ><ChevronRight :size="15" />
+            </button>
+            <TransitionGroup
+              name="resource-choice"
+              tag="div"
+              class="download-resource-choices"
+            >
+              <button
+                v-for="item in resources"
+                :key="`${item.platform}/${item.project}`"
+                type="button"
+                :disabled="disabled"
+                :aria-label="`${t('移除')} ${item.name}`"
+                @click="$emit('removeResource', item)"
+              >
+                <span>{{ item.name }}</span
+                ><X :size="12" />
+              </button>
+            </TransitionGroup>
             <span v-if="running" class="download-detail" role="status">{{
               t("请先停止此实例的游戏")
             }}</span>
@@ -266,32 +321,122 @@ const selectionColor = computed(() =>
   width: min(840px, calc(100vw - 64px));
   height: min(590px, calc(100dvh - 64px));
 }
-.addition-sections {
-  display: flex;
-  justify-content: space-evenly;
-  gap: 16px;
-  padding: 8px 24px 12px;
+.catalog-filter {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr)) 1px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  padding: 8px 24px 10px;
   flex-shrink: 0;
 }
-.addition-sections button {
+.catalog-filter button {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 9px;
-  padding: 10px 20px;
+  gap: 8px;
+  min-height: 44px;
+  min-width: 0;
+  padding: 8px;
   border: 0;
   background: transparent;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 12px;
+  white-space: nowrap;
   cursor: pointer;
+  transition:
+    background-color 200ms var(--motion-ease),
+    box-shadow 200ms var(--motion-ease),
+    color 180ms var(--motion-ease),
+    text-shadow 180ms var(--motion-ease);
 }
-.addition-sections button.active,
-.addition-sections button:hover {
+.catalog-filter button:hover:not(:disabled),
+.catalog-filter button:focus-visible {
+  color: var(--category-accent);
+  background: color-mix(in srgb, var(--category-accent) 8%, transparent);
+  outline: none;
+}
+.catalog-filter button.active {
+  color: var(--category-accent);
+  background: color-mix(in srgb, var(--category-accent) 18%, transparent);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--category-accent) 25%, transparent),
+    0 0 16px color-mix(in srgb, var(--category-accent) 8%, transparent);
+  text-shadow: 0 0 12px
+    color-mix(in srgb, var(--category-accent) 24%, transparent);
+}
+.catalog-filter button:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--category-accent);
+}
+.catalog-divider {
+  width: 1px;
+  height: 22px;
+  background: var(--line);
+}
+.download-resources {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  margin-top: 24px;
+  padding: 12px 6px;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: left;
+  transition:
+    color 180ms var(--motion-ease),
+    text-shadow 180ms var(--motion-ease);
+}
+.download-resources > span {
+  flex: 1;
+}
+.download-resources:hover:not(:disabled),
+.download-resources:focus-visible {
   color: var(--blue);
   text-shadow: 0 0 12px var(--glow);
 }
-.addition-sections button.active svg {
-  filter: drop-shadow(0 0 5px var(--glow));
+.download-resource-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.download-resource-choices button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 5px 6px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  color: var(--muted);
+  font-size: 11px;
+}
+.download-resource-choices span {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.download-resource-choices svg {
+  flex-shrink: 0;
+}
+.download-resource-choices button:hover {
+  color: var(--blue);
+}
+.resource-choice-enter-active,
+.resource-choice-leave-active,
+.resource-choice-move {
+  transition:
+    opacity 160ms var(--motion-ease),
+    transform 220ms var(--motion-ease);
+}
+.resource-choice-enter-from,
+.resource-choice-leave-to {
+  opacity: 0;
+  transform: translateY(6px);
 }
 .addition-content {
   display: flex;
@@ -441,6 +586,15 @@ const selectionColor = computed(() =>
   pointer-events: none;
 }
 @media (max-width: 720px) {
+  .catalog-filter {
+    padding-inline: 20px;
+    gap: 4px;
+  }
+  .catalog-filter button {
+    flex-direction: column;
+    gap: 4px;
+    padding: 8px 4px;
+  }
   .version-download-body {
     grid-template-columns: minmax(0, 1fr) 230px;
   }
@@ -452,6 +606,8 @@ const selectionColor = computed(() =>
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  .catalog-filter button,
+  .download-resources,
   .loader-options-enter-active,
   .loader-options-leave-active {
     transition: none;

@@ -4,12 +4,12 @@ use crate::{
     model::{Event, EventSink},
     storage,
 };
-use anyhow::Result;
+use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
     io::{Read, Seek, SeekFrom, Write},
-    path::Path,
+    path::{Component, Path, PathBuf},
     time::SystemTime,
 };
 
@@ -27,6 +27,16 @@ pub struct CrashReport {
     pub exit: String,
     pub sources: Vec<String>,
     pub findings: Vec<Finding>,
+    #[serde(default)]
+    pub file: Option<ReportFile>,
+    #[serde(default)]
+    pub repairable: bool,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReportFile {
+    /// Relative to the effective game directory, or the launcher's log directory.
+    pub path: String,
+    pub launcher_log: bool,
 }
 struct Rule {
     code: &'static str,
@@ -35,6 +45,33 @@ struct Rule {
     patterns: &'static [&'static str],
 }
 const RULES: &[Rule] = &[
+    Rule {
+        code: "launch_java",
+        title: "Java 无法用于本次启动",
+        advice: "选择兼容的 Java，或改为自动匹配后重试。",
+        patterns: &[
+            "所选 java 不兼容",
+            "无法执行 java",
+            "java 无法运行",
+            "java 检测超时",
+            "无法识别 java 版本",
+            "无法启动 java 进程",
+            "未找到兼容的 java",
+            "未找到兼容的 jdk",
+            "请手动指定兼容版本",
+            "java 未报告运行时架构",
+        ],
+    },
+    Rule {
+        code: "files",
+        title: "启动文件缺失或损坏",
+        advice: "校验并修复游戏文件；外部安装的加载器若无法修复，请使用原安装方式补全文件。",
+        patterns: &[
+            "启动所需文件缺失",
+            "缺少或无法读取版本配置",
+            "invalid or corrupt jarfile",
+        ],
+    },
     Rule {
         code: "module_conflict",
         title: "Java 模块冲突",
@@ -273,6 +310,7 @@ pub(crate) fn collect(
     }
     let mut text = String::new();
     let mut sources = Vec::new();
+    let mut file = None;
     for path in paths {
         if path != log
             && !fs::metadata(&path)
@@ -290,6 +328,18 @@ pub(crate) fn collect(
                     .to_string_lossy()
                     .into_owned(),
             );
+            // Later entries are more specific: launcher output, latest.log,
+            // JVM fatal error, then the game's crash report.
+            if let Some(relative) = if path == log {
+                path.file_name().map(Path::new)
+            } else {
+                path.strip_prefix(working).ok()
+            } {
+                file = Some(ReportFile {
+                    path: relative.to_string_lossy().into_owned(),
+                    launcher_log: path == log,
+                });
+            }
         }
     }
     for secret in secrets.iter().filter(|s| !s.is_empty()) {
@@ -301,9 +351,83 @@ pub(crate) fn collect(
         exit,
         sources,
         findings: analyze(&text),
+        file,
+        repairable: false,
     }
 }
 impl Launcher {
+    pub(crate) fn can_repair_version(&self, id: &str, version: &str) -> bool {
+        let Ok(instance) = self.instance(id) else {
+            return false;
+        };
+        let Some(selected) = instance.versions.iter().find(|v| v.id == version) else {
+            return false;
+        };
+        let Ok(game) = self.available_game_dir(id) else {
+            return false;
+        };
+        selected.modpack
+            || crate::loader::has_record(&game, version)
+            || selected.loader.as_ref().is_some_and(|l| l.kind == "fabric")
+            || crate::minecraft::check_local_install(&game, version).is_ok()
+    }
+
+    pub(crate) fn report_launch_failure(
+        &self,
+        id: &str,
+        error: &str,
+        sink: &EventSink,
+    ) -> Result<()> {
+        let instance = self.instance(id)?;
+        let version = instance.selected_version.clone().unwrap_or_default();
+        let directory = self.instance_dir(id)?.join("launcher-logs");
+        fs::create_dir_all(&directory)?;
+        let name = format!("{}-{}.log", storage::now(), uuid::Uuid::new_v4());
+        let log = directory.join(&name);
+        let message = diagnostics::redact(error);
+        fs::write(&log, format!("[ERROR] {message}\n"))?;
+        let report = CrashReport {
+            repairable: self.can_repair_version(id, &version),
+            version,
+            time: storage::now(),
+            exit: message.clone(),
+            sources: vec![name.clone()],
+            findings: analyze(&message),
+            file: Some(ReportFile {
+                path: name,
+                launcher_log: true,
+            }),
+        };
+        // A failed disk write must not prevent the live recovery controls.
+        let saved = storage::write_json(&directory.join("last-crash.json"), &report);
+        let logged = write_to_log(&report, &log, id, sink);
+        sink(Event {
+            instance_id: Some(id.into()),
+            crash: Some(report),
+            ..Event::new("launch_failed", message)
+        });
+        saved?;
+        logged?;
+        Ok(())
+    }
+
+    pub fn crash_report_path(&self, id: &str, version: &str, time: u64) -> Result<PathBuf> {
+        let report = self.crash_report(id)?.context("未找到本次启动的日志文件")?;
+        ensure!(
+            report.version == version && report.time == time,
+            "此日志已被新的启动记录替换，请重新打开日志"
+        );
+        let file = report.file.context("未找到本次启动的日志文件")?;
+        let base = if file.launcher_log {
+            self.instance_dir(id)?.join("launcher-logs")
+        } else {
+            let instance = self.instance(id)?;
+            let game = self.available_game_dir(id)?;
+            crate::version::instance_working_directory(&game, &instance, version)?
+        };
+        report_path(&base, &file.path)
+    }
+
     pub fn crash_report(&self, id: &str) -> Result<Option<CrashReport>> {
         self.instance(id)?;
         let path = self.instance_dir(id)?.join("launcher-logs/last-crash.json");
@@ -313,9 +437,170 @@ impl Launcher {
         Ok(Some(serde_json::from_str(&tail(&path)?)?))
     }
 }
+
+fn report_path(base: &Path, relative: &str) -> Result<PathBuf> {
+    let relative = Path::new(relative);
+    ensure!(
+        !relative.as_os_str().is_empty()
+            && relative
+                .components()
+                .all(|c| matches!(c, Component::Normal(_)))
+            && relative
+                .extension()
+                .is_some_and(|e| e == "log" || e == "txt"),
+        "无效的日志文件路径"
+    );
+    let base = base.canonicalize()?;
+    let path = base.join(relative).canonicalize()?;
+    ensure!(
+        path.starts_with(&base) && path.is_file(),
+        "日志文件不在此实例目录内"
+    );
+    Ok(path)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn failed_launch_has_scoped_recovery_and_saved_log_but_cancellation_does_not() {
+        let temp = tempfile::tempdir().unwrap();
+        let launcher = Launcher::open(Some(temp.path().join("launcher"))).unwrap();
+        let instance = launcher.create_instance("Broken", "1.21.1").unwrap();
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events = captured.clone();
+        let sink: EventSink = std::sync::Arc::new(move |e| events.lock().unwrap().push(e));
+        // No version JSON: this must fail before Java or network work begins.
+        launcher
+            .launch(
+                &instance.id,
+                &tokio_util::sync::CancellationToken::new(),
+                sink.clone(),
+            )
+            .await
+            .unwrap_err();
+        let report = launcher.crash_report(&instance.id).unwrap().unwrap();
+        assert_eq!(report.version, "1.21.1");
+        assert_eq!(report.findings[0].code, "files");
+        assert!(report.repairable);
+        let path = launcher
+            .crash_report_path(&instance.id, "1.21.1", report.time)
+            .unwrap();
+        assert!(
+            fs::read_to_string(path)
+                .unwrap()
+                .contains("缺少或无法读取版本配置")
+        );
+        assert!(
+            launcher
+                .crash_report_path(&instance.id, "another-version", report.time)
+                .is_err()
+        );
+        let event = captured.lock().unwrap().last().unwrap().clone();
+        assert_eq!(event.kind, "launch_failed");
+        assert_eq!(event.instance_id.as_deref(), Some(instance.id.as_str()));
+        assert!(event.crash.is_some());
+        captured.lock().unwrap().clear();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        cancel.cancel();
+        launcher
+            .launch(&instance.id, &cancel, sink)
+            .await
+            .unwrap_err();
+        assert!(
+            !captured
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| e.kind == "launch_failed")
+        );
+        assert!(launcher.crash_report(&instance.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn report_files_cannot_escape_their_game_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().join("game");
+        fs::create_dir_all(base.join("crash-reports")).unwrap();
+        fs::write(base.join("crash-reports/latest.txt"), "report").unwrap();
+        fs::write(temp.path().join("outside.log"), "other").unwrap();
+        assert!(report_path(&base, "crash-reports/latest.txt").is_ok());
+        for path in [
+            "../outside.log",
+            "/outside.log",
+            "crash-reports",
+            "game.exe",
+        ] {
+            assert!(report_path(&base, path).is_err(), "{path}");
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(temp.path().join("outside.log"), base.join("link.log"))
+                .unwrap();
+            assert!(report_path(&base, "link.log").is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_repairs_the_requested_version_without_changing_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let launcher = Launcher::open(Some(temp.path().join("launcher"))).unwrap();
+        let instance = launcher.create_instance("Game", "1.21.1").unwrap();
+        launcher.add_version(&instance.id, "RLCraft").unwrap();
+        launcher.select_version(&instance.id, "1.21.1").unwrap();
+        let game = launcher.game_dir(&instance.id).unwrap();
+        storage::write_json(
+            &game.join("versions/RLCraft/RLCraft.json"),
+            &serde_json::json!({
+                "id": "RLCraft", "mainClass": "net.minecraft.launchwrapper.Launch"
+            }),
+        )
+        .unwrap();
+        let sink: EventSink = std::sync::Arc::new(|_| {});
+        let error = launcher
+            .repair_version(
+                &instance.id,
+                "RLCraft",
+                &tokio_util::sync::CancellationToken::new(),
+                &sink,
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("自定义加载器"), "{error:#}");
+        assert_eq!(
+            launcher
+                .instance(&instance.id)
+                .unwrap()
+                .selected_version
+                .as_deref(),
+            Some("1.21.1")
+        );
+        assert!(!launcher.can_repair_version(&instance.id, "RLCraft"));
+        assert!(
+            launcher
+                .repair_version(
+                    &instance.id,
+                    "removed",
+                    &tokio_util::sync::CancellationToken::new(),
+                    &sink
+                )
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("已被移除")
+        );
+    }
+
+    #[test]
+    fn java_preflight_errors_have_actionable_evidence_without_misclassifying_network_errors() {
+        for message in [
+            "所选 Java 不兼容：需要 Java 17",
+            "无法执行 Java: No such file",
+            "未找到兼容的 JDK 17，请指定 Java 路径或允许自动下载。",
+        ] {
+            assert_eq!(analyze(message)[0].code, "launch_java");
+        }
+        assert!(analyze("下载 Java 失败: network timeout").is_empty());
+    }
     #[test]
     fn module_conflicts_and_unclassified_exceptions_keep_the_real_error() {
         let message = "Exception in thread \"main\" java.lang.module.ResolutionException: Modules _1._20._1 and minecraft export package net.minecraft.server to module sdm_economy";
@@ -355,6 +640,7 @@ mod tests {
         assert!(report.sources.contains(&"latest.log".to_owned()));
         assert_eq!(report.findings.len(), 1);
         assert_eq!(report.findings[0].code, "module_conflict");
+        assert_eq!(report.file.as_ref().unwrap().path, "logs/latest.log");
         let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let saved = events.clone();
         let sink: EventSink = std::sync::Arc::new(move |event| saved.lock().unwrap().push(event));

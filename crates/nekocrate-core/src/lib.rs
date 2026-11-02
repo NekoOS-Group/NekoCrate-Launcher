@@ -254,6 +254,11 @@ impl Launcher {
                     versions.push(found);
                 }
             }
+            for entry in &mut versions {
+                if resources::has_selection(&game, &entry.id) {
+                    entry.installed = false;
+                }
+            }
             if serde_json::to_value(&versions)? != serde_json::to_value(&instance.versions)? {
                 updates.push((instance.id, versions));
             }
@@ -447,6 +452,8 @@ impl Launcher {
         })
     }
     fn set_installed(&self, id: &str, version: &str, installed: bool) -> Result<()> {
+        let installed =
+            installed && !resources::has_selection(&self.available_game_dir(id)?, version);
         if installed {
             self.save_pack_progress(id, version, 100.0)?;
         }
@@ -735,6 +742,11 @@ impl Launcher {
                 }
             }
         }
+        for entry in &mut versions {
+            if resources::has_selection(source, &entry.id) {
+                entry.installed = false;
+            }
+        }
         versions.sort_by(|a, b| a.id.cmp(&b.id));
         if !version.is_empty() && !versions.iter().any(|v| v.id == version) {
             storage::safe_version(version)?;
@@ -1012,7 +1024,7 @@ impl Launcher {
         cancel: &CancellationToken,
         sink: &EventSink,
     ) -> Result<bool> {
-        self.install_with_verification(id, cancel, sink, false)
+        self.install_with_verification(id, cancel, sink, false, None)
             .await
     }
     pub async fn repair(
@@ -1021,7 +1033,18 @@ impl Launcher {
         cancel: &CancellationToken,
         sink: &EventSink,
     ) -> Result<bool> {
-        self.install_with_verification(id, cancel, sink, true).await
+        self.install_with_verification(id, cancel, sink, true, None)
+            .await
+    }
+    pub async fn repair_version(
+        &self,
+        id: &str,
+        version: &str,
+        cancel: &CancellationToken,
+        sink: &EventSink,
+    ) -> Result<bool> {
+        self.install_with_verification(id, cancel, sink, true, Some(version))
+            .await
     }
     async fn install_with_verification(
         &self,
@@ -1029,13 +1052,66 @@ impl Launcher {
         cancel: &CancellationToken,
         sink: &EventSink,
         full_verification: bool,
+        requested_version: Option<&str>,
     ) -> Result<bool> {
-        if let Some(selected) = self.instance(id)?.selected().filter(|v| v.modpack) {
+        let instance = self.instance(id)?;
+        let selected = requested_version
+            .or(instance.selected_version.as_deref())
+            .context("请先选择游戏版本")?;
+        let pending = resources::has_selection(&self.available_game_dir(id)?, selected);
+        let game_sink: EventSink = if pending {
+            Event::scoped(sink, id, None)(Event::new("resource_selection", "预选资源"));
+            let sink = sink.clone();
+            std::sync::Arc::new(move |event| {
+                if event.kind != "workflow" || event.step.as_deref() != Some("finalize") {
+                    sink(event);
+                }
+            })
+        } else {
+            sink.clone()
+        };
+        if !self
+            .install_game_with_verification(
+                id,
+                cancel,
+                &game_sink,
+                full_verification,
+                Some(selected),
+            )
+            .await?
+        {
+            return Ok(false);
+        }
+        self.install_selected_resources(id, selected, cancel, sink)
+            .await?;
+        Ok(true)
+    }
+    async fn install_game_with_verification(
+        &self,
+        id: &str,
+        cancel: &CancellationToken,
+        sink: &EventSink,
+        full_verification: bool,
+        requested_version: Option<&str>,
+    ) -> Result<bool> {
+        // Recovery targets the failed version without changing the user's selection.
+        let target = || -> Result<Instance> {
+            let mut instance = self.instance(id)?;
+            if let Some(version) = requested_version {
+                anyhow::ensure!(
+                    instance.versions.iter().any(|v| v.id == version),
+                    "此游戏版本已被移除"
+                );
+                instance.selected_version = Some(version.into());
+            }
+            Ok(instance)
+        };
+        if let Some(selected) = target()?.selected().filter(|v| v.modpack) {
             return self
                 .install_modpack(id, &selected.id, cancel, sink, full_verification)
                 .await;
         }
-        if let Some(selected) = self.instance(id)?.selected() {
+        if let Some(selected) = target()?.selected() {
             let game = self.available_game_dir(id)?;
             if loader::has_record(&game, &selected.id) {
                 return self
@@ -1048,7 +1124,7 @@ impl Launcher {
         let _directory_guard = self.idle(id)?;
         let sink = Event::scoped(sink, id, None);
         sink(Event::workflow("metadata", "解析游戏版本"));
-        let instance = self.instance(id)?;
+        let instance = target()?;
         let selected = instance
             .selected()
             .context("请先为此实例添加并选择一个版本")?;
@@ -1346,13 +1422,47 @@ impl Launcher {
         cancel: &CancellationToken,
         sink: EventSink,
     ) -> Result<u32> {
+        let result = Box::pin(self.launch_inner(id, cancel, sink.clone())).await;
+        if let Err(error) = &result
+            && !cancel.is_cancelled()
+        {
+            let launcher = self.clone();
+            let id = id.to_owned();
+            let message = format!("{error:#}");
+            let _ = tokio::task::spawn_blocking(move || {
+                if let Err(error) = launcher.report_launch_failure(&id, &message, &sink) {
+                    let _ = diagnostics::record_error(launcher.root(), "launch_diagnosis", &error);
+                }
+            })
+            .await;
+        }
+        result
+    }
+    async fn launch_inner(
+        &self,
+        id: &str,
+        cancel: &CancellationToken,
+        sink: EventSink,
+    ) -> Result<u32> {
         let _guard = self.0.operation.lock().await;
         let _directory_guard = self.idle(id)?;
         let sink = Event::scoped(&sink, id, None);
         sink(Event::workflow("prepare", "检查启动配置"));
+        // Keep historical log files, but do not offer recovery for an older run
+        // after a new attempt has begun (including after restarting the launcher).
+        let last_report = self.instance_dir(id)?.join("launcher-logs/last-crash.json");
+        if let Err(error) = fs::remove_file(last_report)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            let _ = diagnostics::record_error(self.root(), "clear_crash_diagnosis", &error.into());
+        }
         let instance = self.instance(id)?;
         let game = self.available_game_dir(id)?;
         let selected = instance.selected().context("请先选择游戏版本")?;
+        anyhow::ensure!(
+            !resources::has_selection(&game, &selected.id),
+            "预选资源尚未安装完成，请继续下载"
+        );
         instance.launch.validate()?;
         let working_directory =
             version::instance_working_directory(&game, &instance, &selected.id)?;
@@ -1365,12 +1475,16 @@ impl Launcher {
         version::check_launch_files(self.root(), &game, &resolved)?;
         // Assess Java against the original entry point/libraries: the color
         // overlay must not relax LaunchWrapper's existing Java 8 restriction.
-        let java_requirement = java::JavaRequirement::for_working_directory(
+        let mut java_requirement = java::JavaRequirement::for_working_directory(
             &resolved.version,
             &working_directory,
             instance.java_path.as_deref(),
         )
         .await?;
+        if let Some(history) = &mut java_requirement.history {
+            history.include_options(&instance.launch)?;
+        }
+        let java_history = java_requirement.history.clone();
         let compatibility_args = runtime_compatibility::prepare_legacy_colors(
             &game,
             &working_directory,
@@ -1402,6 +1516,9 @@ impl Launcher {
         )
         .await?;
         sink(Event::workflow("account", "准备游戏身份"));
+        let java_receipt = java_history
+            .as_ref()
+            .and_then(|history| history.receipt(&java));
         downloader.finish_installation(&sink).await;
         let session = tokio::select! {_=cancel.cancelled()=>bail!("启动已取消"),r=self.launch_session(&sink)=>r?};
         sink(Event::workflow("start", "启动游戏"));
@@ -1515,6 +1632,14 @@ impl Launcher {
             let unexpected = !stopped
                 && !cancel.is_cancelled()
                 && !status.as_ref().is_ok_and(|status| status.success());
+            if !stopped
+                && !cancel.is_cancelled()
+                && status.as_ref().is_ok_and(|status| status.success())
+                && let (Some(history), Some(receipt)) = (&java_history, &java_receipt)
+                && let Err(error) = history.save(launcher.root(), receipt)
+            {
+                let _ = diagnostics::record_error(launcher.root(), "java_launch_history", &error);
+            }
             let message = match status {
                 _ if stopped => "游戏已停止".into(),
                 Ok(s) if s.success() => "游戏已正常退出".into(),
@@ -1529,7 +1654,7 @@ impl Launcher {
                 let log_sink = sink.clone();
                 let log_id = id.clone();
                 tokio::task::spawn_blocking(move || {
-                    let report = crash::collect(
+                    let mut report = crash::collect(
                         &working_directory,
                         &log_path,
                         launched_at,
@@ -1538,6 +1663,7 @@ impl Launcher {
                         exit,
                         &secrets,
                     );
+                    report.repairable = root.can_repair_version(&log_id, &report.version);
                     if let Err(error) =
                         storage::write_json(&log_dir.join("last-crash.json"), &report)
                     {
@@ -2385,15 +2511,18 @@ mod tests {
         let java = temp.path().join("java fixture");
         fs::write(
             &java,
-            r#"#!/bin/sh
+            format!(
+                r#"#!/bin/sh
 if [ "$2" = "-version" ]; then
-  printf '%s\n' 'java version "1.8.0_fixture"' >&2
+  printf '%s\n' 'java version "1.8.0_504"' 'os.arch = {}' >&2
   exit 0
 fi
 printf '%s\n' "$@" > launch-arguments.txt
 printf '%s\n' "$NEKO_LAUNCH_TEST" > launch-environment.txt
 printf '%s\n' 'offline session 0 started'
 "#,
+                crate::minecraft::arch_name()
+            ),
         )
         .unwrap();
         fs::set_permissions(&java, fs::Permissions::from_mode(0o700)).unwrap();

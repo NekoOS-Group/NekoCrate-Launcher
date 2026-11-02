@@ -793,7 +793,14 @@ async fn offline_install_resumes_after_overrides_and_keeps_user_configuration_on
     let instance = launcher.create_instance("Offline", "").unwrap();
     let game = instance.game_dir(&root);
     let java = temp.path().join("java");
-    fs::write(&java, "#!/bin/sh\necho 'java version \"17.0.1\"' >&2\n").unwrap();
+    fs::write(
+        &java,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' 'java version \"17.0.1\"' 'os.arch = {}' >&2\n",
+            crate::minecraft::arch_name()
+        ),
+    )
+    .unwrap();
     fs::set_permissions(&java, fs::Permissions::from_mode(0o755)).unwrap();
     launcher
         .update_instance_memory(

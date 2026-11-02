@@ -49,6 +49,11 @@ enum Request {
     CrashReport {
         id: String,
     },
+    OpenCrashReport {
+        id: String,
+        version: String,
+        time: u64,
+    },
     SetModEnabled {
         id: String,
         version: String,
@@ -92,6 +97,22 @@ enum Request {
     ResourceTarget {
         id: String,
         version: String,
+    },
+    SearchResourceCatalog {
+        scope: nekocrate_core::resources::ResourceCatalog,
+        query: String,
+        offset: usize,
+    },
+    CatalogResourceVersions {
+        scope: nekocrate_core::resources::ResourceCatalog,
+        project: String,
+    },
+    QueueVersionResources {
+        id: String,
+        version: String,
+        minecraft: String,
+        loader: Option<nekocrate_core::model::ModLoader>,
+        resources: Vec<nekocrate_core::resources::ResourceSelection>,
     },
     SearchResources {
         scope: nekocrate_core::resources::ResourceScope,
@@ -333,6 +354,7 @@ enum Request {
         id: String,
         #[serde(default)]
         repair: bool,
+        version: Option<String>,
     },
     Launch {
         id: String,
@@ -448,6 +470,12 @@ fn dispatch<'a>(
             Request::ReadModConfig{id,version,file,config}=>{let launcher=launcher.clone(); json!(tauri::async_runtime::spawn_blocking(move || launcher.read_mod_config(&id,&version,&file,&config)).await??)},
             Request::SaveModConfig{id,version,file,config,revision,text}=>{let launcher=launcher.clone(); json!(tauri::async_runtime::spawn_blocking(move || launcher.save_mod_config(&id,&version,&file,&config,&revision,&text)).await??)},
             Request::CrashReport{id}=>{let launcher=launcher.clone(); json!(tauri::async_runtime::spawn_blocking(move || launcher.crash_report(&id)).await??)},
+            Request::OpenCrashReport{id,version,time}=>{
+                let launcher=launcher.clone();
+                let path=tauri::async_runtime::spawn_blocking(move || launcher.crash_report_path(&id,&version,time)).await??;
+                app.opener().open_path(path.to_string_lossy(),None::<&str>)?;
+                json!(true)
+            },
             Request::RetryDownloadFile{file}=>{
                 let (cancel,_guard)=state.job().await?;
                 let entry=state.download_retries.get(&file)?;
@@ -481,6 +509,13 @@ fn dispatch<'a>(
                 let receiver=guard.enable_pause();
                 let operation=launcher.download_modpack(platform,&project,&version,&cancel,&sink);
                 json!(pausable::run(operation,&cancel,receiver).await?)
+            },
+            Request::SearchResourceCatalog{scope,query,offset}=>json!(launcher.search_resource_catalog(&scope,&query,offset,&CancellationToken::new()).await?),
+            Request::CatalogResourceVersions{scope,project}=>json!(launcher.catalog_resource_versions(&scope,&project,&CancellationToken::new()).await?),
+            Request::QueueVersionResources{id,version,minecraft,loader,resources}=>{
+                let launcher=launcher.clone();
+                tauri::async_runtime::spawn_blocking(move || launcher.queue_version_resources(&id,&version,&minecraft,loader,resources)).await??;
+                json!(true)
             },
             Request::SearchResources{scope,query,offset}=>json!(launcher.search_resources(&scope,&query,offset,&CancellationToken::new()).await?),
             Request::ResourceVersions{scope,project}=>json!(launcher.resource_versions(&scope,&project,&CancellationToken::new()).await?),
@@ -672,11 +707,12 @@ fn dispatch<'a>(
                 let launcher = launcher.clone();
                 json!(tauri::async_runtime::spawn_blocking(move || launcher.version_storage(&id,&version,&relative)).await??)
             },
-            Request::Install{id,repair}=>{
+            Request::Install{id,repair,version}=>{
                 let (cancel,_guard)=state.job().await?;
                 let receiver=_guard.enable_pause();
                 let operation = async {
-                    if repair { launcher.repair(&id,&cancel,&sink).await }
+                    if repair && let Some(version) = version { launcher.repair_version(&id,&version,&cancel,&sink).await }
+                    else if repair { launcher.repair(&id,&cancel,&sink).await }
                     else { launcher.install(&id,&cancel,&sink).await }
                 };
                 let operation = nekocrate_core::loader::with_pause(receiver.clone(), operation);

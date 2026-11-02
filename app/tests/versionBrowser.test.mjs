@@ -126,6 +126,7 @@ test("version browser reaches the entire catalog with bounded rows, keyboard nav
   versions.push({ id: "26.2-snapshot-1", type: "snapshot", url: "", sha1: "" });
   const props = shallowReactive({
     modelValue: "release-0",
+    category: "release",
     manifest: { latest: { release: "release-0" }, versions },
     loading: false,
     disabled: false,
@@ -172,17 +173,13 @@ test("version browser reaches the entire catalog with bounded rows, keyboard nav
   assert.equal(rows().length, 1);
   assert.equal(list.scrollTop, 0);
   search.props["onUpdate:modelValue"]("");
-  find(
-    (n) => n.tag === "button" && n.props["aria-label"] === "愚人节版",
-  ).props.onClick();
+  props.category = "april";
   await settle();
   assert.equal(rows().length, 1);
   rows()[0].props.onClick();
   await settle();
   assert.equal(props.modelValue, "26w14a");
-  find(
-    (n) => n.tag === "button" && n.props["aria-label"] === "快照版",
-  ).props.onClick();
+  props.category = "snapshot";
   await settle();
   assert.equal(rows().length, 1);
   assert.equal(rows()[0].props.title, "26.2-snapshot-1");

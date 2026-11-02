@@ -1,14 +1,14 @@
+mod discovery;
+mod history;
+
 use crate::{
     download::{Downloader, FileSpec, check_cancel},
     model::{Event, EventSink},
     storage,
 };
 use anyhow::{Context, Result, bail};
-use serde::Serialize;
-use std::{
-    collections::HashSet,
-    path::{Path, PathBuf},
-};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 
 pub(crate) fn background_command(path: &Path) -> tokio::process::Command {
@@ -114,7 +114,7 @@ fn decode_windows_output(bytes: &[u8], code_page: u32) -> std::borrow::Cow<'_, s
     }
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct JavaInfo {
     pub path: String,
     pub major: u32,
@@ -128,15 +128,47 @@ pub struct JavaRequirement {
     pub jdk: bool,
     pub compatibility: Option<crate::java_compatibility::Compatibility>,
     pub bytecode_ceiling: Option<(u32, String)>,
+    pub(crate) working_directory: Option<PathBuf>,
+    pub(crate) history: Option<history::LaunchContext>,
 }
 impl JavaRequirement {
     fn matches(&self, java: &JavaInfo) -> bool {
-        self.allowed_majors().contains(&java.major)
-            && java.arch == self.arch
-            && (!self.jdk || java.jdk)
-            && !["-ea", "-internal"]
-                .iter()
-                .any(|tag| java.version.contains(tag))
+        self.rejection(java).is_none()
+    }
+
+    fn rejection(&self, java: &JavaInfo) -> Option<String> {
+        if java.arch != self.arch {
+            return Some(format!(
+                "原生库需要 {}，候选架构是 {}",
+                self.arch, java.arch
+            ));
+        }
+        if self.jdk && !java.jdk {
+            return Some("此版本的具体组件需要完整 JDK，候选为 JRE".into());
+        }
+        if let Some((maximum, component)) = &self.bytecode_ceiling
+            && java.major > *maximum
+        {
+            return Some(format!("{component} 最高 Java {maximum}"));
+        }
+        if let Some(compatibility) = &self.compatibility {
+            if let Some(reason) = compatibility.rejection(java.major, &java.version) {
+                return Some(reason);
+            }
+        } else if java.major != self.major {
+            // Explicit runtime installation requests remain exact.
+            return Some(format!(
+                "要求 Java {}，候选为 Java {}",
+                self.major, java.major
+            ));
+        }
+        if ["-ea", "-internal"]
+            .iter()
+            .any(|tag| java.version.to_ascii_lowercase().contains(tag))
+        {
+            return Some("预览或内部构建不参与稳定版自动匹配".into());
+        }
+        None
     }
 
     fn allowed_majors(&self) -> &[u32] {
@@ -146,16 +178,44 @@ impl JavaRequirement {
     }
 
     fn description(&self) -> String {
-        format!(
-            "{} {} ({})",
-            if self.jdk { "JDK" } else { "Java" },
-            self.allowed_majors()
+        let majors = self.allowed_majors();
+        let range = if majors.len() > 1 && majors.windows(2).all(|p| p[1] == p[0] + 1) {
+            if majors.last() == Some(&64) {
+                format!("{}+", majors[0])
+            } else {
+                format!("{}–{}", majors[0], majors.last().unwrap())
+            }
+        } else {
+            majors
                 .iter()
                 .map(u32::to_string)
                 .collect::<Vec<_>>()
-                .join(", "),
+                .join(", ")
+        };
+        format!(
+            "{} {range} ({})",
+            if self.jdk { "JDK" } else { "Java" },
             self.arch
         )
+    }
+
+    fn select<'a>(
+        &self,
+        available: &'a [JavaInfo],
+        previous: Option<&Path>,
+    ) -> Option<&'a JavaInfo> {
+        available
+            .iter()
+            .filter(|java| self.matches(java))
+            .max_by_key(|java| {
+                (
+                    previous.is_some_and(|path| path == Path::new(&java.path)),
+                    java.major == self.major,
+                    std::cmp::Reverse(java.major.abs_diff(self.major)),
+                    version_numbers(&java.version),
+                    java.jdk,
+                )
+            })
     }
 
     pub fn for_version(version: &crate::model::Version) -> Self {
@@ -179,12 +239,11 @@ impl JavaRequirement {
             } else {
                 crate::minecraft::arch_name()
             },
-            // Mod agents can inspect JDK classes and their local variable tables.
-            // Temurin's stripped jlink JRE fails e.g. Preloading Tricks 3.5.6.
-            jdk: version.java_version.as_ref().is_some_and(|j| j.major >= 9)
-                && version.main_class != "net.minecraft.client.main.Main",
+            jdk: false,
             compatibility: None,
             bytecode_ceiling: crate::java_compatibility::bytecode_ceiling(version),
+            working_directory: None,
+            history: None,
         }
     }
 
@@ -203,20 +262,25 @@ impl JavaRequirement {
     pub async fn for_working_directory(
         version: &crate::model::Version,
         working: &Path,
-        explicit: Option<&str>,
+        _explicit: Option<&str>,
     ) -> Result<Self> {
         let mut requirement = Self::for_version(version);
-        if explicit.is_some_and(|path| !path.is_empty()) {
-            return Ok(requirement);
-        }
         let version = version.clone();
         let working = working.to_owned();
-        requirement.compatibility = Some(
-            tokio::task::spawn_blocking(move || {
-                crate::java_compatibility::assess_in_directory(&version, &working)
-            })
-            .await??,
-        );
+        let assessed_version = version.clone();
+        let assessed_working = working.clone();
+        let compatibility = tokio::task::spawn_blocking(move || {
+            crate::java_compatibility::assess_in_directory(&assessed_version, &assessed_working)
+        })
+        .await??;
+        requirement.jdk = compatibility.requires_jdk;
+        requirement.history = Some(history::LaunchContext::new(
+            &version,
+            &working,
+            &compatibility,
+        ));
+        requirement.working_directory = Some(working);
+        requirement.compatibility = Some(compatibility);
         Ok(requirement)
     }
 }
@@ -232,41 +296,51 @@ pub async fn inspect(path: &Path) -> Result<JavaInfo> {
     if !output.status.success() {
         bail!("Java 无法运行：{}", path.display());
     }
-    let version = decode_output(&output.stderr).into_owned() + &decode_output(&output.stdout);
-    let re = regex::Regex::new(r#"version\s+"(\d+)(?:\.(\d+))?"#)?;
-    let captures = re
-        .captures(&version)
-        .context("无法识别 Java 版本，请选择标准 Java 可执行文件")?;
-    let first: u32 = captures[1].parse()?;
-    let major = if first == 1 {
-        captures
-            .get(2)
-            .context("Java 版本不完整")?
-            .as_str()
-            .parse()?
-    } else {
-        first
+    let output = decode_output(&output.stderr).into_owned() + &decode_output(&output.stdout);
+    parse_probe(path, &output)
+}
+
+fn parse_probe(path: &Path, output: &str) -> Result<JavaInfo> {
+    let property = |name: &str| {
+        output.lines().find_map(|line| {
+            let (key, value) = line.trim().split_once(" = ")?;
+            (key == name).then_some(value.trim())
+        })
     };
-    let arch = version
-        .lines()
-        .find_map(|line| line.trim().strip_prefix("os.arch = "))
-        .unwrap_or(crate::minecraft::arch_name());
-    let arch = match arch.trim() {
-        "amd64" | "x86_64" => "x86_64",
+    let fallback = regex::Regex::new(r#"(?:version\s+"|openjdk\s+)([0-9][^"\s]*)"#)?;
+    let captures = fallback.captures(output);
+    let version = property("java.version")
+        .or_else(|| captures.as_ref().and_then(|c| c.get(1)).map(|m| m.as_str()))
+        .context("无法识别 Java 版本")?;
+    let number =
+        crate::java_compatibility::java_version_number(version).context("Java 版本格式无效")?;
+    anyhow::ensure!((5..=64).contains(&number[0]), "Java 版本超出支持范围");
+    let version = property("java.runtime.version")
+        .filter(|runtime| {
+            !version.contains("-ea")
+                && !version.contains("-internal")
+                && crate::java_compatibility::java_version_number(runtime) == Some(number)
+        })
+        .unwrap_or(version);
+    let arch = match property("os.arch").context("Java 未报告运行时架构")? {
+        "amd64" | "x86_64" | "x64" => "x86_64",
         "arm64" | "aarch64" => "aarch64",
-        "x86" | "i386" | "i686" => "x86",
+        "x86" | "i386" | "i486" | "i586" | "i686" => "x86",
         other => other,
     };
+    // java.home resolves launch wrappers and aliases to the actual JVM image.
+    let executable = property("java.home")
+        .map(PathBuf::from)
+        .map(|home| home.join("bin").join(executable_name()))
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| path.to_owned());
+    let executable = executable.canonicalize().unwrap_or(executable);
     Ok(JavaInfo {
-        path: path.to_string_lossy().into(),
-        major,
-        version: version
-            .lines()
-            .find(|line| line.contains("version \""))
-            .unwrap_or("")
-            .into(),
+        path: executable.to_string_lossy().into_owned(),
+        major: number[0],
+        version: version.into(),
         arch: arch.into(),
-        jdk: runtime_is_jdk(path),
+        jdk: runtime_is_jdk(&executable),
     })
 }
 fn runtime_is_jdk(path: &Path) -> bool {
@@ -287,82 +361,20 @@ fn executable_name() -> &'static str {
     if cfg!(windows) { "java.exe" } else { "java" }
 }
 fn find_java(root: &Path) -> Option<PathBuf> {
-    walkdir::WalkDir::new(root)
-        .max_depth(6)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .find(|e| {
-            e.file_type().is_file()
-                && e.file_name() == executable_name()
-                && e.path().parent().is_some_and(|p| p.ends_with("bin"))
-        })
-        .map(|e| e.into_path())
+    discovery::scan(root, 10).into_iter().next()
 }
 pub async fn discover(root: &Path) -> Vec<JavaInfo> {
-    let mut candidates = crate::resource_manager::registered_java(root);
-    if let Ok(home) = std::env::var("JAVA_HOME") {
-        candidates.push(PathBuf::from(home).join("bin").join(executable_name()));
-    }
-    if let Some(paths) = std::env::var_os("PATH") {
-        for p in std::env::split_paths(&paths) {
-            let p = p.join(executable_name());
-            if p.is_file() {
-                candidates.push(p);
-            }
-        }
-    }
-    if let Ok(entries) = std::fs::read_dir(root.join("runtimes")) {
-        for e in entries.flatten() {
-            if e.file_name().to_string_lossy().starts_with(".install-") {
-                continue;
-            }
-            if let Some(p) = find_java(&e.path()) {
-                candidates.push(p);
-            }
-        }
-    }
-    #[cfg(target_os = "macos")]
-    {
-        let mut bases = vec![
-            PathBuf::from("/Library/Java/JavaVirtualMachines"),
-            PathBuf::from("/opt/homebrew/opt"),
-        ];
-        if let Some(home) = std::env::var_os("HOME") {
-            bases.push(PathBuf::from(home).join("Library/Java/JavaVirtualMachines"));
-        }
-        for base in bases {
-            if let Ok(entries) = std::fs::read_dir(&base) {
-                for entry in entries.flatten() {
-                    if (base.ends_with("JavaVirtualMachines")
-                        || entry.file_name().to_string_lossy().contains("jdk"))
-                        && let Some(path) = find_java(&entry.path())
-                    {
-                        candidates.push(path);
-                    }
-                }
-            }
-        }
-    }
-    inspect_candidates(candidates).await
+    discovery::discover(root, &[], false).await.runtimes
 }
 
-async fn inspect_candidates(mut candidates: Vec<PathBuf>) -> Vec<JavaInfo> {
-    candidates.sort();
-    candidates.dedup();
-    let mut seen = HashSet::new();
-    let mut found = vec![];
-    for path in candidates {
-        // Homebrew's bin/java, opt/java and opt/openjdk can all be the same JVM.
-        // Deduplicate before probing; keep the original stable alias for display/use.
-        let identity = path.canonicalize().unwrap_or_else(|_| path.clone());
-        if seen.insert(identity)
-            && let Ok(info) = inspect(&path).await
-        {
-            found.push(info);
-        }
-    }
-    found
+#[cfg(test)]
+async fn inspect_candidates(candidates: Vec<PathBuf>) -> Vec<JavaInfo> {
+    let cache = tempfile::tempdir().unwrap();
+    discovery::probe_candidates(cache.path(), candidates)
+        .await
+        .runtimes
 }
+
 pub async fn ensure(
     root: &Path,
     requirement: JavaRequirement,
@@ -372,103 +384,94 @@ pub async fn ensure(
     cancel: &CancellationToken,
     sink: &EventSink,
 ) -> Result<JavaInfo> {
-    let major = requirement.major;
-    if let Some(path) = explicit.filter(|p| !p.is_empty()) {
-        let info = inspect(Path::new(path)).await?;
-        if let Some((maximum, component)) = &requirement.bytecode_ceiling
-            && info.major > *maximum
-        {
-            bail!(
-                "所选 Java {} 超出 {} 的字节码支持范围（最高 Java {}）。请切换为 Auto 或选择兼容的 Java。",
-                info.major,
-                component,
-                maximum
-            );
-        }
-        if !explicit_major_matches(major, info.major) {
-            bail!(
-                "此游戏需要 Java {major}，所选路径是 Java {}。请切换 Java 或清空路径启用自动匹配。",
-                info.major
-            );
-        }
-        if info.arch != requirement.arch {
-            bail!(
-                "此游戏的原生库需要 {} Java，所选 Java 是 {}。请切换 Java 或使用自动匹配。",
-                requirement.arch,
-                info.arch
-            );
-        }
-        return Ok(info);
-    }
-    let available = discover(root).await;
     if let Some(compatibility) = &requirement.compatibility {
         sink(Event::new(
             "info",
-            format!("Java 自动匹配范围：{}", requirement.description()),
+            format!("Java 匹配范围：{}", requirement.description()),
         ));
         for reason in &compatibility.reasons {
             sink(Event::new("info", reason.clone()));
         }
     }
-    if let Some(java) = available
-        .iter()
-        .filter(|j| requirement.matches(j))
-        .max_by_key(|j| (j.major, version_numbers(&j.version), j.jdk))
-    {
+    if let Some(path) = explicit.filter(|p| !p.is_empty()) {
+        let info = tokio::select! {
+            info = inspect(Path::new(path)) => info?,
+            _ = cancel.cancelled() => bail!("Java 搜索已取消"),
+        };
+        if let Some(reason) = requirement.rejection(&info) {
+            bail!("所选 Java 不兼容：{reason} · {}", info.path);
+        }
         sink(Event::new(
             "info",
-            format!("使用本地 Java：{} · {}", java.version, java.path),
+            format!("使用指定 Java：{} · {}", info.version, info.path),
         ));
-        return Ok(java.clone());
+        return Ok(info);
     }
-    let mut descriptions: Vec<_> = available
-        .iter()
-        .map(|java| {
-            format!(
-                "{} {} ({})",
-                if java.jdk { "JDK" } else { "JRE" },
-                java.major,
-                java.arch
-            )
-        })
-        .collect();
-    descriptions.sort();
-    descriptions.dedup();
-    sink(Event::new(
-        "info",
-        if descriptions.is_empty() {
-            format!(
-                "需要 {}；未检测到可用的本地 Java",
-                requirement.description()
-            )
-        } else {
-            format!(
-                "需要 {}；本地 Java 均不匹配：{}",
-                requirement.description(),
-                descriptions.join(", ")
-            )
-        },
-    ));
+    let previous = requirement
+        .history
+        .as_ref()
+        .and_then(|history| history.previous(root));
+    let mut extra: Vec<_> = requirement.working_directory.iter().cloned().collect();
+    if let Some(home) = previous
+        .as_deref()
+        .and_then(Path::parent)
+        .and_then(Path::parent)
+    {
+        extra.push(home.to_owned());
+    }
+    let mut reported = std::collections::HashSet::new();
+    for expanded in [false, true] {
+        let available = tokio::select! {
+            result = discovery::discover(root, &extra, expanded) => result,
+            _ = cancel.cancelled() => bail!("Java 搜索已取消"),
+        };
+        for failure in available.failures {
+            if reported.insert(failure.clone()) {
+                sink(Event::new("warning", failure));
+            }
+        }
+        for candidate in &available.runtimes {
+            let reason = requirement.rejection(candidate);
+            let detail = format!(
+                "Java 候选：{} · {} · {}",
+                candidate.version,
+                candidate.path,
+                reason
+                    .as_ref()
+                    .map_or("满足硬性要求".into(), |r| format!("排除：{r}"))
+            );
+            if reported.insert(detail.clone()) {
+                sink(Event::new("info", detail));
+            }
+        }
+        if let Some(java) = requirement.select(&available.runtimes, previous.as_deref()) {
+            let why = if previous.as_deref() == Some(Path::new(&java.path)) {
+                "此前正常运行"
+            } else if java.major == requirement.major {
+                "本地推荐版本"
+            } else {
+                "满足已知兼容约束"
+            };
+            sink(Event::new(
+                "info",
+                format!("使用本地 Java：{} · {}（{why}）", java.version, java.path),
+            ));
+            return Ok(java.clone());
+        }
+        if !expanded {
+            sink(Event::new(
+                "info",
+                "常见位置未找到匹配 Java，正在补查实例附带运行时",
+            ));
+        }
+    }
     if !auto {
         bail!(
             "未找到兼容的 {}，请指定 Java 路径或允许自动下载。",
             requirement.description()
         );
     }
-    let major = *requirement
-        .allowed_majors()
-        .last()
-        .context("没有兼容的 Java 版本")?;
     check_cancel(cancel)?;
-    let image_type = download_image_type(major, requirement.jdk);
-    sink(Event::new(
-        "stage",
-        format!(
-            "正在安装 {} {major} ({})",
-            if image_type == "jdk" { "JDK" } else { "Java" },
-            requirement.arch
-        ),
-    ));
     let os = if cfg!(target_os = "macos") {
         "mac"
     } else if cfg!(windows) {
@@ -481,11 +484,74 @@ pub async fn ensure(
         "x86_64" => "x64",
         _ => bail!("此架构暂不支持自动安装 Java，请手动配置"),
     };
-    let url = format!(
-        "https://api.adoptium.net/v3/assets/latest/{major}/hotspot?architecture={arch}&image_type={image_type}&os={os}&vendor=eclipse"
-    );
-    let assets: serde_json::Value = downloader.json(&url, cancel).await?;
-    let package = &assets[0]["binary"]["package"];
+    // Query only release metadata first. A mod can require a particular patch;
+    // validate the real release before downloading or installing its archive.
+    let releases: serde_json::Value = downloader
+        .json(
+            "https://api.adoptium.net/v3/info/available_releases",
+            cancel,
+        )
+        .await?;
+    let lts = releases["available_lts_releases"]
+        .as_array()
+        .context("Java 发行目录缺失")?;
+    let mut majors: Vec<u32> = releases["available_releases"]
+        .as_array()
+        .context("Java 发行目录缺失")?
+        .iter()
+        .filter_map(|n| n.as_u64().and_then(|n| u32::try_from(n).ok()))
+        .filter(|major| requirement.allowed_majors().contains(major))
+        .collect();
+    majors.sort_by_key(|major| {
+        (
+            *major != requirement.major,
+            !lts.iter().any(|v| v.as_u64() == Some((*major).into())),
+            major.abs_diff(requirement.major),
+        )
+    });
+    let mut selected = None;
+    for major in majors {
+        let image_type = download_image_type(major, requirement.jdk);
+        let url = format!(
+            "https://api.adoptium.net/v3/assets/latest/{major}/hotspot?architecture={arch}&image_type={image_type}&os={os}&vendor=eclipse"
+        );
+        let assets: serde_json::Value = downloader.json(&url, cancel).await?;
+        for asset in assets.as_array().context("Java 发行信息格式无效")? {
+            let version = asset["version"]["openjdk_version"]
+                .as_str()
+                .or_else(|| asset["version"]["semver"].as_str())
+                .context("Java 发行版本缺失")?;
+            let candidate = JavaInfo {
+                path: String::new(),
+                major,
+                version: version.into(),
+                arch: requirement.arch.into(),
+                jdk: image_type == "jdk",
+            };
+            if let Some(reason) = requirement.rejection(&candidate) {
+                sink(Event::new(
+                    "info",
+                    format!("跳过 Java 发行版 {version}：{reason}"),
+                ));
+                continue;
+            }
+            selected = Some((major, image_type, asset["binary"]["package"].clone()));
+            break;
+        }
+        if selected.is_some() {
+            break;
+        }
+    }
+    let (major, image_type, package) =
+        selected.context("发行目录没有满足游戏、加载器和模组要求的 Java，请手动指定兼容版本")?;
+    sink(Event::new(
+        "stage",
+        format!(
+            "正在安装 {} {major} ({})",
+            if image_type == "jdk" { "JDK" } else { "Java" },
+            requirement.arch
+        ),
+    ));
     let link = package["link"]
         .as_str()
         .context("暂无适合此系统的 Java，请指定本地 Java 路径")?;
@@ -516,6 +582,17 @@ pub async fn ensure(
         .context("解压后未找到 Java 可执行文件")?
         .strip_prefix(&staging)?
         .to_path_buf();
+    let validation = inspect(&staging.join(&relative)).await.and_then(|java| {
+        anyhow::ensure!(java.major == major, "Java 安装包主版本与发行信息不符");
+        if let Some(reason) = requirement.rejection(&java) {
+            bail!("Java 安装包不满足启动要求：{reason}");
+        }
+        Ok(())
+    });
+    if let Err(error) = validation {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(error);
+    }
     let runtime = root
         .join("runtimes")
         .join(format!("{image_type}-{major}-{os}-{arch}"));
@@ -546,18 +623,22 @@ fn download_image_type(major: u32, needs_jdk: bool) -> &'static str {
 }
 
 fn version_numbers(version: &str) -> Vec<u32> {
-    version
-        .split('"')
-        .nth(1)
-        .unwrap_or(version)
-        .split(|c: char| !c.is_ascii_digit())
-        .filter_map(|s| s.parse().ok())
-        .collect()
-}
-fn explicit_major_matches(required: u32, selected: u32) -> bool {
-    // Keep automatic selection on the declared major. A user can deliberately
-    // choose a newer modern JVM for modpacks, while legacy Java 8 stays exact.
-    selected == required || (required >= 17 && selected > required)
+    let mut number = crate::java_compatibility::java_version_number(version)
+        .unwrap_or_default()
+        .to_vec();
+    let value = version.split('"').nth(1).unwrap_or(version);
+    let build = value
+        .split_once('+')
+        .or_else(|| value.split_once("-b"))
+        .map(|(_, tail)| tail);
+    if let Some(build) = build {
+        number.extend(
+            build
+                .split(|c: char| !c.is_ascii_digit())
+                .filter_map(|s| s.parse::<u32>().ok()),
+        );
+    }
+    number
 }
 fn extract_runtime(archive: &Path, dest: &Path, cancel: &CancellationToken) -> Result<()> {
     let file = std::fs::File::open(archive)?;
@@ -646,6 +727,8 @@ mod tests {
                 jdk: false,
                 compatibility: None,
                 bytecode_ceiling: None,
+                working_directory: None,
+                history: None,
             };
             assert!(requirement.matches(&super::JavaInfo {
                 path: "java".into(),
@@ -751,31 +834,96 @@ mod tests {
     }
 
     use super::*;
-    #[test]
-    fn modern_loader_auto_selection_requires_jdk_but_explicit_newer_java_is_allowed() {
+    #[tokio::test]
+    async fn modern_loaders_allow_local_jre_and_manual_selection_uses_the_same_rules() {
+        let temp = tempfile::tempdir().unwrap();
         let mut version = crate::test_http::version_fixture("1.20.1");
         version.java_version = Some(crate::model::JavaVersion { major: 17 });
-        assert!(!JavaRequirement::for_version(&version).jdk);
         version.main_class = "cpw.mods.bootstraplauncher.BootstrapLauncher".into();
-        let requirement = JavaRequirement::for_version(&version);
-        assert!(requirement.jdk);
-        let mut local = JavaInfo {
-            path: "java".into(),
-            major: 26,
-            version: "26.0.2.1".into(),
-            arch: requirement.arch.into(),
-            jdk: true,
-        };
-        assert!(!requirement.matches(&local));
-        local.major = 17;
-        assert!(requirement.matches(&local));
-        local.jdk = false;
-        assert!(!requirement.matches(&local));
-        assert!(explicit_major_matches(17, 21));
-        assert!(!explicit_major_matches(21, 17));
-        assert!(!explicit_major_matches(8, 17));
-        version.java_version = Some(crate::model::JavaVersion { major: 8 });
-        assert!(!JavaRequirement::for_version(&version).jdk);
+        let auto = JavaRequirement::for_working_directory(&version, temp.path(), None)
+            .await
+            .unwrap();
+        let manual = JavaRequirement::for_working_directory(&version, temp.path(), Some("java"))
+            .await
+            .unwrap();
+        assert!(!auto.jdk);
+        for major in [8, 17, 21, 26] {
+            let java = JavaInfo {
+                path: "java".into(),
+                major,
+                version: format!("{major}.0.1"),
+                arch: auto.arch.into(),
+                jdk: false,
+            };
+            assert_eq!(auto.rejection(&java), manual.rejection(&java));
+            assert_eq!(auto.matches(&java), major >= 17);
+        }
+    }
+
+    #[tokio::test]
+    async fn selection_prefers_previous_success_then_recommended_local_then_compatible_local() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut version = crate::test_http::version_fixture("1.20.1");
+        version.java_version = Some(crate::model::JavaVersion { major: 17 });
+        let mut requirement = JavaRequirement::for_instance(&version, temp.path(), None)
+            .await
+            .unwrap();
+        let available: Vec<_> = [17, 21, 26]
+            .into_iter()
+            .map(|major| JavaInfo {
+                path: format!("/jdk{major}/bin/java"),
+                major,
+                version: format!("{major}.0.8"),
+                arch: requirement.arch.into(),
+                jdk: false,
+            })
+            .collect();
+        assert_eq!(requirement.select(&available, None).unwrap().major, 17);
+        assert_eq!(requirement.select(&available[1..], None).unwrap().major, 21);
+        assert_eq!(
+            requirement
+                .select(&available, Some(Path::new(&available[2].path)))
+                .unwrap()
+                .major,
+            26
+        );
+        requirement.bytecode_ceiling = Some((21, "known loader".into()));
+        assert_eq!(
+            requirement
+                .select(&available, Some(Path::new(&available[2].path)))
+                .unwrap()
+                .major,
+            17
+        );
+        requirement.arch = "impossible-architecture";
+        assert!(requirement.select(&available, None).is_none());
+    }
+
+    #[test]
+    fn probe_parses_properties_unquoted_openjdk_and_legacy_java_versions() {
+        let path = Path::new("/nonexistent/java");
+        assert_eq!(
+            parse_probe(path, "java.version = 21.0.7\nos.arch = amd64\n")
+                .unwrap()
+                .major,
+            21
+        );
+        assert_eq!(
+            parse_probe(path, "openjdk 26.0.2 2026-08-18\nos.arch = arm64\n")
+                .unwrap()
+                .arch,
+            "aarch64"
+        );
+        assert_eq!(
+            parse_probe(path, "java version \"1.8.0_321\"\nos.arch = x86\n")
+                .unwrap()
+                .major,
+            8
+        );
+        assert!(
+            parse_probe(path, "java.version = 21.0.7").is_err(),
+            "Do not guess the host architecture when probing an emulated JVM"
+        );
     }
 
     #[cfg(unix)]
@@ -803,9 +951,8 @@ mod tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let captured = events.clone();
         let sink: EventSink = Arc::new(move |event| captured.lock().unwrap().push(event));
-        // Downloading is impossible with a cancelled token. Local reuse still succeeds.
+        // Auto-download is disabled; local selection must still succeed.
         let cancel = CancellationToken::new();
-        cancel.cancel();
         let found = ensure(
             temp.path(),
             JavaRequirement {
@@ -814,9 +961,11 @@ mod tests {
                 jdk: true,
                 compatibility: None,
                 bytecode_ceiling: None,
+                working_directory: None,
+                history: None,
             },
             None,
-            true,
+            false,
             &downloader,
             &cancel,
             &sink,
@@ -852,20 +1001,20 @@ mod tests {
         let requirement = JavaRequirement::for_instance(&profile, temp.path(), None)
             .await
             .unwrap();
-        // The very same verified range also chooses 26 for a new download.
+        // A wider compatible range does not displace an existing recommended JVM.
         assert_eq!(requirement.allowed_majors().last(), Some(&26));
         let selected = ensure(
             temp.path(),
             requirement,
             None,
-            true,
+            false,
             &downloader,
             &cancel,
             &sink,
         )
         .await
         .unwrap();
-        assert_eq!(selected.major, 26);
+        assert_eq!(selected.major, 17);
         assert!(!events.lock().unwrap().iter().any(|e| e.kind == "stage"));
         // Manual selection must not bypass a known bytecode incompatibility.
         let mut value = serde_json::to_value(profile).unwrap();
@@ -875,8 +1024,8 @@ mod tests {
         let error = ensure(
             temp.path(),
             JavaRequirement::for_version(&version),
-            Some(&selected.path),
-            true,
+            Some(newer.join("java").to_str().unwrap()),
+            false,
             &downloader,
             &cancel,
             &sink,

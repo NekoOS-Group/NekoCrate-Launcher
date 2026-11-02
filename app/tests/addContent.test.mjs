@@ -40,28 +40,35 @@ test("opening the list directory uses its captured instance and version without 
   }
 });
 
-test("add content keeps the selected resource version local to the dialog and clears it on target changes", async () => {
+test("resource draft follows the prospective version and remains available for a new directory", async () => {
   const f = await settingsFixture();
   try {
-    f.state.database.instances[0].versions.push({
-      id: "other",
-      name: "Other",
-      installed: true,
-    });
-    await f.context.sync();
     f.context.newVersion(f.context.instances.value[0]);
+    f.context.form.version = "1.20.1";
     await flush();
     f.context.additionSection.value = "resources";
-    assert.equal(f.context.additionResourceSession.value.version, "1.21.1");
-    f.context.additionVersion.value = "other";
-    assert.equal(f.context.additionResourceSession.value.version, "other");
-    assert.equal(f.context.instances.value[0].selected_version, "1.21.1");
+    f.context.selectedResources.value = [
+      {
+        platform: "modrinth",
+        kind: "resourcepacks",
+        project: "cat",
+        version: "cat1",
+        name: "Cat",
+        number: "1",
+      },
+    ];
     f.context.switchDownloadTarget(null);
     await flush();
-    assert.equal(f.context.additionResourceSession.value, undefined);
+    assert.equal(f.context.selectedResources.value.length, 1);
+    assert.equal(f.context.form.version, "1.20.1");
+    assert.equal(f.context.instances.value[0].selected_version, "1.21.1");
     f.context.switchDownloadTarget("instance-a");
     await flush();
-    assert.equal(f.context.additionResourceSession.value.version, "1.21.1");
+    assert.equal(f.context.selectedResources.value.length, 1);
+    assert.equal(
+      f.calls.some((call) => call.op === "install_resources"),
+      false,
+    );
   } finally {
     f.dispose();
   }

@@ -327,9 +327,11 @@ impl Launcher {
             java::JavaRequirement {
                 major,
                 arch: crate::minecraft::arch_name(),
-                jdk: major >= 9,
+                jdk: false,
                 compatibility: None,
                 bytecode_ceiling: None,
+                working_directory: None,
+                history: None,
             },
             None,
             true,
@@ -1005,7 +1007,7 @@ mod tests {
             java::discover(launcher.root())
                 .await
                 .iter()
-                .any(|j| Path::new(&j.path) == path)
+                .any(|j| identity(Path::new(&j.path)) == identity(&path))
         );
         assert_eq!(registered_java(launcher.root()).len(), 1);
         launcher.register_java(&path).await.unwrap();

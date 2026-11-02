@@ -15,7 +15,9 @@ mod install;
 mod modpacks;
 mod provider;
 pub use modpacks::{ModpackArchive, ModpackVersions};
-pub use provider::ResourceScope;
+pub use provider::{ResourceCatalog, ResourceScope, ResourceSelection};
+mod selection;
+pub(crate) use selection::has_selection;
 #[cfg(test)]
 mod tests;
 

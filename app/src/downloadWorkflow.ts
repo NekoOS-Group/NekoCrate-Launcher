@@ -81,6 +81,32 @@ export function applyWorkflowEvent(
   workflow: WorkflowState,
   event: LauncherEvent,
 ) {
+  if (
+    event.kind === "resource_selection" ||
+    event.step === "resource_resolve"
+  ) {
+    if (!workflow.steps.some((step) => step.id === "resource_resolve")) {
+      const finalize = workflow.steps.findIndex(
+        (step) => step.id === "finalize",
+      );
+      workflow.steps.splice(
+        finalize < 0 ? workflow.steps.length : finalize,
+        0,
+        ...[
+          ["resource_resolve", "解析预选资源依赖"],
+          ["resource_check", "检查资源与目标目录"],
+          ["resource_files", "下载与暂存资源"],
+          ["resource_commit", "校验并安装资源"],
+        ].map(([id, label]) => ({
+          id,
+          label,
+          status: "pending" as const,
+          fileCount: 0,
+          filesDone: 0,
+        })),
+      );
+    }
+  }
   if (event.kind === "workflow" && event.step) {
     if (
       event.step === "finalize" &&

@@ -727,3 +727,30 @@ test("自动安装期间仍可拖入手动文件，补齐不会另开安装任�
     dispose();
   }
 });
+
+test("preselected resources extend game installation before finalization and keep their file progress separate", () => {
+  const workflow = createWorkflow("install", "Install");
+  applyWorkflowEvent(workflow, { kind: "resource_selection" });
+  applyWorkflowEvent(workflow, { kind: "resource_selection" });
+  assert.deepEqual(
+    workflow.steps.slice(-5).map((s) => s.id),
+    [
+      "resource_resolve",
+      "resource_check",
+      "resource_files",
+      "resource_commit",
+      "finalize",
+    ],
+  );
+  applyWorkflowEvent(workflow, { kind: "workflow", step: "resource_resolve" });
+  assert.equal(workflow.steps.find((s) => s.id === "java").status, "done");
+  assert.equal(
+    workflow.steps.find((s) => s.id === "finalize").status,
+    "pending",
+  );
+  applyWorkflowEvent(workflow, { kind: "workflow", step: "resource_files" });
+  assert.equal(
+    workflow.steps.find((s) => s.id === "resource_files").status,
+    "running",
+  );
+});

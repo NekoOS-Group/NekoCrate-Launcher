@@ -14,6 +14,47 @@ pub struct ResourceScope {
     pub kind: ResourceKind,
     pub platform: Platform,
 }
+/// Catalog queries describe a prospective game; they never need a tracked directory.
+#[derive(Clone, Debug, Deserialize)]
+pub struct ResourceCatalog {
+    pub minecraft: String,
+    pub loader: Option<ModLoader>,
+    pub kind: ResourceKind,
+    pub platform: Platform,
+}
+impl ResourceCatalog {
+    fn target(&self) -> Result<ResourceTarget> {
+        storage::safe_version(&self.minecraft)?;
+        if let Some(loader) = &self.loader {
+            anyhow::ensure!(
+                matches!(
+                    loader.kind.as_str(),
+                    "fabric" | "forge" | "neoforge" | "quilt"
+                ),
+                "无效加载器"
+            );
+        }
+        Ok(ResourceTarget {
+            instance: String::new(),
+            version: String::new(),
+            directory: PathBuf::new(),
+            minecraft: self.minecraft.clone(),
+            loader: self.loader.clone(),
+            worlds: Vec::new(),
+            shared: false,
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResourceSelection {
+    pub platform: Platform,
+    pub kind: ResourceKind,
+    pub project: String,
+    pub version: String,
+    pub name: String,
+}
+
 pub(super) struct Provider {
     client: reqwest::Client,
     platform: Platform,
@@ -415,10 +456,31 @@ impl Launcher {
         offset: usize,
         cancel: &CancellationToken,
     ) -> Result<SearchResult> {
+        let target = self.resource_target(&scope.id, &scope.version)?;
+        self.search_resource_catalog(
+            &ResourceCatalog {
+                minecraft: target.minecraft,
+                loader: target.loader,
+                kind: scope.kind,
+                platform: scope.platform,
+            },
+            query,
+            offset,
+            cancel,
+        )
+        .await
+    }
+    pub async fn search_resource_catalog(
+        &self,
+        scope: &ResourceCatalog,
+        query: &str,
+        offset: usize,
+        cancel: &CancellationToken,
+    ) -> Result<SearchResult> {
         if query.len() > 256 || offset > 10000 {
             bail!("搜索范围无效");
         }
-        let target = self.resource_target(&scope.id, &scope.version)?;
+        let target = scope.target()?;
         if scope.kind == ResourceKind::Mods && target.loader.is_none() {
             bail!("此版本尚未安装 Mod 加载器");
         }
@@ -496,6 +558,16 @@ impl Launcher {
             .versions(&target, scope.kind, project, cancel)
             .await
     }
+    pub async fn catalog_resource_versions(
+        &self,
+        scope: &ResourceCatalog,
+        project: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<ResourceVersion>> {
+        Provider::new(self, scope.platform)?
+            .versions(&scope.target()?, scope.kind, project, cancel)
+            .await
+    }
     pub async fn prepare_resource(
         &self,
         scope: &ResourceScope,
@@ -506,14 +578,86 @@ impl Launcher {
     ) -> Result<ResourcePlan> {
         let _directory_guard = self.idle(&scope.id)?;
         let target = self.resource_target(&scope.id, &scope.version)?;
-        let api = Provider::new(self, scope.platform)?;
-        let root = api.version(Some(project), version, cancel).await?;
-        if root.project != project {
-            bail!("项目与资源版本不一致");
+        let mut plan = self
+            .resolve_resource_selection(
+                target,
+                &[ResourceSelection {
+                    platform: scope.platform,
+                    kind: scope.kind,
+                    project: project.into(),
+                    version: version.into(),
+                    name: project.into(),
+                }],
+                world,
+                cancel,
+            )
+            .await?;
+        let token = cancel.clone();
+        tokio::task::spawn_blocking(move || {
+            install::preflight(&mut plan, &token)?;
+            save_plan(&plan)?;
+            Ok(plan)
+        })
+        .await?
+    }
+    pub(super) async fn resolve_resource_selection(
+        &self,
+        target: ResourceTarget,
+        selections: &[ResourceSelection],
+        world: Option<&str>,
+        cancel: &CancellationToken,
+    ) -> Result<ResourcePlan> {
+        let mut combined = new_plan(target);
+        for platform in [Platform::Modrinth, Platform::Curseforge] {
+            let picks: Vec<_> = selections
+                .iter()
+                .filter(|s| s.platform == platform)
+                .collect();
+            if picks.is_empty() {
+                continue;
+            }
+            let plan = self
+                .resolve_platform_selection(
+                    combined.target.clone(),
+                    platform,
+                    &picks,
+                    world,
+                    cancel,
+                )
+                .await?;
+            for entry in plan.entries {
+                // The same artifact on both platforms is one file. Different contents
+                // at the same destination remain a conflict checked before publication.
+                if !combined.entries.iter().any(|old| old.destination == entry.destination && matches!(
+                    (&old.input, &entry.input), (Input::Remote { file: a }, Input::Remote { file: b }) if a.sha1 == b.sha1
+                )) { combined.entries.push(entry); }
+            }
+            combined.conflicts.extend(plan.conflicts);
+            combined.warnings.extend(plan.warnings);
+        }
+        Ok(combined)
+    }
+    async fn resolve_platform_selection(
+        &self,
+        target: ResourceTarget,
+        platform: Platform,
+        picks: &[&ResourceSelection],
+        world: Option<&str>,
+        cancel: &CancellationToken,
+    ) -> Result<ResourcePlan> {
+        let api = Provider::new(self, platform)?;
+        let mut queue = VecDeque::new();
+        let mut roots = HashMap::new();
+        for pick in picks {
+            let root = api
+                .version(Some(&pick.project), &pick.version, cancel)
+                .await?;
+            anyhow::ensure!(root.project == pick.project, "项目与资源版本不一致");
+            roots.insert(pick.project.as_str(), pick.kind);
+            queue.push_back(root);
         }
         let mut plan = new_plan(target);
         let installed = records(&plan.target.directory)?;
-        let mut queue = VecDeque::from([root]);
         let mut selected = HashMap::<String, ResourceVersion>::new();
         while let Some(version) = queue.pop_front() {
             if cancel.is_cancelled() {
@@ -545,9 +689,17 @@ impl Launcher {
             {
                 ResourceKind::Mods
             } else {
-                detail.kind.unwrap_or(scope.kind)
+                detail.kind.unwrap_or_else(|| {
+                    roots
+                        .get(version.project.as_str())
+                        .copied()
+                        .unwrap_or(picks[0].kind)
+                })
             };
-            if version.project == project && selected.is_empty() && entry_kind != scope.kind {
+            if roots
+                .get(version.project.as_str())
+                .is_some_and(|kind| *kind != entry_kind)
+            {
                 bail!("所选文件的类型与资源分类不符");
             }
             if !compatible(&version, &plan.target, entry_kind) {
@@ -582,7 +734,7 @@ impl Launcher {
                 destination: destination(&plan.target, entry_kind, &file.name, world)?,
                 size: file.size,
                 origin: ResourceOrigin {
-                    platform: scope.platform,
+                    platform,
                     project: Some(version.project.clone()),
                     version: Some(version.id.clone()),
                     name: detail.name,
@@ -605,7 +757,7 @@ impl Launcher {
                     api.version(dependency.project.as_deref(), id, cancel)
                         .await?
                 } else if let Some(project) = &dependency.project {
-                    if selected.contains_key(project) {
+                    if selected.contains_key(project) || roots.contains_key(project.as_str()) {
                         continue;
                     }
                     let dependency_kind = api
@@ -614,7 +766,7 @@ impl Launcher {
                         .kind
                         .unwrap_or(entry_kind);
                     let existing = installed.iter().find(|(path, record)| {
-                        record.origin.platform == scope.platform
+                        record.origin.platform == platform
                             && record.origin.project.as_deref() == Some(project)
                             && record.origin.version.is_some()
                             && safe_join(&plan.target.directory, path).is_ok_and(|p| p.is_file())
@@ -666,7 +818,7 @@ impl Launcher {
                 };
                 if selected.values().any(|v| conflicts(&v.project, &v.id))
                     || installed.iter().any(|(path, r)| {
-                        r.origin.platform == scope.platform
+                        r.origin.platform == platform
                             && safe_join(&plan.target.directory, path).is_ok_and(|p| p.exists())
                             && conflicts(
                                 r.origin.project.as_deref().unwrap_or(""),
@@ -679,12 +831,6 @@ impl Launcher {
                 }
             }
         }
-        let token = cancel.clone();
-        tokio::task::spawn_blocking(move || {
-            install::preflight(&mut plan, &token)?;
-            save_plan(&plan)?;
-            Ok(plan)
-        })
-        .await?
+        Ok(plan)
     }
 }

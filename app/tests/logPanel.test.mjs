@@ -246,6 +246,50 @@ test("real log panel browses all session entries with bounded DOM, filters/copie
   assert.equal(rows().length, 0);
   assert.equal(store.snapshot().length, 6000);
   assert.ok(store.snapshot().every((line) => line.instanceId === "a"));
+  // Recovery controls follow the log scope, not the currently selected game.
+  let recovered;
+  props.recoveries = [
+    {
+      instanceId: "a",
+      instanceName: "A",
+      versionName: "Version A",
+      report: {},
+      actions: ["java"],
+    },
+    {
+      instanceId: "b",
+      instanceName: "B",
+      versionName: "Version B",
+      report: {
+        file: { path: "crash-reports/crash.txt", launcher_log: false },
+      },
+      actions: ["repair", "report"],
+    },
+  ];
+  props.onRecover = (target, action) => {
+    recovered = [target.instanceId, action];
+  };
+  await settle();
+  const buttons = () =>
+    find((n) => n.props.class === "log-recovery-actions").children.filter(
+      (n) => n.tag === "button",
+    );
+  assert.equal(buttons().length, 2);
+  buttons()[0].props.onClick();
+  assert.deepEqual(recovered, ["b", "repair"]);
+  props.busy = true;
+  await settle();
+  assert.equal(buttons()[0].props.disabled, true);
+  assert.equal(buttons()[1].props.disabled, false);
+  find((n) => n.props.id === "log-scope").props.onChange("a");
+  await settle();
+  assert.equal(buttons().length, 1);
+  find((n) => n.props.id === "log-scope").props.onChange("launcher");
+  await settle();
+  assert.equal(
+    find((n) => n.props.class === "log-recovery-actions"),
+    undefined,
+  );
   app.unmount();
   await settle();
   assert.equal(observer.disconnected, true);

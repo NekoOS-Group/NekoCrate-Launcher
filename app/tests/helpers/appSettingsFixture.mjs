@@ -142,6 +142,7 @@ export async function settingsFixture() {
         return true;
       }
       if (request.op === "snapshot") return this.snapshot();
+      if (request.op === "crash_report") return null;
       if (request.op === "inspect_resources")
         return request.paths.map((path) => ({
           path,

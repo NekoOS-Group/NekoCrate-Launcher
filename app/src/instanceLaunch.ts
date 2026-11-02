@@ -51,7 +51,7 @@ export function shouldOpenGameLogs(
   const behavior = options?.log_behavior || "crash";
   return (
     (kind === "game_started" && behavior === "startup") ||
-    (kind === "game_crash" && behavior !== "manual")
+    (["game_crash", "launch_failed"].includes(kind) && behavior !== "manual")
   );
 }
 
@@ -84,7 +84,9 @@ export function createLaunchWindowBehavior(
             await window().minimize();
             owned = true;
           }
-        } else if (kind === "game_exit" || kind === "game_crash") {
+        } else if (
+          ["game_exit", "game_crash", "launch_failed"].includes(kind)
+        ) {
           active.delete(id);
           if (shouldOpenGameLogs(kind, options) || (!active.size && owned)) {
             owned = false;

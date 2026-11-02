@@ -320,3 +320,93 @@ test("late empty Fabric responses cannot turn off a new selection; network failu
     dispose();
   }
 });
+
+test("resource preselection is queued on the new version before installation, never on the old selection", async () => {
+  const { fixture, context: ui, dispose } = await downloadFixture();
+  try {
+    ui.form.version = "1.20.1";
+    await flush();
+    const picks = [
+      {
+        platform: "modrinth",
+        kind: "resourcepacks",
+        project: "cat",
+        version: "cat1",
+        name: "Cat",
+        number: "1.0",
+      },
+      {
+        platform: "modrinth",
+        kind: "shaderpacks",
+        project: "ice",
+        version: "ice1",
+        name: "Ice",
+        number: "2.0",
+      },
+    ];
+    ui.selectedResources.value = picks;
+    ui.switchDownloadTarget("instance-b");
+    assert.deepEqual(ui.selectedResources.value, picks);
+    const order = [];
+    fixture.handlers.add_version = ({ id, version }) => {
+      order.push("create");
+      const target = fixture.state.database.instances.find((i) => i.id === id);
+      target.selected_version = version;
+      target.versions.push({ id: version, installed: false });
+      return structuredClone(target);
+    };
+    fixture.handlers.queue_version_resources = (data) => {
+      order.push("queue");
+      assert.equal(data.id, "instance-b");
+      assert.equal(data.version, "1.20.1");
+      assert.equal(data.minecraft, "1.20.1");
+      assert.equal(data.loader, null);
+      assert.deepEqual(data.resources, picks);
+      return true;
+    };
+    fixture.handlers.install = () => {
+      order.push("install");
+      return true;
+    };
+    await ui.submitDownload();
+    assert.deepEqual(order, ["create", "queue", "install"]);
+  } finally {
+    dispose();
+  }
+});
+
+test("a failed preselection checkpoint keeps the draft and prevents starting an incomplete install", async () => {
+  const { fixture, context: ui, dispose } = await downloadFixture();
+  try {
+    await flush();
+    ui.selectedResources.value = [
+      {
+        platform: "modrinth",
+        kind: "resourcepacks",
+        project: "cat",
+        version: "cat1",
+        name: "Cat",
+        number: "1",
+      },
+    ];
+    fixture.handlers.add_version = ({ version }) => ({
+      ...fixture.state.database.instances[0],
+      selected_version: version,
+    });
+    fixture.handlers.queue_version_resources = () => {
+      throw new Error("disk full");
+    };
+    await ui.submitDownload();
+    assert.equal(ui.modal.value, "version");
+    assert.equal(ui.selectedResources.value.length, 1);
+    assert.equal(
+      fixture.calls.some((call) => call.op === "install"),
+      false,
+    );
+    ui.form.version = "1.20.1";
+    await flush();
+    assert.equal(ui.selectedResources.value.length, 0);
+  } finally {
+    dispose();
+  }
+});

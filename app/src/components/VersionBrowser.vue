@@ -9,28 +9,23 @@ import {
   watch,
 } from "vue";
 import { Box, LoaderCircle, RefreshCw, Search, X } from "lucide-vue-next";
-import VersionCube from "./VersionCube.vue";
 import { listRevealStyle } from "../listMotion";
 import { createViewportMotion } from "../viewportMotion";
-import {
-  filterVersions,
-  versionCategories,
-  type VersionCategory,
-} from "../versionCatalog";
+import { filterVersions, type VersionCategory } from "../versionCatalog";
 import { t } from "../i18n";
 import type { VersionManifest } from "../types";
 
 const props = defineProps<{
   modelValue: string;
+  category: VersionCategory;
   manifest: VersionManifest | null;
   loading: boolean;
   disabled: boolean;
 }>();
 const emit = defineEmits<{ "update:modelValue": [id: string]; refresh: [] }>();
-const category = ref<VersionCategory>("release");
 const query = ref("");
 const filtered = computed(() =>
-  filterVersions(props.manifest?.versions || [], category.value, query.value),
+  filterVersions(props.manifest?.versions || [], props.category, query.value),
 );
 const viewport = ref<HTMLElement>();
 const scrollTop = ref(0);
@@ -178,22 +173,6 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="version-browser">
-    <div class="catalog-filter" role="group" :aria-label="t('版本分类')">
-      <button
-        v-for="(item, index) in versionCategories"
-        :key="item.id"
-        type="button"
-        class="list-reveal-item"
-        :class="{ active: category === item.id }"
-        :style="{ '--category-accent': item.color, ...listRevealStyle(index) }"
-        :aria-label="t(item.label)"
-        :aria-pressed="category === item.id"
-        @click="category = item.id"
-      >
-        <VersionCube :variant="item.id" />
-        <span>{{ t(item.label) }}</span>
-      </button>
-    </div>
     <div class="catalog-toolbar list-reveal-item" :style="listRevealStyle(1)">
       <div class="catalog-search">
         <Search :size="15" aria-hidden="true" />
@@ -309,70 +288,13 @@ onBeforeUnmount(() => {
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  padding: 18px 24px 16px;
-}
-.catalog-filter {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 6px;
-  flex-shrink: 0;
-}
-.catalog-filter button {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  min-height: 44px;
-  min-width: 0;
-  padding: 8px;
-  border: 0;
-  background: transparent;
-  color: var(--muted);
-  font-size: 12px;
-  white-space: nowrap;
-  transition:
-    background-color 200ms var(--motion-ease),
-    box-shadow 200ms var(--motion-ease),
-    transform 180ms var(--motion-ease),
-    color 180ms var(--motion-ease),
-    text-shadow 180ms var(--motion-ease);
-}
-.catalog-filter button:hover,
-.catalog-filter button:focus-visible {
-  color: var(--category-accent);
-  background: color-mix(in srgb, var(--category-accent) 8%, transparent);
-  outline: none;
-}
-.catalog-filter button.active {
-  color: var(--category-accent);
-  background: color-mix(in srgb, var(--category-accent) 18%, transparent);
-  box-shadow:
-    inset 0 0 0 1px color-mix(in srgb, var(--category-accent) 25%, transparent),
-    0 0 16px color-mix(in srgb, var(--category-accent) 8%, transparent);
-  text-shadow: 0 0 12px
-    color-mix(in srgb, var(--category-accent) 24%, transparent);
-}
-.catalog-filter button:focus-visible {
-  box-shadow: inset 0 0 0 1px var(--category-accent);
-}
-.catalog-filter button:active {
-  transform: translateY(1px);
-}
-.catalog-filter .version-cube {
-  color: var(--category-accent);
-}
-@media (max-width: 820px) {
-  .catalog-filter button {
-    flex-direction: column;
-    gap: 4px;
-    padding: 8px 4px;
-  }
+  padding: 8px 24px 16px;
 }
 .catalog-toolbar {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin: 12px 0 14px;
+  margin: 0 0 14px;
   flex-shrink: 0;
 }
 .catalog-search {
@@ -509,8 +431,7 @@ onBeforeUnmount(() => {
 }
 @media (prefers-reduced-motion: reduce) {
   .catalog-version,
-  .catalog-version > svg,
-  .catalog-filter button {
+  .catalog-version > svg {
     transition: none;
   }
 }

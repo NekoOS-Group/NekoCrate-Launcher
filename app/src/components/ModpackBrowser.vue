@@ -240,16 +240,11 @@ onBeforeUnmount(() => {
         </footer>
       </template>
       <template v-else>
-        <div class="pack-tools list-reveal-item" :style="listRevealStyle(0)">
-          <button
-            v-if="project"
-            class="icon-button"
-            :disabled="blocked"
-            :aria-label="t('返回')"
-            @click="back"
-          >
-            <ArrowLeft :size="18" />
-          </button>
+        <div
+          v-if="!project"
+          class="pack-tools list-reveal-item"
+          :style="listRevealStyle(0)"
+        >
           <GlassSelect
             id="modpack-platform"
             v-model="platform"
@@ -285,12 +280,53 @@ onBeforeUnmount(() => {
                 class="pack-detail-heading list-reveal-item"
                 :style="listRevealStyle(0)"
               >
-                <Archive :size="32" />
-                <div>
-                  <h3>{{ project.name }}</h3>
-                  <small>{{
-                    platform === "modrinth" ? "Modrinth" : "CurseForge"
+                <button
+                  class="icon-button"
+                  :disabled="blocked"
+                  :aria-label="t('返回')"
+                  @click="back"
+                >
+                  <ArrowLeft :size="18" />
+                </button>
+                <Archive :size="26" />
+                <div class="pack-title">
+                  <h3 :title="project.name">{{ project.name }}</h3>
+                  <small v-if="selected">{{
+                    [...selected.games, ...selected.loaders].join(" · ")
                   }}</small>
+                </div>
+                <div class="pack-version">
+                  <GlassSelect
+                    v-if="versions.length"
+                    id="online-pack-version"
+                    v-model="chosen"
+                    :options="
+                      versions.map((v) => ({
+                        value: v.id,
+                        label: v.number || v.name,
+                        detail: [...v.games, ...v.loaders].join(' · '),
+                      }))
+                    "
+                    :disabled="blocked"
+                    literal-labels
+                    floating
+                    compact
+                  />
+                  <LoaderCircle
+                    v-if="loadingVersions"
+                    class="spin"
+                    :size="16"
+                  />
+                  <button
+                    v-else-if="versionFailed"
+                    class="text-button"
+                    @click="loadVersions()"
+                  >
+                    {{ t("重试") }}
+                  </button>
+                  <span v-else-if="!versions.length" class="pack-muted">{{
+                    t("暂无可用版本")
+                  }}</span>
                 </div>
                 <button
                   class="icon-button"
@@ -306,39 +342,6 @@ onBeforeUnmount(() => {
               >
                 {{ project.description }}
               </p>
-              <div
-                class="pack-version list-reveal-item"
-                :style="listRevealStyle(2)"
-              >
-                <span>{{ t("版本") }}</span>
-                <GlassSelect
-                  v-if="versions.length"
-                  id="online-pack-version"
-                  v-model="chosen"
-                  :options="
-                    versions.map((v) => ({
-                      value: v.id,
-                      label: v.name || v.number,
-                      detail: [...v.games, ...v.loaders].join(' · '),
-                    }))
-                  "
-                  :disabled="blocked"
-                  literal-labels
-                  floating
-                  compact
-                />
-                <LoaderCircle v-if="loadingVersions" class="spin" :size="16" />
-                <button
-                  v-else-if="versionFailed"
-                  class="text-button"
-                  @click="loadVersions()"
-                >
-                  {{ t("重试") }}
-                </button>
-                <span v-else-if="!versions.length" class="pack-muted">{{
-                  t("暂无可用版本")
-                }}</span>
-              </div>
               <button
                 v-if="moreVersions"
                 class="text-button pack-more"
@@ -347,9 +350,6 @@ onBeforeUnmount(() => {
               >
                 {{ t("更多版本") }}
               </button>
-              <p v-if="selected" class="pack-compatibility">
-                {{ [...selected.games, ...selected.loaders].join(" · ") }}
-              </p>
             </template>
             <template v-else>
               <button
@@ -555,15 +555,17 @@ onBeforeUnmount(() => {
   color: var(--blue);
   flex-shrink: 0;
 }
-.pack-detail-heading div {
+.pack-detail-heading .pack-title {
   flex: 1;
   min-width: 0;
 }
 .pack-detail-heading h3 {
   margin: 0 0 4px;
-  font-size: 20px;
+  font-size: 18px;
   line-height: 1.4;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .pack-detail-heading small,
 .pack-compatibility,
@@ -579,6 +581,9 @@ onBeforeUnmount(() => {
 }
 .pack-version {
   font-size: 12px;
+  flex: 0 1 240px;
+  min-width: 120px;
+  justify-content: flex-end;
 }
 .pack-version :deep(.glass-select) {
   flex: 1;

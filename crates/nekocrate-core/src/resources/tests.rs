@@ -1290,3 +1290,241 @@ async fn batch_resource_copy_checks_every_file_before_installing_and_keeps_disab
             .is_none()
     );
 }
+
+fn pick(project: &str, version: &str) -> ResourceSelection {
+    ResourceSelection {
+        platform: Platform::Modrinth,
+        kind: ResourceKind::Mods,
+        project: project.into(),
+        version: version.into(),
+        name: project.into(),
+    }
+}
+
+#[tokio::test]
+async fn prospective_resource_catalog_does_not_require_or_create_an_instance() {
+    let temp = tempfile::tempdir().unwrap();
+    let launcher = Launcher::open(Some(temp.path().join("launcher"))).unwrap();
+    let scope = ResourceCatalog {
+        minecraft: "1.20.1".into(),
+        loader: Some(ModLoader {
+            kind: "fabric".into(),
+            version: "0.16.10".into(),
+        }),
+        kind: ResourceKind::Mods,
+        platform: Platform::Modrinth,
+    };
+    cache(
+        &launcher,
+        "search",
+        &[
+            ("query", "cat".into()),
+            ("offset", "0".into()),
+            ("limit", "20".into()),
+            (
+                "facets",
+                json!([
+                    ["project_type:mod"],
+                    ["versions:1.20.1"],
+                    ["categories:fabric"]
+                ])
+                .to_string(),
+            ),
+        ],
+        json!({"hits": [{"project_id":"cat", "title":"Cat", "project_type":"mod"}], "total_hits":1}),
+    );
+    cache(
+        &launcher,
+        "project/cat/version",
+        &[
+            ("game_versions", json!(["1.20.1"]).to_string()),
+            ("loaders", json!(["fabric"]).to_string()),
+        ],
+        json!([remote("cat1", "cat", json!([]))]),
+    );
+    let token = CancellationToken::new();
+    assert_eq!(
+        launcher
+            .search_resource_catalog(&scope, "cat", 0, &token)
+            .await
+            .unwrap()
+            .hits[0]
+            .id,
+        "cat"
+    );
+    assert_eq!(
+        launcher
+            .catalog_resource_versions(&scope, "cat", &token)
+            .await
+            .unwrap()[0]
+            .id,
+        "cat1"
+    );
+    assert!(launcher.snapshot().database.instances.is_empty());
+}
+
+#[tokio::test]
+async fn multi_selection_honors_explicit_versions_and_checks_cross_root_conflicts() {
+    let (_temp, launcher, id, _) = fixture(true);
+    for name in ["cat", "ice", "base"] {
+        cache_project(&launcher, name);
+    }
+    cache(
+        &launcher,
+        "version/cat1",
+        &[],
+        remote(
+            "cat1",
+            "cat",
+            json!([{ "project_id":"base", "dependency_type":"required" }]),
+        ),
+    );
+    cache(
+        &launcher,
+        "version/ice1",
+        &[],
+        remote(
+            "ice1",
+            "ice",
+            json!([{ "project_id":"base", "version_id":"base1", "dependency_type":"required" }]),
+        ),
+    );
+    cache(
+        &launcher,
+        "version/base1",
+        &[],
+        remote("base1", "base", json!([])),
+    );
+    let target = launcher.resource_target(&id, "1.20.1").unwrap();
+    let selected = [
+        pick("cat", "cat1"),
+        pick("ice", "ice1"),
+        pick("base", "base1"),
+    ];
+    let plan = launcher
+        .resolve_resource_selection(target.clone(), &selected, None, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        plan.entries.len(),
+        3,
+        "shared dependencies are installed only once"
+    );
+    assert!(plan.conflicts.is_empty());
+    cache(
+        &launcher,
+        "version/ice1",
+        &[],
+        remote(
+            "ice1",
+            "ice",
+            json!([{ "project_id":"cat", "dependency_type":"incompatible" }]),
+        ),
+    );
+    let plan = launcher
+        .resolve_resource_selection(target, &selected, None, &CancellationToken::new())
+        .await
+        .unwrap();
+    assert!(plan.conflicts.iter().any(|c| c.contains("不兼容")));
+}
+
+#[tokio::test]
+async fn selected_resources_survive_cancel_and_restart_and_finish_in_the_version_directory() {
+    use sha1::{Digest, Sha1};
+    let (temp, launcher, id, working) = fixture(true);
+    let target = launcher.resource_target(&id, "1.20.1").unwrap();
+    launcher
+        .mutate(|db| {
+            let v = &mut db.instances[0].versions[0];
+            v.minecraft_version = Some(target.minecraft.clone());
+            v.loader = target.loader.clone();
+            v.installed = true;
+            Ok(())
+        })
+        .unwrap();
+    for name in ["cat", "ice"] {
+        let jar = temp.path().join(format!("{name}.jar"));
+        archive(
+            &jar,
+            &[(
+                "fabric.mod.json",
+                &format!(r#"{{"id":"{name}","version":"1.0"}}"#),
+            )],
+        );
+        let data = fs::read(jar).unwrap();
+        let hash = hex::encode(Sha1::digest(&data));
+        let cached = launcher
+            .root()
+            .join("cache/objects/sha1")
+            .join(&hash[..2])
+            .join(&hash);
+        fs::create_dir_all(cached.parent().unwrap()).unwrap();
+        fs::write(cached, &data).unwrap();
+        let mut value = remote(&format!("{name}1"), name, json!([]));
+        value["files"][0]["size"] = json!(data.len());
+        value["files"][0]["hashes"]["sha1"] = json!(hash);
+        cache_project(&launcher, name);
+        cache(&launcher, &format!("version/{name}1"), &[], value);
+    }
+    let picks = vec![pick("cat", "cat1"), pick("ice", "ice1")];
+    launcher
+        .queue_version_resources(
+            &id,
+            "1.20.1",
+            &target.minecraft,
+            target.loader.clone(),
+            picks.clone(),
+        )
+        .unwrap();
+    assert!(!working.join("mods/cat.jar").exists());
+    assert!(
+        !launcher
+            .instance(&id)
+            .unwrap()
+            .selected()
+            .unwrap()
+            .installed
+    );
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    assert!(
+        launcher
+            .install_selected_resources(&id, "1.20.1", &cancelled, &sink())
+            .await
+            .is_err()
+    );
+    let root = launcher.root().to_owned();
+    drop(launcher);
+    let launcher = Launcher::open(Some(root)).unwrap();
+    assert!(
+        !launcher
+            .instance(&id)
+            .unwrap()
+            .selected()
+            .unwrap()
+            .installed
+    );
+    launcher
+        .queue_version_resources(&id, "1.20.1", &target.minecraft, target.loader, picks)
+        .unwrap();
+    launcher
+        .install_selected_resources(&id, "1.20.1", &CancellationToken::new(), &sink())
+        .await
+        .unwrap();
+    assert!(working.join("mods/cat.jar").is_file());
+    assert!(working.join("mods/ice.jar").is_file());
+    assert!(!selection::has_selection(
+        &launcher.available_game_dir(&id).unwrap(),
+        "1.20.1"
+    ));
+    assert!(
+        launcher
+            .instance(&id)
+            .unwrap()
+            .selected()
+            .unwrap()
+            .installed
+    );
+    assert!(launcher.resource_plans(&id, "1.20.1").unwrap().is_empty());
+    assert_eq!(records(&working).unwrap().len(), 2);
+}

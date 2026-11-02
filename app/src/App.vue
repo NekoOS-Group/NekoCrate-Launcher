@@ -55,6 +55,11 @@ import {
 import { version as launcherVersion } from "../package.json";
 import { prepareAndLaunch } from "./launch";
 import {
+  recoveryActions,
+  type LaunchRecovery,
+  type RecoveryAction,
+} from "./launchRecovery";
+import {
   createLoaderCatalog,
   type LoaderVersion as LoaderChoice,
 } from "./loaderCatalog";
@@ -105,6 +110,7 @@ import {
   type ResourceDestination,
 } from "./useResourceTransfer";
 import ResourceBrowser from "./components/ResourceBrowser.vue";
+import ResourcePicker from "./components/ResourcePicker.vue";
 const ResourceManager = defineAsyncComponent(
   () => import("./components/ResourceManager.vue"),
 );
@@ -117,6 +123,7 @@ import {
   resourceDropIssue,
   resourceKindLabel,
   type ResourceSession,
+  type ResourceSelection,
   type ResourcePlan,
   type DetectedResource,
   type ResourceKind,
@@ -162,6 +169,7 @@ import type {
   VersionMetadata,
   ContentKind,
   ContentMetadata,
+  CrashReport,
 } from "./types";
 
 const desktop = isTauri();
@@ -493,6 +501,7 @@ const downloadSubmitting = ref(false);
 let downloadDraftInitialized = false;
 const selectedInstanceId = ref("");
 const busy = ref(false);
+const launchingId = ref<string | null>(null);
 const loginBusy = ref(false);
 let loginSession: string | null = null;
 let loginCancellation: Promise<void> | null = null;
@@ -544,12 +553,100 @@ function appendLog(line: LogLine) {
 const showLogs = ref(false);
 const logScope = ref("all");
 const logSession = ref(0);
+const launchReports = reactive<Record<string, CrashReport | null>>({});
+const recoveries = computed<LaunchRecovery[]>(() =>
+  snapshot.value.database.instances
+    .flatMap((instance) => {
+      const report = launchReports[instance.id];
+      const version = instance.versions.find((v) => v.id === report?.version);
+      if (
+        !report ||
+        !version ||
+        snapshot.value.running.includes(instance.id) ||
+        launchingId.value === instance.id
+      )
+        return [];
+      return [
+        {
+          instanceId: instance.id,
+          instanceName: instance.name,
+          versionName: versionName(version),
+          report,
+          actions: recoveryActions(report),
+        },
+      ];
+    })
+    .sort((a, b) => b.report.time - a.report.time),
+);
+function clearRecovery(scope: string) {
+  for (const id of Object.keys(launchReports))
+    if (scope === "all" || scope === id) launchReports[id] = null;
+}
+async function loadLaunchReport(id: string) {
+  if (!desktop || launchReports[id] !== undefined) return;
+  try {
+    const report = await rpc<CrashReport | null>("crash_report", { id });
+    if (launchReports[id] === undefined) launchReports[id] = report;
+  } catch (e) {
+    appendLog({
+      time: stamp(),
+      kind: "warning",
+      instanceId: id,
+      message: message(e),
+    });
+  }
+}
 function openLogs(scope = "all") {
   modal.value = null;
   utility.value = null;
   logScope.value = scope;
   logSession.value++;
   showLogs.value = true;
+  for (const instance of snapshot.value.database.instances)
+    if (scope === "all" || scope === instance.id)
+      void loadLaunchReport(instance.id);
+}
+async function recoverLaunch(
+  recovery: LaunchRecovery,
+  operation: RecoveryAction,
+) {
+  const id = recovery.instanceId;
+  const instance = snapshot.value.database.instances.find((i) => i.id === id);
+  const version = recovery.report.version;
+  if (!instance?.versions.some((v) => v.id === version)) return;
+  if (operation === "report") {
+    try {
+      await rpc("open_crash_report", {
+        id,
+        version,
+        time: recovery.report.time,
+      });
+    } catch (e) {
+      error.value = message(e);
+    }
+    return;
+  }
+  if (busy.value || snapshot.value.running.includes(id)) return;
+  if (operation === "repair") {
+    showLogs.value = false;
+    utility.value = "downloads";
+    await action("校验与修复", "install", { id, version, repair: true }, true);
+    return;
+  }
+  showLogs.value = false;
+  if (operation === "mods") {
+    manageResourceVersion(id, version, "mods");
+    return;
+  }
+  void edit(instance);
+  await nextTick();
+  const target =
+    operation === "java"
+      ? "instance-java-trigger"
+      : operation === "memory"
+        ? "instance-memory-trigger"
+        : null;
+  if (target) document.getElementById(target)?.focus({ preventScroll: true });
 }
 const modal = ref<
   "add" | "create" | "edit" | "delete" | "version" | "manage" | "library" | null
@@ -684,42 +781,20 @@ const loaderUnavailable = computed(
 const packPreview = ref<ModpackPreview | null>(null);
 const additionSection = ref<"game" | "modpacks" | "resources">("game");
 const onlinePack = ref(false);
-const additionVersion = ref("");
-const additionVersions = computed(() =>
-  (editing.value?.versions || []).map((version) => ({
-    value: version.id,
-    label: versionName(version),
-  })),
+const selectedResources = ref<ResourceSelection[]>([]);
+const resourceLoader = computed(() =>
+  form.loader === "vanilla"
+    ? null
+    : { kind: form.loader, version: form.loader_version },
 );
-const additionResourceSession = computed<ResourceSession | undefined>(() => {
-  const instance =
-    editing.value && instances.value.find((i) => i.id === editing.value!.id);
-  if (!instance) return;
-  const version =
-    instance.versions.find((v) => v.id === additionVersion.value)?.id ||
-    instance.versions.find((v) => v.id === instance.selected_version)?.id ||
-    instance.versions[0]?.id;
-  if (!version) return;
-  return {
-    instance,
-    version,
-    kind: "mods",
-    platform:
-      snapshot.value.database.settings.mod_download_source === "curseforge"
-        ? "curseforge"
-        : "modrinth",
-  };
-});
 watch(
-  () => editing.value?.id,
+  () => [form.version, form.loader, form.loader_version],
   () => {
-    additionVersion.value = "";
+    if (selectedResources.value.length) {
+      selectedResources.value = [];
+      notify("版本或加载器已变化，请重新预选资源");
+    }
   },
-);
-const additionResourceTask = computed(() =>
-  tasks.value.find(
-    (task) => task.resource_task && task.instance_id === editing.value?.id,
-  ),
 );
 const modpackDownloadTask = computed(() =>
   tasks.value.find(
@@ -1259,6 +1334,12 @@ const selectedRunning = computed(
   () =>
     !!selectedInstance.value &&
     snapshot.value.running.includes(selectedInstance.value.id),
+);
+const selectedStarting = computed(
+  () =>
+    !!selectedInstance.value &&
+    launchingId.value === selectedInstance.value.id &&
+    !selectedRunning.value,
 );
 const utilityTitles = {
   accounts: "账户",
@@ -1983,7 +2064,8 @@ async function action<T>(
     const version =
       op === "install"
         ? instance?.versions.find(
-            (version) => version.id === instance.selected_version,
+            (version) =>
+              version.id === (data.version ?? instance.selected_version),
           )
         : undefined;
     const previousTask = tasks.value.find(
@@ -2081,8 +2163,42 @@ async function action<T>(
       finishWorkflow(entry.workflow, entry.status);
       entry.message = text;
     }
-    error.value = text;
-    appendLog({ time: stamp(), kind: "error", message: text });
+    const id = typeof data.id === "string" ? data.id : null;
+    if (op === "launch" && id && !text.includes("取消")) {
+      if (!launchReports[id]) {
+        launchReports[id] = {
+          version:
+            snapshot.value.database.instances.find((i) => i.id === id)
+              ?.selected_version || "",
+          time: Date.now() / 1000,
+          exit: text,
+          sources: [],
+          findings: [],
+        };
+        appendLog({
+          time: stamp(),
+          kind: "error",
+          message: text,
+          instanceId: id,
+        });
+      }
+      if (
+        shouldOpenGameLogs(
+          "launch_failed",
+          snapshot.value.database.instances.find((i) => i.id === id)?.launch,
+        )
+      ) {
+        if (!showLogs.value || logScope.value !== id) openLogs(id);
+      } else error.value = text;
+    } else {
+      error.value = text;
+      appendLog({
+        time: stamp(),
+        kind: "error",
+        message: text,
+        instanceId: id,
+      });
+    }
   } finally {
     busy.value = false;
     if (entry) current.value = null;
@@ -2413,6 +2529,7 @@ async function submitDownload() {
     game: form.version,
     loader: form.loader,
     loaderVersion: form.loader_version,
+    resources: selectedResources.value.map((pick) => ({ ...pick })),
   };
   downloadSubmitting.value = true;
   try {
@@ -2450,6 +2567,23 @@ async function submitDownload() {
             version: selection.game,
           });
     if (instance) {
+      if (selection.resources.length) {
+        const queued = await action<boolean>(
+          "预选资源",
+          "queue_version_resources",
+          {
+            id: instance.id,
+            version: instance.selected_version,
+            minecraft: selection.game,
+            loader:
+              selection.loader === "vanilla"
+                ? null
+                : { kind: selection.loader, version: selection.loaderVersion },
+            resources: selection.resources,
+          },
+        );
+        if (!queued) return;
+      }
       selectInstance(instance.id);
       if (session === modalSession) modal.value = null;
       await install(instance);
@@ -2686,7 +2820,7 @@ function newVersion(instance: Instance) {
     current.value?.workflow.steps[0]?.id === "pack_archive_resolve"
       ? "modpacks"
       : "game";
-  additionVersion.value = "";
+  selectedResources.value = [];
   onlinePack.value = false;
   error.value = "";
   utility.value = null;
@@ -2892,9 +3026,16 @@ async function startGame() {
   await prepareAndLaunch(selectedInstance.value, { install, launch });
 }
 async function launch(i: Instance) {
-  if (guestNameWrite) await guestNameWrite;
-  if (accountNameWrite) await accountNameWrite;
-  await action("启动游戏", "launch", { id: i.id }, true);
+  if (launchingId.value || busy.value) return;
+  launchingId.value = i.id;
+  launchReports[i.id] = null;
+  try {
+    if (guestNameWrite) await guestNameWrite;
+    if (accountNameWrite) await accountNameWrite;
+    await action("启动游戏", "launch", { id: i.id }, true);
+  } finally {
+    launchingId.value = null;
+  }
 }
 async function setDownloadPaused(paused: boolean) {
   const task = current.value;
@@ -3214,6 +3355,17 @@ const launchWindowBehavior = createLaunchWindowBehavior(
   },
 );
 function onEvent(e: LauncherEvent) {
+  if (e.instance_id && ["game_crash", "launch_failed"].includes(e.kind))
+    launchReports[e.instance_id] = e.crash || null;
+  if (e.instance_id && e.kind === "game_started") {
+    launchReports[e.instance_id] = null;
+    if (!snapshot.value.running.includes(e.instance_id))
+      snapshot.value.running.push(e.instance_id);
+  }
+  if (e.instance_id && ["game_crash", "game_exit"].includes(e.kind))
+    snapshot.value.running = snapshot.value.running.filter(
+      (id) => id !== e.instance_id,
+    );
   if (e.kind === "download_progress_recovered") {
     void sync();
     return;
@@ -3306,7 +3458,11 @@ function onEvent(e: LauncherEvent) {
       instanceId: e.instance_id,
     });
   }
-  if (["game_started", "game_exit", "game_crash"].includes(e.kind)) {
+  if (
+    ["game_started", "game_exit", "game_crash", "launch_failed"].includes(
+      e.kind,
+    )
+  ) {
     const launchOptions = snapshot.value.database.instances.find(
       (i) => i.id === e.instance_id,
     )?.launch;
@@ -3671,26 +3827,34 @@ onUnmounted(() => {
         <div
           class="launch-control glass-surface ui-reveal-item"
           :style="listRevealStyle(5)"
-          :class="{ running: selectedRunning, download: !selectedVersion }"
+          :class="{
+            running: selectedRunning || selectedStarting,
+            download: !selectedVersion,
+          }"
         >
           <button
             class="launch-button"
             :class="{ unavailable: !selectedInstance }"
-            :disabled="busy || !selectedInstance"
+            :disabled="busy || selectedStarting || !selectedInstance"
+            :aria-busy="selectedStarting"
             :title="
               !selectedInstance
                 ? t('请先新建实例')
-                : !selectedVersion
-                  ? t('为 {name} 下载游戏版本', { name: selectedInstance.name })
-                  : selectedRunning
-                    ? t('停止游戏')
-                    : selectedVersion.installed
-                      ? t('启动 {version}', {
-                          version: versionName(selectedVersion),
-                        })
-                      : t('下载并启动 {version}', {
-                          version: versionName(selectedVersion),
-                        })
+                : selectedStarting
+                  ? t('启动中')
+                  : !selectedVersion
+                    ? t('为 {name} 下载游戏版本', {
+                        name: selectedInstance.name,
+                      })
+                    : selectedRunning
+                      ? t('停止游戏')
+                      : selectedVersion.installed
+                        ? t('启动 {version}', {
+                            version: versionName(selectedVersion),
+                          })
+                        : t('下载并启动 {version}', {
+                            version: versionName(selectedVersion),
+                          })
             "
             @click="
               selectedRunning
@@ -3704,13 +3868,15 @@ onUnmounted(() => {
               <Transition name="launch-content">
                 <span
                   :key="
-                    selectedRunning
-                      ? 'stop'
-                      : selectedVersion
-                        ? selectedVersion.installed
-                          ? 'play'
-                          : 'install'
-                        : 'download'
+                    selectedStarting
+                      ? 'starting'
+                      : selectedRunning
+                        ? 'stop'
+                        : selectedVersion
+                          ? selectedVersion.installed
+                            ? 'play'
+                            : 'install'
+                          : 'download'
                   "
                   class="launch-content"
                   :class="{
@@ -3718,18 +3884,13 @@ onUnmounted(() => {
                     'needs-install':
                       selectedVersion &&
                       !selectedVersion.installed &&
-                      !selectedRunning,
+                      !selectedRunning &&
+                      !selectedStarting,
                   }"
                 >
                   <span class="launch-primary">
-                    <LoaderCircle
-                      v-if="
-                        busy && current?.instance_id === selectedInstance?.id
-                      "
-                      class="spin"
-                      :size="18"
-                    /><Square
-                      v-else-if="selectedRunning"
+                    <Square
+                      v-if="selectedRunning || selectedStarting"
                       class="stop-icon"
                       :size="16"
                     /><Download
@@ -3737,13 +3898,15 @@ onUnmounted(() => {
                       :size="18"
                     /><Play v-else :size="18" />
                     <span class="launch-label">{{
-                      selectedRunning
-                        ? t("停止游戏")
-                        : selectedVersion
-                          ? selectedVersion.installed
-                            ? t("启动游戏")
-                            : t("下载并启动游戏")
-                          : t("下载游戏")
+                      selectedStarting
+                        ? t("启动中")
+                        : selectedRunning
+                          ? t("停止游戏")
+                          : selectedVersion
+                            ? selectedVersion.installed
+                              ? t("启动游戏")
+                              : t("下载并启动游戏")
+                            : t("下载游戏")
                     }}</span>
                   </span>
                   <Transition name="launch-version">
@@ -4600,6 +4763,10 @@ onUnmounted(() => {
           :instances="snapshot.database.instances"
           :initial-scope="logScope"
           :session="logSession"
+          :recoveries="recoveries"
+          :busy="busy || !!launchingId"
+          @recover="recoverLaunch"
+          @clear="clearRecovery"
           @copy="copy"
           @close="showLogs = false"
         />
@@ -4743,6 +4910,14 @@ onUnmounted(() => {
           @refresh="loadVersions"
           @browse="chooseCreationDirectory(true)"
           @import-pack="openModpack()"
+          :resources="selectedResources"
+          @remove-resource="
+            selectedResources = selectedResources.filter(
+              (item) =>
+                item.platform !== $event.platform ||
+                item.project !== $event.project,
+            )
+          "
           @submit="submitDownload"
           @close="modal = null"
         >
@@ -4766,63 +4941,21 @@ onUnmounted(() => {
               @resume="setDownloadPaused(false)"
               @cancel="cancel"
             />
-            <template v-else-if="additionSection === 'resources'">
-              <div
-                v-if="additionResourceSession"
-                class="addition-version-target"
-              >
-                <span>{{ t("版本") }}</span>
-                <GlassSelect
-                  id="addition-resource-version"
-                  :model-value="additionResourceSession.version"
-                  :options="additionVersions"
-                  :disabled="busy || downloadTargetRunning"
-                  literal-labels
-                  floating
-                  compact
-                  @update:model-value="additionVersion = $event"
-                />
-              </div>
-              <ResourceBrowser
-                v-if="additionResourceSession && !downloadTargetRunning"
-                embedded
-                :key="`${additionResourceSession.instance.id}/${additionResourceSession.version}`"
-                :session="additionResourceSession"
-                :busy="busy"
-                :rpc="rpc"
-                :prepare="prepareResources"
-                :install="installResources"
-                :task="additionResourceTask"
-                :control-pending="downloadControlBusy"
-                :retrying="retryingFile"
-                :retry-enabled="!busy && !downloadControlBusy"
-                @retry="retryDownloadFile($event, additionResourceTask)"
-                @continue="continueDownloadTask(additionResourceTask)"
-                @error="error = message($event)"
-                @link="openLink"
-                @installed="resourcesInstalled"
-                @pause="setDownloadPaused(true)"
-                @resume="setDownloadPaused(false)"
-                @cancel="cancel"
-                @close="modal = null"
-              />
-              <div v-else class="addition-empty">
-                <span>{{
-                  t(
-                    downloadTargetRunning
-                      ? "请先停止此实例的游戏"
-                      : "选择已有游戏版本后添加资源",
-                  )
-                }}</span>
-                <button
-                  v-if="!downloadTargetRunning"
-                  class="text-button"
-                  @click="additionSection = 'game'"
-                >
-                  {{ t("添加游戏版本") }}
-                </button>
-              </div>
-            </template>
+            <ResourcePicker
+              v-else-if="additionSection === 'resources'"
+              v-model="selectedResources"
+              :minecraft="form.version"
+              :loader="resourceLoader"
+              :platform="
+                snapshot.database.settings.mod_download_source === 'curseforge'
+                  ? 'curseforge'
+                  : 'modrinth'
+              "
+              :disabled="busy || downloadSubmitting"
+              :rpc="rpc"
+              @back="additionSection = 'game'"
+              @error="error = message($event)"
+            />
           </template>
         </VersionDownload>
         <section

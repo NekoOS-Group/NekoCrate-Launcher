@@ -26,6 +26,14 @@ export interface ResourceVersion {
   number: string;
   release_type: string;
 }
+export interface ResourceSelection {
+  platform: ResourcePlatform;
+  kind: ResourceKind;
+  project: string;
+  version: string;
+  name: string;
+  number: string;
+}
 export interface DetectedResource {
   path: string;
   name: string;
