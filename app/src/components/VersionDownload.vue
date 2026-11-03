@@ -6,6 +6,7 @@ import {
   ChevronRight,
   Download,
   LoaderCircle,
+  Upload,
   X,
 } from "lucide-vue-next";
 import DownloadDestination from "./DownloadDestination.vue";
@@ -65,6 +66,17 @@ const emit = defineEmits<{
   close: [];
 }>();
 const destination = ref<InstanceType<typeof DownloadDestination>>();
+const searchTarget = ref<HTMLElement>();
+const filterTarget = ref<HTMLElement>();
+const packs = computed(() => props.section === "modpacks");
+const selectingResources = computed(() => props.section === "resources");
+const packDetail = ref(false);
+const hideCategories = computed(
+  () => selectingResources.value || (packs.value && packDetail.value),
+);
+function setPackDetail(active: boolean) {
+  packDetail.value = active;
+}
 const category = ref<VersionCategory>("release");
 function chooseCategory(value: VersionCategory) {
   category.value = value;
@@ -112,6 +124,7 @@ const selectionColor = computed(() =>
       <h2 class="dialog-heading" tabindex="-1" autofocus>
         {{ t("添加新的版本") }}
       </h2>
+      <div ref="searchTarget" class="catalog-title-search" />
       <DownloadDestination
         ref="destination"
         :target="target"
@@ -139,35 +152,76 @@ const selectionColor = computed(() =>
         <X :size="16" />
       </button>
     </header>
-    <nav class="catalog-filter" :aria-label="t('版本分类')">
-      <button
-        v-for="(item, index) in versionCategories"
-        :key="item.id"
-        type="button"
-        class="list-reveal-item"
-        :style="{ '--category-accent': item.color, ...listRevealStyle(index) }"
-        :class="{
-          active: (!section || section === 'game') && category === item.id,
-        }"
-        :aria-pressed="(!section || section === 'game') && category === item.id"
-        :disabled="disabled"
-        @click="chooseCategory(item.id)"
-      >
-        <VersionCube :variant="item.id" /><span>{{ t(item.label) }}</span>
-      </button>
-      <span class="catalog-divider" aria-hidden="true" />
-      <button
-        type="button"
-        class="catalog-modpacks list-reveal-item"
-        :style="{ '--category-accent': 'var(--blue)', ...listRevealStyle(4) }"
-        :class="{ active: section === 'modpacks' }"
-        :aria-pressed="section === 'modpacks'"
-        :disabled="disabled"
-        @click="$emit('update:section', 'modpacks')"
-      >
-        <Archive :size="20" /><span>{{ t("整合包") }}</span>
-      </button>
-    </nav>
+    <div
+      class="catalog-filter-slot"
+      :class="{ collapsed: hideCategories }"
+      :inert="hideCategories"
+      :aria-hidden="hideCategories"
+    >
+      <div class="catalog-filter-clip">
+        <nav
+          class="catalog-filter"
+          :class="{ compact: packs }"
+          :aria-label="t('版本分类')"
+        >
+          <div class="catalog-games">
+            <div class="catalog-categories" :inert="packs" :aria-hidden="packs">
+              <button
+                v-for="(item, index) in versionCategories"
+                :key="item.id"
+                type="button"
+                class="list-reveal-item"
+                :style="{
+                  '--category-accent': item.color,
+                  ...listRevealStyle(index),
+                }"
+                :class="{
+                  active:
+                    (!section || section === 'game') && category === item.id,
+                }"
+                :aria-pressed="
+                  (!section || section === 'game') && category === item.id
+                "
+                :disabled="disabled"
+                @click="chooseCategory(item.id)"
+              >
+                <VersionCube :variant="item.id" /><span>{{
+                  t(item.label)
+                }}</span>
+              </button>
+            </div>
+            <button
+              type="button"
+              class="catalog-game-summary"
+              :inert="!packs"
+              :aria-hidden="!packs"
+              :disabled="disabled"
+              @click="chooseCategory(category)"
+            >
+              <VersionCube :variant="category" /><span>{{
+                t("游戏版本")
+              }}</span>
+            </button>
+          </div>
+          <span class="catalog-divider" aria-hidden="true" />
+          <button
+            type="button"
+            class="catalog-modpacks list-reveal-item"
+            :style="{
+              '--category-accent': 'var(--blue)',
+              ...listRevealStyle(4),
+            }"
+            :class="{ active: section === 'modpacks' }"
+            :aria-pressed="section === 'modpacks'"
+            :disabled="disabled"
+            @click="$emit('update:section', 'modpacks')"
+          >
+            <Archive :size="20" /><span>{{ t("整合包") }}</span>
+          </button>
+          <div ref="filterTarget" class="catalog-tools" :inert="!packs" />
+        </nav>
+      </div>
+    </div>
     <ContentSwitch :content-key="section || 'game'">
       <form
         v-if="!section || section === 'game'"
@@ -301,7 +355,7 @@ const selectionColor = computed(() =>
             :disabled="disabled"
             @click="$emit('importPack')"
           >
-            {{ t("导入") }}
+            <Upload :size="15" />{{ t("导入") }}
           </button>
           <button type="submit" class="button primary" :disabled="!canSubmit">
             <LoaderCircle v-if="submitting" :size="16" class="spin" /><Download
@@ -311,7 +365,14 @@ const selectionColor = computed(() =>
           </button>
         </footer>
       </form>
-      <div v-else class="addition-content"><slot name="content" /></div>
+      <div v-else class="addition-content">
+        <slot
+          name="content"
+          :search-target="searchTarget"
+          :filter-target="filterTarget"
+          :set-pack-detail="setPackDetail"
+        />
+      </div>
     </ContentSwitch>
   </section>
 </template>
@@ -323,11 +384,93 @@ const selectionColor = computed(() =>
 }
 .catalog-filter {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr)) 1px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 4fr) 1px minmax(0, 1fr) minmax(0, 0fr);
   align-items: center;
   gap: 8px;
   padding: 8px 24px 10px;
   flex-shrink: 0;
+  transition: grid-template-columns 360ms var(--motion-ease);
+}
+.catalog-filter-slot {
+  display: grid;
+  grid-template-rows: 1fr;
+  flex-shrink: 0;
+  transition:
+    grid-template-rows 320ms var(--motion-ease),
+    opacity 160ms var(--motion-ease);
+}
+.catalog-filter-slot.collapsed {
+  grid-template-rows: 0fr;
+  opacity: 0;
+  pointer-events: none;
+}
+.catalog-filter-clip {
+  min-height: 0;
+  overflow: hidden;
+}
+.catalog-filter.compact {
+  grid-template-columns: minmax(0, 1fr) 1px minmax(0, 1fr) minmax(0, 3fr);
+}
+.catalog-games {
+  position: relative;
+  min-width: 0;
+  overflow: hidden;
+  --category-accent: var(--blue);
+}
+.catalog-categories {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  transition:
+    opacity 160ms var(--motion-ease) 100ms,
+    visibility 0s 100ms;
+}
+.catalog-filter.compact .catalog-categories {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition-delay: 0s, 160ms;
+}
+.catalog-game-summary {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+.catalog-filter button.catalog-game-summary {
+  transition:
+    opacity 160ms var(--motion-ease),
+    visibility 0s 160ms,
+    color 180ms;
+}
+.catalog-filter.compact .catalog-game-summary {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transition-delay: 120ms, 0s, 0s;
+}
+.catalog-tools {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  min-width: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition: opacity 160ms var(--motion-ease);
+}
+.catalog-filter.compact .catalog-tools {
+  opacity: 1;
+  transition-delay: 120ms;
+}
+.catalog-title-search {
+  flex: 1 1 180px;
+  min-width: 100px;
+  max-width: 240px;
+}
+.catalog-title-search:empty {
+  display: none;
 }
 .catalog-filter button {
   display: flex;
@@ -450,6 +593,7 @@ const selectionColor = computed(() =>
   gap: 16px;
 }
 .version-download .modal-header h2 {
+  flex: 0 0 auto;
   font-size: 16px;
 }
 .version-download .version-download-form {
@@ -595,6 +739,9 @@ const selectionColor = computed(() =>
     gap: 4px;
     padding: 8px 4px;
   }
+  .catalog-categories {
+    gap: 4px;
+  }
   .version-download-body {
     grid-template-columns: minmax(0, 1fr) 230px;
   }
@@ -606,6 +753,11 @@ const selectionColor = computed(() =>
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  .catalog-filter-slot,
+  .catalog-filter,
+  .catalog-categories,
+  .catalog-tools,
+  .catalog-filter button.catalog-game-summary,
   .catalog-filter button,
   .download-resources,
   .loader-options-enter-active,

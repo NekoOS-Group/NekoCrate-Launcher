@@ -131,6 +131,7 @@ export interface ContentMetadata {
     revealable: boolean;
     title: string | null;
     description: string | null;
+    description_format?: "markdown" | null;
     fields: {
       label: string;
       value: string;

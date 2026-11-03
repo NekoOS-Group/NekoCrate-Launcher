@@ -163,7 +163,7 @@ test("菜单留在原生 dialog 内，支持跨浮层焦点、键盘选择、点
     ui.navigate(key("Home"));
     assert.equal(document.activeElement, list.children[0]);
     ui.choose("a");
-    assert.deepEqual(choices, [["update:modelValue", "a"]]);
+    assert.deepEqual(choices, [["open"], ["update:modelValue", "a"]]);
     assert.equal(document.activeElement, trigger);
     assert.equal(frames.size, 0);
     await ui.open();

@@ -8,7 +8,7 @@ import {
   useId,
   watch,
 } from "vue";
-import { Box, LoaderCircle, RefreshCw, Search, X } from "lucide-vue-next";
+import { Box, LoaderCircle, Search, X } from "lucide-vue-next";
 import { listRevealStyle } from "../listMotion";
 import { createViewportMotion } from "../viewportMotion";
 import { filterVersions, type VersionCategory } from "../versionCatalog";
@@ -195,15 +195,6 @@ onBeforeUnmount(() => {
           <X :size="13" />
         </button>
       </div>
-      <button
-        type="button"
-        class="icon-button catalog-refresh"
-        :disabled="loading || disabled"
-        :aria-label="t('更新版本列表')"
-        @click="$emit('refresh')"
-      >
-        <RefreshCw :size="15" :class="{ spin: loading }" />
-      </button>
     </div>
     <div class="catalog-results">
       <div
@@ -276,9 +267,6 @@ onBeforeUnmount(() => {
         </button>
       </div>
     </div>
-    <span class="catalog-count">{{
-      t("{count} 个版本", { count: filtered.length })
-    }}</span>
   </div>
 </template>
 
@@ -328,11 +316,6 @@ onBeforeUnmount(() => {
 .catalog-search .icon-button {
   width: 24px;
   height: 28px;
-  flex-shrink: 0;
-}
-.catalog-refresh {
-  width: 30px;
-  height: 32px;
   flex-shrink: 0;
 }
 .catalog-results {
@@ -422,12 +405,6 @@ onBeforeUnmount(() => {
 }
 .catalog-empty button {
   pointer-events: auto;
-}
-.catalog-count {
-  padding-top: 12px;
-  font: 10px/16px var(--mono);
-  color: var(--muted);
-  opacity: 0.8;
 }
 @media (prefers-reduced-motion: reduce) {
   .catalog-version,

@@ -4,6 +4,7 @@ use serde_json::json;
 use sha1::{Digest, Sha1};
 use std::{fs, io::Write};
 mod content;
+mod recovery;
 
 #[tokio::test]
 async fn sha512_pack_hash_matches_known_vector_and_rejects_corruption() {

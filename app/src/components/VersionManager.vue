@@ -60,7 +60,9 @@ import type {
 
 import { anchorModFiles, modFileName, modRowKeys } from "../contentIdentity";
 import type { ModActions } from "../modManagement";
+import type { ResourceRpc } from "../projectPresentation";
 const props = defineProps<{
+  rpc: ResourceRpc;
   initialVersion?: string;
   initialTab?: ContentKind;
   modActions?: ModActions;
@@ -101,6 +103,7 @@ const props = defineProps<{
   remove: (version: string) => Promise<void>;
 }>();
 const emit = defineEmits<{
+  link: [url: string];
   close: [];
   error: [error: unknown];
   busy: [busy: boolean];
@@ -296,15 +299,13 @@ function selectionKeyboard(event: KeyboardEvent) {
 function selectedDragSources(file: LocalContentFile): ResourceCopySource[] {
   if (!isResourceDragKind(tab.value)) return [];
   const kind = tab.value;
-  return selection
-    .drag(file)
-    .map((item) => ({
-      kind,
-      instance: props.instance.id,
-      version: selected.value,
-      file: item.file_name,
-      name: item.name,
-    }));
+  return selection.drag(file).map((item) => ({
+    kind,
+    instance: props.instance.id,
+    version: selected.value,
+    file: item.file_name,
+    name: item.name,
+  }));
 }
 async function setSelectedEnabled(enabled: boolean) {
   if (
@@ -950,6 +951,8 @@ defineExpose({ refresh });
                   </template>
                   <template v-else>
                     <VersionContentItem
+                      :rpc="rpc"
+                      @link="emit('link', $event)"
                       class="list-reveal-item"
                       :style="contentRevealStyle(file, index)"
                       v-for="(file, index) in filteredFiles"

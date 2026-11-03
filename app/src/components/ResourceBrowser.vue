@@ -26,6 +26,8 @@ import {
 } from "lucide-vue-next";
 import { open } from "@tauri-apps/plugin-dialog";
 import { t, translateMessage } from "../i18n";
+import CatalogTail from "./CatalogTail.vue";
+import { useCatalogFeed } from "../useCatalogFeed";
 import { versionName } from "../versionDescription";
 import type { Task } from "../types";
 import type {
@@ -39,6 +41,8 @@ import type {
   ResourceVersion,
 } from "../resources";
 import GlassSelect from "./GlassSelect.vue";
+import ProjectImage from "./ProjectImage.vue";
+import ProjectDetails from "./ProjectDetails.vue";
 import DownloadWorkflow from "./DownloadWorkflow.vue";
 import ContentSwitch from "./ContentSwitch.vue";
 import { listRevealStyle } from "../listMotion";
@@ -81,14 +85,9 @@ const platform = ref<ResourcePlatform>(props.session.platform || "modrinth");
 const query = ref("");
 const target = shallowRef<ResourceTarget>();
 const project = shallowRef<ResourceProject>();
-const hits = shallowRef<ResourceProject[]>([]);
 const versions = shallowRef<ResourceVersion[]>([]);
 const chosen = ref("");
 const world = ref("");
-const offset = ref(0);
-const total = ref(0);
-const searching = ref(false);
-const resultGeneration = ref(0);
 const loadingVersions = ref(false);
 const preparing = ref(false);
 const installing = ref(false);
@@ -111,6 +110,23 @@ const scope = computed(() => ({
   platform: platform.value,
   kind: kind.value,
 }));
+const feed = useCatalogFeed<ResourceProject>(
+  (offset) =>
+    props.rpc("search_resources", {
+      scope: scope.value,
+      query: query.value,
+      offset,
+    }),
+  (error) => emit("error", error),
+);
+const {
+  hits,
+  loading: searching,
+  failure,
+  more,
+  revision: resultGeneration,
+  scrollTop,
+} = feed;
 const worldRequired = computed(() =>
   local.value
     ? files.value.some((f) => selectedKinds.value[f.path] === "datapacks")
@@ -139,40 +155,21 @@ const bytes = (size: number) =>
   size > 1024 * 1024
     ? `${(size / 1024 / 1024).toFixed(1)} MB`
     : `${Math.ceil(size / 1024)} KB`;
-let searchRequest = 0;
 let versionRequest = 0;
 let disposed = false;
 let timer: ReturnType<typeof setTimeout> | undefined;
-async function search() {
-  const request = ++searchRequest;
+async function search(append = false) {
+  clearTimeout(timer);
   if (
     local.value ||
     kind.value === "saves" ||
     !target.value ||
     (kind.value === "mods" && !target.value.loader)
   ) {
-    searching.value = false;
+    feed.invalidate();
     return;
   }
-  searching.value = true;
-  try {
-    const response = await props.rpc<{
-      hits: ResourceProject[];
-      total: number;
-    }>("search_resources", {
-      scope: scope.value,
-      query: query.value,
-      offset: offset.value,
-    });
-    if (request !== searchRequest || disposed) return;
-    hits.value = response.hits;
-    resultGeneration.value++;
-    total.value = response.total;
-  } catch (error) {
-    if (request === searchRequest && !disposed) emit("error", error);
-  } finally {
-    if (request === searchRequest) searching.value = false;
-  }
+  await feed.search(append);
 }
 async function selectProject(item: ResourceProject) {
   if (blocked.value) return;
@@ -302,24 +299,16 @@ watch(
   },
 );
 watch([kind, platform, local], () => {
-  searchRequest++;
   versionRequest++;
   project.value = undefined;
   chosen.value = "";
-  hits.value = [];
-  total.value = 0;
-  offset.value = 0;
   void search();
 });
 watch(query, () => {
   clearTimeout(timer);
-  searchRequest++;
-  timer = setTimeout(() => {
-    offset.value = 0;
-    void search();
-  }, 250);
+  feed.invalidate(true);
+  timer = setTimeout(() => void search(), 250);
 });
-watch(offset, () => void search());
 watch(
   () => props.session.files,
   (value) => {
@@ -349,7 +338,6 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   disposed = true;
   clearTimeout(timer);
-  searchRequest++;
   versionRequest++;
 });
 </script>
@@ -584,7 +572,11 @@ onBeforeUnmount(() => {
                 : project?.id || `${kind}:${platform}:${resultGeneration}`
             "
           >
-            <div class="resource-results" data-list-viewport>
+            <div
+              class="resource-results"
+              data-list-viewport
+              data-catalog-viewport
+            >
               <template v-if="local">
                 <div
                   v-for="(file, index) in files"
@@ -633,7 +625,9 @@ onBeforeUnmount(() => {
                   class="resource-detail-title list-reveal-item"
                   :style="listRevealStyle(0)"
                 >
-                  <component :is="icon(kind)" :size="30" />
+                  <ProjectImage :url="project.icon_url" :rpc="rpc" :size="44"
+                    ><component :is="icon(kind)" :size="30"
+                  /></ProjectImage>
                   <h3>{{ project.name }}</h3>
                   <button
                     class="icon-button"
@@ -643,9 +637,6 @@ onBeforeUnmount(() => {
                     <ExternalLink :size="16" />
                   </button>
                 </div>
-                <p class="list-reveal-item" :style="listRevealStyle(1)">
-                  {{ project.description }}
-                </p>
                 <div
                   class="resource-compatible list-reveal-item"
                   :style="listRevealStyle(2)"
@@ -673,6 +664,13 @@ onBeforeUnmount(() => {
                   />
                   <p v-else>{{ t("未找到兼容版本") }}</p>
                 </div>
+                <ProjectDetails
+                  :key="`${platform}/${project.id}`"
+                  :project="project"
+                  :platform="platform"
+                  :rpc="rpc"
+                  @link="emit('link', $event)"
+                />
               </div>
               <template v-else-if="kind === 'saves'"
                 ><div
@@ -691,11 +689,13 @@ onBeforeUnmount(() => {
                   v-for="(item, index) in hits"
                   :key="item.id"
                   class="resource-result list-reveal-item"
-                  :style="listRevealStyle(index)"
+                  :style="listRevealStyle(index % 20)"
                   :disabled="blocked"
                   @click="selectProject(item)"
                 >
-                  <component :is="icon(kind)" :size="26" />
+                  <ProjectImage :url="item.icon_url" :rpc="rpc" :size="40">
+                    <component :is="icon(kind)" :size="26" />
+                  </ProjectImage>
                   <div>
                     <strong>{{ item.name }}</strong>
                     <p>{{ item.description }}</p>
@@ -706,7 +706,10 @@ onBeforeUnmount(() => {
                     }}</span
                   >
                 </button>
-                <p v-if="!searching && !hits.length" class="resource-empty">
+                <p
+                  v-if="!searching && !failure && !hits.length"
+                  class="resource-empty"
+                >
                   {{
                     t(
                       kind === "mods" && target && !target.loader
@@ -715,6 +718,15 @@ onBeforeUnmount(() => {
                     )
                   }}
                 </p>
+                <CatalogTail
+                  v-model:position="scrollTop"
+                  :loading="searching"
+                  :more="more"
+                  :failure="failure"
+                  :disabled="blocked"
+                  @load="search(true)"
+                  @retry="feed.retry()"
+                />
               </template>
             </div>
           </ContentSwitch>
@@ -769,24 +781,6 @@ onBeforeUnmount(() => {
                 }}
               </button></template
             >
-            <div v-else-if="kind !== 'saves'" class="resource-pagination">
-              <button
-                class="icon-button"
-                :disabled="offset === 0 || searching"
-                :aria-label="t('上一页')"
-                @click="offset = Math.max(0, offset - 20)"
-              >
-                <ArrowLeft :size="16" /></button
-              ><small>{{ Math.floor(offset / 20) + 1 }}</small
-              ><button
-                class="icon-button"
-                :disabled="offset + 20 >= total || searching"
-                :aria-label="t('下一页')"
-                @click="offset += 20"
-              >
-                <ArrowRight :size="16" />
-              </button>
-            </div>
           </footer>
         </template>
       </template>
@@ -960,7 +954,7 @@ onBeforeUnmount(() => {
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
-.resource-result > span {
+.resource-result > span:not(.project-image) {
   display: flex;
   gap: 5px;
   align-items: center;
@@ -1063,15 +1057,10 @@ onBeforeUnmount(() => {
   color: var(--muted);
   max-width: 60%;
 }
-.resource-pagination,
 .resource-import {
   display: flex;
   align-items: center;
   gap: 10px;
-}
-.resource-pagination small {
-  font-variant-numeric: tabular-nums;
-  color: var(--muted);
 }
 .resource-import button {
   font-size: 12px;

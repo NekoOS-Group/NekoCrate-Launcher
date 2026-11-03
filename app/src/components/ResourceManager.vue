@@ -36,6 +36,7 @@ import {
   changeSelectedMods,
 } from "../useResourceSelection";
 import VersionContentItem from "./VersionContentItem.vue";
+import LocalContentImage from "./LocalContentImage.vue";
 import { t } from "../i18n";
 import { formatBytes as formatSmallBytes } from "../downloadWorkflow";
 const formatBytes = (bytes: number) =>
@@ -107,6 +108,7 @@ const props = defineProps<{
   loadAccountSkin: (id: string) => Promise<string | null>;
 }>();
 const emit = defineEmits<{
+  link: [url: string];
   close: [];
   error: [error: unknown];
   busy: [value: boolean];
@@ -1060,7 +1062,23 @@ defineExpose({ drop, refresh });
             @pointerdown="beginResourceDrag($event, row)"
             @dragstart.prevent
           >
+            <LocalContentImage
+              v-if="
+                ['mods', 'resourcepacks', 'shaderpacks'].includes(
+                  resourceKind,
+                ) && row.owners[0]
+              "
+              :rpc="rpc"
+              :instance-id="row.owners[0].id"
+              :version="row.owners[0].version"
+              :kind="resourceKind"
+              :file="row.file"
+              :size="40"
+              class="rm-tile-icon"
+              ><component :is="resourceIcon" :size="32" :stroke-width="1.3"
+            /></LocalContentImage>
             <component
+              v-else
               :is="resourceIcon"
               :size="32"
               :stroke-width="1.3"
@@ -1092,6 +1110,8 @@ defineExpose({ drop, refresh });
                 <X :size="16" />
               </button>
               <VersionContentItem
+                :rpc="rpc"
+                @link="emit('link', $event)"
                 ref="resourceDetail"
                 :file="selectedResource.file"
                 :instance-id="selectedResource.owners[0]!.id"

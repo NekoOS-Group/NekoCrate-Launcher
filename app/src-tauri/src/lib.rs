@@ -79,10 +79,31 @@ enum Request {
         revision: String,
         text: String,
     },
+    ResourceProject {
+        platform: nekocrate_core::resources::Platform,
+        project: String,
+    },
+    ResourceProjectSummary {
+        platform: nekocrate_core::resources::Platform,
+        project: String,
+    },
+    ResourceImage {
+        url: String,
+    },
+    ModpackCategories {
+        platform: nekocrate_core::resources::Platform,
+    },
     SearchModpacks {
         platform: nekocrate_core::resources::Platform,
         query: String,
         offset: usize,
+        #[serde(default)]
+        filters: nekocrate_core::resources::ModpackFilters,
+    },
+    ModpackVersion {
+        platform: nekocrate_core::resources::Platform,
+        project: String,
+        version: String,
     },
     ModpackVersions {
         platform: nekocrate_core::resources::Platform,
@@ -325,6 +346,12 @@ enum Request {
         kind: nekocrate_core::version_management::ContentKind,
         file: String,
     },
+    VersionContentPresentation {
+        id: String,
+        version: String,
+        kind: nekocrate_core::version_management::ContentKind,
+        file: String,
+    },
     OpenContentFolder {
         id: String,
         version: String,
@@ -502,7 +529,16 @@ fn dispatch<'a>(
                 let launcher=launcher.clone();
                 json!(tauri::async_runtime::spawn_blocking(move || launcher.resource_target(&id,&version)).await??)
             },
-            Request::SearchModpacks{platform,query,offset}=>json!(launcher.search_modpacks(platform,&query,offset,&CancellationToken::new()).await?),
+            Request::ResourceProject{platform,project}=>json!(launcher.resource_project(platform,&project,&CancellationToken::new()).await?),
+            Request::ResourceProjectSummary{platform,project}=>json!(launcher.resource_project_summary(platform,&project,&CancellationToken::new()).await?),
+            Request::ResourceImage{url}=>{
+                use base64::Engine;
+                let (bytes,mime)=launcher.resource_image(&url,&CancellationToken::new()).await?;
+                json!(format!("data:{mime};base64,{}",base64::engine::general_purpose::STANDARD.encode(bytes)))
+            },
+            Request::ModpackCategories{platform}=>json!(launcher.modpack_categories(platform,&CancellationToken::new()).await?),
+            Request::SearchModpacks{platform,query,offset,filters}=>json!(launcher.search_modpacks_filtered(platform,&query,offset,&filters,&CancellationToken::new()).await?),
+            Request::ModpackVersion{platform,project,version}=>json!(launcher.modpack_version(platform,&project,&version,&CancellationToken::new()).await?),
             Request::ModpackVersions{platform,project,offset}=>json!(launcher.modpack_versions(platform,&project,offset,&CancellationToken::new()).await?),
             Request::DownloadModpack{platform,project,version}=>{
                 let (cancel,guard)=state.job().await?;
@@ -683,6 +719,13 @@ fn dispatch<'a>(
             Request::VersionContentMetadata{id,version,kind,file}=>{
                 let launcher = launcher.clone();
                 json!(tauri::async_runtime::spawn_blocking(move || launcher.version_content_metadata(&id,&version,kind,&file)).await??)
+            },
+            Request::VersionContentPresentation{id,version,kind,file}=>{
+                use base64::Engine;
+                let launcher = launcher.clone();
+                let result = tauri::async_runtime::spawn_blocking(move || launcher.version_content_presentation(&id,&version,kind,&file)).await??;
+                let icon = result.icon.map(|(bytes,mime)|format!("data:{mime};base64,{}",base64::engine::general_purpose::STANDARD.encode(bytes)));
+                json!({"icon":icon,"project":result.project})
             },
             Request::OpenContentFolder{id,version,kind,file,source}=>{
                 let launcher = launcher.clone();

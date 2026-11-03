@@ -8,14 +8,32 @@ import {
   ref,
   watch,
 } from "vue";
-import { Check, ChevronDown, FolderOpen } from "lucide-vue-next";
+import {
+  Check,
+  ChevronDown,
+  FolderOpen,
+  Search,
+  LoaderCircle,
+} from "lucide-vue-next";
 import { floatingMenuPosition } from "../floatingMenu";
 
 const props = defineProps<{
   id: string;
   modelValue: string;
   disabled?: boolean;
-  options: readonly { value: string; label: string; detail?: string }[];
+  options: readonly {
+    value: string;
+    label: string;
+    detail?: string;
+    keywords?: string;
+  }[];
+  ariaLabel?: string;
+  searchable?: boolean;
+  searchPlaceholder?: string;
+  menuMinWidth?: number;
+  textOnly?: boolean;
+  loading?: boolean;
+  placeholder?: string;
   actionLabel?: string;
   floating?: boolean;
   compact?: boolean;
@@ -30,13 +48,26 @@ const emit = defineEmits<{
   "update:modelValue": [value: string];
   action: [];
   "update:editableValue": [value: number];
+  open: [];
 }>();
-const selected = computed(
+const selected = computed<(typeof props.options)[number]>(
   () =>
     props.options.find((source) => source.value === props.modelValue) ||
-    props.options[0],
+    props.options[0] || { value: "", label: props.placeholder || "选择版本" },
 );
 const label = (text: string) => (props.literalLabels ? text : t(text));
+const filter = ref("");
+const searchInput = ref<HTMLInputElement>();
+const visibleOptions = computed(() => {
+  const needle = filter.value.trim().toLocaleLowerCase();
+  return !needle
+    ? props.options
+    : props.options.filter((option) =>
+        `${label(option.label)} ${option.keywords || ""}`
+          .toLocaleLowerCase()
+          .includes(needle),
+      );
+});
 const root = ref<HTMLElement>();
 const trigger = ref<HTMLButtonElement>();
 const input = ref<HTMLInputElement>();
@@ -49,8 +80,13 @@ let trackingFrame: number | undefined;
 function fitMenu() {
   if (!expanded.value || !trigger.value) return;
   if (props.floating) {
+    const bounds = trigger.value.getBoundingClientRect();
     const position = floatingMenuPosition(
-      trigger.value.getBoundingClientRect(),
+      {
+        left: bounds.left,
+        bottom: bounds.bottom,
+        width: Math.max(bounds.width, props.menuMinWidth || 0),
+      },
       {
         width: window.innerWidth,
         height: window.innerHeight,
@@ -90,11 +126,15 @@ async function open(position: "selected" | "first" | "last" = "selected") {
   if (props.disabled) return;
   if (props.floating)
     portalTarget.value = root.value?.closest("dialog") || document.body;
+  filter.value = "";
   expanded.value = true;
+  emit("open");
   fitMenu();
   if (props.floating) trackMenu();
   await nextTick();
-  if (expanded.value)
+  if (expanded.value && props.searchable && position === "selected")
+    searchInput.value?.focus({ preventScroll: true });
+  else if (expanded.value)
     focusOption(
       position === "first"
         ? 0
@@ -123,6 +163,20 @@ function navigate(event: KeyboardEvent) {
       event.preventDefault();
       event.stopPropagation();
       close(true);
+    }
+    return;
+  }
+  if (searchInput.value && event.target === searchInput.value) {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      focusOption(event.key === "ArrowDown" ? 0 : optionButtons().length - 1);
+    } else if (
+      event.key === "Enter" &&
+      !event.isComposing &&
+      visibleOptions.value.length === 1
+    ) {
+      event.preventDefault();
+      choose(visibleOptions.value[0].value);
     }
     return;
   }
@@ -195,7 +249,10 @@ onBeforeUnmount(() => {
   <div
     ref="root"
     class="source-select"
-    :class="{ 'source-select-editable': editable }"
+    :class="{
+      'source-select-editable': editable,
+      'source-select-text': textOnly,
+    }"
     @focusout="leave"
     @keydown="navigate"
   >
@@ -227,7 +284,8 @@ onBeforeUnmount(() => {
       type="button"
       class="source-select-trigger"
       :disabled="disabled"
-      :aria-labelledby="`${id}-label ${id}-value`"
+      :aria-label="ariaLabel"
+      :aria-labelledby="ariaLabel ? undefined : `${id}-label ${id}-value`"
       aria-haspopup="listbox"
       :aria-controls="`${id}-options`"
       :aria-expanded="expanded"
@@ -245,7 +303,8 @@ onBeforeUnmount(() => {
           <span :key="selected.value">{{ label(selected.label) }}</span>
         </Transition>
       </span>
-      <ChevronDown :size="16" />
+      <slot name="trigger-suffix" />
+      <ChevronDown v-if="!textOnly" :size="16" />
     </button>
     <Teleport
       :to="portalTarget || 'body'"
@@ -270,14 +329,25 @@ onBeforeUnmount(() => {
                 : { maxHeight: `${availableHeight}px` }
           "
         >
+          <label v-if="searchable" class="source-select-search">
+            <Search :size="13" />
+            <input
+              ref="searchInput"
+              v-model="filter"
+              :placeholder="searchPlaceholder || t('搜索')"
+              :aria-label="searchPlaceholder || t('搜索')"
+              autocomplete="off"
+            />
+          </label>
           <div
             :id="`${id}-options`"
             class="source-select-options"
             role="listbox"
-            :aria-labelledby="`${id}-label`"
+            :aria-label="ariaLabel"
+            :aria-labelledby="ariaLabel ? undefined : `${id}-label`"
           >
             <button
-              v-for="source in options"
+              v-for="source in visibleOptions"
               :key="source.value"
               type="button"
               class="source-select-option"
@@ -298,6 +368,15 @@ onBeforeUnmount(() => {
               <Check v-if="source.value === modelValue" :size="16" />
             </button>
           </div>
+          <span v-if="loading" class="source-select-status" role="status"
+            ><LoaderCircle class="spin" :size="14"
+          /></span>
+          <span
+            v-else-if="searchable && !visibleOptions.length"
+            class="source-select-status"
+            >{{ t("没有匹配的类型") }}</span
+          >
+          <slot name="footer" />
           <button
             v-if="actionLabel"
             type="button"
@@ -315,3 +394,50 @@ onBeforeUnmount(() => {
     </Teleport>
   </div>
 </template>
+
+<style scoped>
+.source-select-text {
+  width: auto;
+  min-width: 0;
+}
+.source-select-text .source-select-trigger {
+  min-height: 28px;
+  height: auto;
+  padding: 2px 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  font-size: 13px;
+  color: var(--muted);
+}
+.source-select-text .source-select-trigger:hover,
+.source-select-text .source-select-trigger[aria-expanded="true"] {
+  color: var(--blue);
+  text-shadow: 0 0 12px var(--glow);
+}
+.source-select-search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+  padding: 3px 8px 7px;
+  border-bottom: 1px solid var(--line);
+  color: var(--muted);
+}
+.source-select-search input {
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  outline: none;
+  font-size: 12px;
+}
+.source-select-status {
+  padding: 10px 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+</style>

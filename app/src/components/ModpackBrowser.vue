@@ -12,16 +12,21 @@ import {
   ArrowLeft,
   ArrowRight,
   Download,
-  ExternalLink,
   LoaderCircle,
   Search,
-  Upload,
+  Users,
 } from "lucide-vue-next";
 import GlassSelect from "./GlassSelect.vue";
+import ProjectImage from "./ProjectImage.vue";
+import ProjectDetails from "./ProjectDetails.vue";
+import ProjectLinks from "./ProjectLinks.vue";
 import DownloadWorkflow from "./DownloadWorkflow.vue";
 import ContentSwitch from "./ContentSwitch.vue";
+import CatalogTail from "./CatalogTail.vue";
+import { useCatalogFeed } from "../useCatalogFeed";
 import { listRevealStyle } from "../listMotion";
-import { t } from "../i18n";
+import { locale, t } from "../i18n";
+import { categoryLabel } from "../catalogFilters";
 import type { Task } from "../types";
 import type {
   ResourcePlatform,
@@ -31,6 +36,8 @@ import type {
 
 type PackVersion = ResourceVersion & { games: string[]; loaders: string[] };
 const props = defineProps<{
+  searchTarget?: HTMLElement;
+  filterTarget?: HTMLElement;
   busy: boolean;
   task?: Task;
   controlPending?: boolean;
@@ -46,67 +53,208 @@ const props = defineProps<{
 const emit = defineEmits<{
   error: [value: unknown];
   link: [url: string];
-  import: [];
   pause: [];
   resume: [];
   cancel: [];
   retry: [file: string];
   continue: [];
   close: [];
+  detail: [active: boolean];
 }>();
 const platform = ref<ResourcePlatform>("modrinth");
 const query = ref("");
-const offset = ref(0);
-const total = ref(0);
-const hits = shallowRef<ResourceProject[]>([]);
+const sort = ref("relevance");
+const category = ref("");
+const downloadFormat = computed(
+  () =>
+    new Intl.NumberFormat(locale.value, {
+      notation: "compact",
+      maximumFractionDigits: 1,
+    }),
+);
+const categories = shallowRef<{ id: string; name: string }[]>([]);
+const categoriesLoading = ref(false);
+const categoriesFailed = ref(false);
+let categoryRequest = 0;
+const categoryOptions = computed(() => [
+  { value: "", label: t("全部类型") },
+  ...categories.value.map((c) => ({
+    value: c.id,
+    label: categoryLabel(c.name),
+    keywords: c.name,
+  })),
+]);
+const categoryIds = computed(
+  () =>
+    new Map(categories.value.map((item) => [item.name.toLowerCase(), item.id])),
+);
+function tagCategory(tag: string) {
+  return (
+    categoryIds.value.get(tag.toLowerCase()) ||
+    (platform.value === "modrinth" ? tag : "")
+  );
+}
+function tagSelected(tag: string) {
+  return !!category.value && tagCategory(tag) === category.value;
+}
+function filterTag(tag: string) {
+  if (blocked.value) return;
+  const id = tagCategory(tag);
+  if (id) category.value = category.value === id ? "" : id;
+}
+function visibleTags(item: ResourceProject) {
+  const tags = item.categories || [];
+  const active = tags.find(tagSelected);
+  return active
+    ? [active, ...tags.filter((tag) => tag !== active)].slice(0, 3)
+    : tags.slice(0, 3);
+}
+function hiddenTags(item: ResourceProject) {
+  const shown = visibleTags(item);
+  return (item.categories || []).filter((tag) => !shown.includes(tag));
+}
+async function loadCategories() {
+  const generation = ++categoryRequest;
+  categoriesLoading.value = true;
+  categoriesFailed.value = false;
+  try {
+    const result = await props.rpc<{ id: string; name: string }[]>(
+      "modpack_categories",
+      { platform: platform.value },
+    );
+    if (!disposed && generation === categoryRequest) categories.value = result;
+  } catch (error) {
+    if (!disposed && generation === categoryRequest) {
+      categoriesFailed.value = true;
+      emit("error", error);
+    }
+  } finally {
+    if (!disposed && generation === categoryRequest)
+      categoriesLoading.value = false;
+  }
+}
 const project = shallowRef<ResourceProject>();
+watch(project, (value) => emit("detail", !!value), { immediate: true });
 const versions = shallowRef<PackVersion[]>([]);
 const chosen = ref("");
+const latest = shallowRef<PackVersion>();
+const loadingLatest = ref(false);
+const latestFailed = ref(false);
+const versionsLoaded = ref(false);
+let latestRequest = 0;
 const versionOffset = ref(0);
 const moreVersions = ref(false);
-const searching = ref(false);
 const loadingVersions = ref(false);
-const failed = ref(false);
 const versionFailed = ref(false);
+const versionAppendFailed = ref(false);
 const downloading = ref(false);
 const showTask = ref(
   !!props.task && ["running", "paused"].includes(props.task.status),
 );
-const resultGeneration = ref(0);
-const selected = computed(() =>
-  versions.value.find((v) => v.id === chosen.value),
+const feed = useCatalogFeed<ResourceProject>(
+  (offset) =>
+    props.rpc("search_modpacks", {
+      platform: platform.value,
+      query: query.value,
+      filters: { sort: sort.value, category: category.value },
+      offset,
+    }),
+  (error) => emit("error", error),
 );
+const {
+  hits,
+  loading: searching,
+  failure,
+  more,
+  revision: resultGeneration,
+  scrollTop,
+} = feed;
+const selected = computed(
+  () =>
+    versions.value.find((v) => v.id === chosen.value) ||
+    (latest.value?.id === chosen.value ? latest.value : undefined),
+);
+function displayDate(value?: string | null) {
+  if (!value) return "";
+  const date = new Date(value);
+  return Number.isNaN(+date) ? "" : date.toLocaleDateString(locale.value);
+}
+function versionDate(updated?: string | null) {
+  return (
+    selected.value?.published ||
+    (selected.value?.id === project.value?.latest_version ? updated : null)
+  );
+}
+const compatibility = computed(() => {
+  if (!selected.value) return "";
+  const loaders = selected.value.loaders.map(
+    (name) =>
+      ({
+        fabric: "Fabric",
+        forge: "Forge",
+        neoforge: "NeoForge",
+        quilt: "Quilt",
+      })[name.toLowerCase()] || name,
+  );
+  const games = selected.value.games.filter(
+    (game) =>
+      !selected.value!.loaders.some(
+        (loader) => loader.toLowerCase() === game.toLowerCase(),
+      ),
+  );
+  return [...games, ...loaders].join(" · ");
+});
 const blocked = computed(() => props.busy || downloading.value);
-let request = 0,
-  versionRequest = 0,
+let versionRequest = 0,
   disposed = false;
 let timer: ReturnType<typeof setTimeout> | undefined;
 
-async function search() {
+async function search(append = false) {
   clearTimeout(timer);
-  const generation = ++request;
-  searching.value = true;
-  failed.value = false;
+  await feed.search(append);
+}
+const versionOptions = computed(() => {
+  const choices = [...versions.value];
+  if (latest.value && !choices.some((v) => v.id === latest.value?.id))
+    choices.unshift(latest.value);
+  return choices.map((v) => ({
+    value: v.id,
+    label: v.number || v.name,
+    detail: [...v.games, ...v.loaders, displayDate(v.published)]
+      .filter(Boolean)
+      .join(" · "),
+  }));
+});
+async function loadLatest() {
+  if (!project.value?.latest_version) return;
+  const generation = ++latestRequest;
+  loadingLatest.value = true;
+  latestFailed.value = false;
   try {
-    const result = await props.rpc<{ hits: ResourceProject[]; total: number }>(
-      "search_modpacks",
-      { platform: platform.value, query: query.value, offset: offset.value },
-    );
-    if (disposed || generation !== request) return;
-    hits.value = result.hits;
-    resultGeneration.value++;
-    total.value = result.total;
+    const result = await props.rpc<PackVersion>("modpack_version", {
+      platform: platform.value,
+      project: project.value.id,
+      version: project.value.latest_version,
+    });
+    if (disposed || generation !== latestRequest) return;
+    latest.value = result;
+    if (!chosen.value) chosen.value = result.id;
   } catch (error) {
-    if (!disposed && generation === request) {
-      failed.value = true;
+    if (!disposed && generation === latestRequest) {
+      latestFailed.value = true;
       emit("error", error);
     }
   } finally {
-    if (!disposed && generation === request) searching.value = false;
+    if (!disposed && generation === latestRequest) loadingLatest.value = false;
   }
 }
 async function loadVersions(append = false) {
-  if (!project.value) return;
+  if (
+    !project.value ||
+    loadingVersions.value ||
+    (!append && versionsLoaded.value && !versionFailed.value)
+  )
+    return;
   const generation = ++versionRequest;
   loadingVersions.value = true;
   versionFailed.value = false;
@@ -129,16 +277,15 @@ async function loadVersions(append = false) {
           ),
         ]
       : result.versions;
+    versionsLoaded.value = true;
     moreVersions.value = result.more;
     versionOffset.value = nextOffset;
     if (!chosen.value)
-      chosen.value =
-        versions.value.find((v) => v.release_type === "release")?.id ||
-        versions.value[0]?.id ||
-        "";
+      chosen.value = latest.value?.id || versions.value[0]?.id || "";
   } catch (error) {
     if (!disposed && generation === versionRequest) {
       versionFailed.value = true;
+      versionAppendFailed.value = append;
       emit("error", error);
     }
   } finally {
@@ -151,11 +298,18 @@ function choose(item: ResourceProject) {
   project.value = item;
   versions.value = [];
   chosen.value = "";
+  latest.value = undefined;
+  latestFailed.value = false;
+  versionFailed.value = false;
+  loadingLatest.value = false;
+  loadingVersions.value = false;
+  versionsLoaded.value = false;
   moreVersions.value = false;
-  void loadVersions();
+  void loadLatest();
 }
 function back() {
   versionRequest++;
+  latestRequest++;
   project.value = undefined;
   showTask.value = false;
 }
@@ -169,37 +323,102 @@ async function download() {
     downloading.value = false;
   }
 }
-function page(delta: number) {
-  offset.value = Math.max(0, offset.value + delta);
-  void search();
-}
 watch(query, () => {
-  request++;
+  feed.invalidate(true);
   clearTimeout(timer);
-  // Do not let stale results from the previous query remain clickable.
-  searching.value = true;
-  timer = setTimeout(() => {
-    offset.value = 0;
-    void search();
-  }, 250);
+  timer = setTimeout(() => void search(), 250);
 });
-watch(platform, () => {
+watch(
+  platform,
+  () => {
+    category.value = "";
+    categories.value = [];
+    void loadCategories();
+  },
+  { flush: "sync" },
+);
+watch([platform, sort, category], () => {
   back();
-  hits.value = [];
-  total.value = 0;
-  offset.value = 0;
   void search();
 });
-onMounted(() => void search());
+onMounted(() => {
+  void search();
+  void loadCategories();
+});
 onBeforeUnmount(() => {
+  emit("detail", false);
   disposed = true;
-  request++;
   versionRequest++;
+  latestRequest++;
+  categoryRequest++;
   clearTimeout(timer);
 });
 </script>
 
 <template>
+  <Teleport v-if="searchTarget" :to="searchTarget">
+    <Transition name="pack-search" appear>
+      <label v-if="!project && !(showTask && task)" class="pack-search">
+        <Search :size="14" />
+        <input
+          v-model="query"
+          :disabled="blocked"
+          :placeholder="t('搜索整合包')"
+          :aria-label="t('搜索整合包')"
+          @keydown.enter.prevent="search()"
+        />
+      </label>
+    </Transition>
+  </Teleport>
+  <Teleport v-if="filterTarget" :to="filterTarget">
+    <Transition name="pack-search" appear>
+      <div v-if="!project && !(showTask && task)" class="pack-filters">
+        <GlassSelect
+          id="modpack-platform"
+          v-model="platform"
+          :options="[
+            { value: 'modrinth', label: 'Modrinth' },
+            { value: 'curseforge', label: 'CurseForge' },
+          ]"
+          :disabled="blocked"
+          floating
+          compact
+          literal-labels
+          :aria-label="t('来源')"
+        />
+        <GlassSelect
+          id="modpack-sort"
+          v-model="sort"
+          :aria-label="t('排序方式')"
+          :options="[
+            { value: 'relevance', label: '综合排序' },
+            { value: 'downloads', label: '下载最多' },
+            { value: 'updated', label: '最近更新' },
+            { value: 'newest', label: '最新发布' },
+          ]"
+          :disabled="blocked"
+          floating
+          compact
+          :menu-min-width="160"
+        />
+        <GlassSelect
+          id="modpack-category"
+          v-model="category"
+          :aria-label="t('类型')"
+          :options="categoryOptions"
+          :disabled="blocked"
+          :loading="categoriesLoading"
+          floating
+          compact
+          literal-labels
+          searchable
+          :menu-min-width="220"
+          :search-placeholder="t('搜索类型名称')"
+          @open="categoriesFailed && loadCategories()"
+        />
+      </div>
+    </Transition>
+  </Teleport>
   <div class="pack-browser">
     <ContentSwitch
       class="pack-flow"
@@ -240,190 +459,216 @@ onBeforeUnmount(() => {
         </footer>
       </template>
       <template v-else>
-        <div
-          v-if="!project"
-          class="pack-tools list-reveal-item"
-          :style="listRevealStyle(0)"
-        >
-          <GlassSelect
-            id="modpack-platform"
-            v-model="platform"
-            :options="[
-              { value: 'modrinth', label: 'Modrinth' },
-              { value: 'curseforge', label: 'CurseForge' },
-            ]"
-            :disabled="blocked"
-            floating
-            compact
-            literal-labels
-          />
-          <label v-if="!project" class="pack-search"
-            ><Search :size="16" /><input
-              v-model="query"
-              :disabled="blocked"
-              :placeholder="t('搜索整合包')"
-              :aria-label="t('搜索整合包')"
-              @keydown.enter.prevent="
-                offset = 0;
-                search();
-              "
-          /></label>
-        </div>
         <ContentSwitch
           class="pack-main"
           :content-key="project?.id || `${platform}:${resultGeneration}`"
           :aria-busy="searching || loadingVersions"
         >
-          <div class="pack-results" data-list-viewport>
+          <div class="pack-results" data-list-viewport data-catalog-viewport>
             <template v-if="project">
-              <div
-                class="pack-detail-heading list-reveal-item"
-                :style="listRevealStyle(0)"
+              <ProjectDetails
+                :key="`${platform}/${project.id}`"
+                :project="project"
+                :platform="platform"
+                :rpc="rpc"
+                compact
+                @link="emit('link', $event)"
               >
-                <button
-                  class="icon-button"
-                  :disabled="blocked"
-                  :aria-label="t('返回')"
-                  @click="back"
-                >
-                  <ArrowLeft :size="18" />
-                </button>
-                <Archive :size="26" />
-                <div class="pack-title">
-                  <h3 :title="project.name">{{ project.name }}</h3>
-                  <small v-if="selected">{{
-                    [...selected.games, ...selected.loaders].join(" · ")
-                  }}</small>
-                </div>
-                <div class="pack-version">
-                  <GlassSelect
-                    v-if="versions.length"
-                    id="online-pack-version"
-                    v-model="chosen"
-                    :options="
-                      versions.map((v) => ({
-                        value: v.id,
-                        label: v.number || v.name,
-                        detail: [...v.games, ...v.loaders].join(' · '),
-                      }))
-                    "
-                    :disabled="blocked"
-                    literal-labels
-                    floating
-                    compact
-                  />
-                  <LoaderCircle
-                    v-if="loadingVersions"
-                    class="spin"
-                    :size="16"
-                  />
+                <template #leading>
                   <button
-                    v-else-if="versionFailed"
-                    class="text-button"
-                    @click="loadVersions()"
+                    class="icon-button"
+                    :disabled="blocked"
+                    :aria-label="t('返回')"
+                    @click="back"
                   >
-                    {{ t("重试") }}
+                    <ArrowLeft :size="18" />
                   </button>
-                  <span v-else-if="!versions.length" class="pack-muted">{{
-                    t("暂无可用版本")
-                  }}</span>
-                </div>
-                <button
-                  class="icon-button"
-                  :aria-label="t('项目主页')"
-                  @click="emit('link', project.url)"
-                >
-                  <ExternalLink :size="17" />
-                </button>
-              </div>
-              <p
-                class="pack-description list-reveal-item"
-                :style="listRevealStyle(1)"
-              >
-                {{ project.description }}
-              </p>
-              <button
-                v-if="moreVersions"
-                class="text-button pack-more"
-                :disabled="blocked || loadingVersions"
-                @click="loadVersions(true)"
-              >
-                {{ t("更多版本") }}
-              </button>
+                  <ProjectImage :url="project.icon_url" :rpc="rpc" :size="42"
+                    ><Archive :size="25"
+                  /></ProjectImage>
+                </template>
+                <template #heading="{ updated }">
+                  <div class="pack-title">
+                    <div class="pack-title-line">
+                      <h3 :title="project.name">{{ project.name }}</h3>
+                      <GlassSelect
+                        id="online-pack-version"
+                        v-model="chosen"
+                        :options="versionOptions"
+                        :aria-label="t('整合包版本')"
+                        :placeholder="t('最新版')"
+                        :disabled="blocked"
+                        :loading="loadingVersions"
+                        text-only
+                        literal-labels
+                        floating
+                        compact
+                        :menu-min-width="260"
+                        @open="loadVersions()"
+                      >
+                        <template #trigger-suffix>
+                          <span
+                            v-if="compatibility"
+                            class="pack-version-compatibility"
+                            :title="t('适用游戏版本')"
+                          >
+                            <span aria-hidden="true">·</span>{{ compatibility }}
+                          </span>
+                          <time
+                            v-if="displayDate(versionDate(updated))"
+                            class="pack-version-date"
+                            :datetime="versionDate(updated) || undefined"
+                            :title="`${t('更新于')} ${displayDate(versionDate(updated))}`"
+                          >
+                            <span aria-hidden="true">·</span
+                            >{{ displayDate(versionDate(updated)) }}
+                          </time>
+                        </template>
+                        <template #footer>
+                          <button
+                            v-if="versionFailed || moreVersions"
+                            class="text-button pack-more"
+                            :disabled="loadingVersions"
+                            @click="
+                              loadVersions(
+                                versionAppendFailed || !versionFailed,
+                              )
+                            "
+                          >
+                            {{ t(versionFailed ? "重试" : "更多版本") }}
+                          </button>
+                          <span
+                            v-else-if="versionsLoaded && !versions.length"
+                            class="pack-muted"
+                            >{{ t("暂无可用版本") }}</span
+                          >
+                        </template>
+                      </GlassSelect>
+                      <LoaderCircle
+                        v-if="loadingLatest"
+                        class="spin"
+                        :size="12"
+                      />
+                      <button
+                        v-else-if="latestFailed && !chosen"
+                        class="text-button"
+                        @click="loadLatest()"
+                      >
+                        {{ t("重试") }}
+                      </button>
+                    </div>
+                  </div>
+                </template>
+                <template #actions="{ links, license }">
+                  <div class="pack-title-actions">
+                    <ProjectLinks
+                      :links="links"
+                      :license="license"
+                      @link="emit('link', $event)"
+                    />
+                    <button
+                      class="icon-button pack-download"
+                      :aria-label="t('下载')"
+                      :title="t('下载')"
+                      :disabled="blocked || !chosen || loadingVersions"
+                      @click="download"
+                    >
+                      <Download :size="17" />
+                    </button>
+                  </div>
+                </template>
+              </ProjectDetails>
             </template>
             <template v-else>
-              <button
+              <article
                 v-for="(item, index) in hits"
                 :key="item.id"
                 class="pack-result list-reveal-item"
-                :style="listRevealStyle(index)"
-                :disabled="blocked || searching"
-                @click="choose(item)"
+                :style="listRevealStyle(index % 20)"
+                :class="{ disabled: blocked }"
               >
-                <Archive :size="24" />
-                <div>
-                  <strong>{{ item.name }}</strong>
+                <ProjectImage :url="item.icon_url" :rpc="rpc" :size="42"
+                  ><Archive :size="24"
+                /></ProjectImage>
+                <div class="pack-result-copy">
+                  <div class="pack-result-heading">
+                    <div class="pack-result-title">
+                      <button
+                        type="button"
+                        class="pack-result-open"
+                        :disabled="blocked"
+                        :title="item.name"
+                        @click="choose(item)"
+                      >
+                        <strong>{{ item.name }}</strong>
+                      </button>
+                      <span
+                        v-if="item.categories?.length"
+                        class="pack-result-tags"
+                      >
+                        <button
+                          v-for="tag in visibleTags(item)"
+                          :key="tag"
+                          type="button"
+                          class="project-badge"
+                          :class="{ active: tagSelected(tag) }"
+                          :aria-pressed="tagSelected(tag)"
+                          :disabled="blocked || !tagCategory(tag)"
+                          :title="categoryLabel(tag)"
+                          @click="filterTag(tag)"
+                        >
+                          {{ categoryLabel(tag) }}
+                        </button>
+                        <span
+                          v-if="item.categories.length > 3"
+                          class="project-badge pack-result-more-tags"
+                          :title="
+                            hiddenTags(item).map(categoryLabel).join(' · ')
+                          "
+                          >+{{ item.categories.length - 3 }}</span
+                        >
+                      </span>
+                    </div>
+                    <span
+                      class="pack-result-downloads"
+                      :title="`${t('下载量')}: ${item.downloads.toLocaleString(locale)}`"
+                    >
+                      <Download :size="12" />{{
+                        downloadFormat.format(item.downloads)
+                      }}
+                    </span>
+                    <span
+                      v-if="item.authors?.length"
+                      class="pack-result-authors"
+                      :title="`${t('作者')}: ${item.authors.join(', ')}`"
+                    >
+                      <Users :size="12" /><span>{{
+                        item.authors.join(", ")
+                      }}</span>
+                    </span>
+                  </div>
                   <p>{{ item.description }}</p>
                 </div>
                 <ArrowRight :size="16" />
-              </button>
-              <div v-if="searching && !hits.length" class="pack-empty">
-                <LoaderCircle class="spin" :size="22" />
-              </div>
-              <div v-else-if="failed" class="pack-empty">
-                <button class="text-button" @click="search">
-                  {{ t("重试") }}
-                </button>
-              </div>
-              <div v-else-if="!hits.length" class="pack-empty">
+              </article>
+              <div
+                v-if="!searching && !failure && !hits.length"
+                class="pack-empty"
+              >
                 {{ t("未找到整合包") }}
               </div>
+              <CatalogTail
+                v-model:position="scrollTop"
+                :loading="searching"
+                :more="more"
+                :failure="failure"
+                :disabled="blocked"
+                @load="search(true)"
+                @retry="feed.retry()"
+              />
             </template>
           </div>
         </ContentSwitch>
-        <footer
-          class="pack-footer list-reveal-item"
-          :style="listRevealStyle(3)"
-          data-list-footer
-        >
-          <button
-            class="text-button"
-            :disabled="blocked"
-            @click="emit('import')"
-          >
-            <Upload :size="15" />{{ t("导入") }}
-          </button>
-          <button
-            v-if="project"
-            class="button primary"
-            :disabled="blocked || !chosen || loadingVersions"
-            @click="download"
-          >
-            <Download :size="15" />{{ t("下载并预览") }}
-          </button>
-          <div v-else class="pack-pagination">
-            <LoaderCircle v-if="searching" class="spin" :size="13" />
-            <button
-              class="icon-button"
-              :disabled="blocked || searching || !offset"
-              :aria-label="t('上一页')"
-              @click="page(-20)"
-            >
-              <ArrowLeft :size="16" />
-            </button>
-            <small>{{ Math.floor(offset / 20) + 1 }}</small>
-            <button
-              class="icon-button"
-              :disabled="
-                blocked || searching || offset + 20 >= total || offset >= 9900
-              "
-              :aria-label="t('下一页')"
-              @click="page(20)"
-            >
-              <ArrowRight :size="16" />
-            </button>
-          </div>
-        </footer>
       </template>
     </ContentSwitch>
   </div>
@@ -442,35 +687,72 @@ onBeforeUnmount(() => {
 .pack-flow > :deep(.content-switch-page) {
   gap: 18px;
 }
-.pack-tools,
-.pack-footer,
-.pack-pagination,
-.pack-version {
+.pack-footer {
   display: flex;
   align-items: center;
   gap: 14px;
   flex-shrink: 0;
 }
-.pack-tools :deep(.glass-select) {
-  min-width: 130px;
+.pack-filters {
+  display: grid;
+  grid-template-columns: 1.05fr 1fr 1fr;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+.pack-filters :deep(.source-select) {
+  width: 100%;
+  min-width: 0;
+}
+.pack-filters :deep(.source-select-trigger) {
+  font-size: 12px;
+  padding: 8px;
 }
 .pack-search {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   flex: 1;
   min-width: 0;
   color: var(--muted);
+  border-bottom: 1px solid transparent;
+}
+.pack-search > svg {
+  flex-shrink: 0;
 }
 .pack-search input {
+  height: 32px;
   width: 100%;
+  min-width: 0;
   padding: 8px 0;
   background: transparent;
   color: var(--ink);
   border: 0;
-  border-bottom: 1px solid var(--line);
   border-radius: 0;
-  font-size: 13px;
+  outline: none;
+  box-shadow: none;
+  font-size: 12px;
+}
+.pack-search:focus-within {
+  color: var(--blue);
+  border-color: var(--blue);
+}
+.pack-search-enter-active,
+.pack-search-leave-active {
+  transition:
+    opacity 160ms var(--motion-ease),
+    transform 260ms var(--motion-ease);
+}
+.pack-search-enter-from,
+.pack-search-leave-to {
+  opacity: 0;
+  transform: translateX(8px);
+}
+@media (prefers-reduced-motion: reduce) {
+  .pack-search-enter-active,
+  .pack-search-leave-active {
+    transition: none;
+  }
 }
 .pack-main {
   flex: 1;
@@ -486,6 +768,7 @@ onBeforeUnmount(() => {
   overflow-x: hidden;
 }
 .pack-result {
+  position: relative;
   display: flex;
   gap: 15px;
   align-items: center;
@@ -496,7 +779,9 @@ onBeforeUnmount(() => {
   border: 0;
   border-bottom: 1px solid var(--line);
   padding: 16px 8px;
-  cursor: pointer;
+}
+.pack-result.disabled {
+  opacity: 0.5;
 }
 .pack-result > svg:first-child {
   color: var(--blue);
@@ -507,13 +792,117 @@ onBeforeUnmount(() => {
 .pack-result > svg:last-child {
   color: var(--muted);
 }
-.pack-result div {
+.pack-result-copy {
   flex: 1;
   min-width: 0;
 }
-.pack-result strong {
+.pack-result-heading {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 68px minmax(0, 16%);
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.pack-result-title {
+  grid-column: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.pack-result-open {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.pack-result-open::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+}
+.pack-result-open:focus-visible {
+  outline: none;
+  color: var(--blue);
+  text-shadow: 0 0 10px var(--glow);
+}
+.pack-result-heading strong {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 14px;
   font-weight: 500;
+}
+.pack-result-downloads,
+.pack-result-authors {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.pack-result-downloads > svg,
+.pack-result-authors > svg {
+  flex-shrink: 0;
+}
+.pack-result-downloads {
+  grid-column: 2;
+  font-variant-numeric: tabular-nums;
+}
+.pack-result-authors {
+  grid-column: 3;
+  min-width: 0;
+}
+.pack-result-authors > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pack-result-tags {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+  max-width: 55%;
+  flex-shrink: 0;
+}
+.pack-result-tags .project-badge {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: inherit;
+  transition:
+    color 160ms,
+    background-color 160ms,
+    box-shadow 160ms;
+}
+.pack-result-tags button {
+  cursor: pointer;
+}
+.pack-result-tags button:hover:not(:disabled) {
+  border-color: var(--blue);
+}
+.pack-result-tags button.active {
+  background: var(--blue);
+  color: var(--night);
+  border-color: var(--blue);
+}
+.pack-result-tags button:focus-visible {
+  outline: 1px solid var(--blue);
+  outline-offset: 2px;
+}
+.pack-result-tags button:disabled {
+  cursor: default;
+}
+.pack-result-tags .pack-result-more-tags {
+  flex-shrink: 0;
 }
 .pack-result p {
   margin: 6px 0 0;
@@ -526,16 +915,12 @@ onBeforeUnmount(() => {
   overflow: hidden;
   overflow-wrap: anywhere;
 }
-.pack-result:hover strong {
+.pack-result:has(.pack-result-open:hover) strong {
   color: var(--blue);
   text-shadow: 0 0 10px var(--glow);
 }
 .pack-footer {
-  justify-content: space-between;
-}
-.pack-pagination {
-  margin-left: auto;
-  color: var(--muted);
+  justify-content: flex-end;
 }
 .pack-empty {
   min-height: 180px;
@@ -545,57 +930,65 @@ onBeforeUnmount(() => {
   color: var(--muted);
   font-size: 13px;
 }
-.pack-detail-heading {
+.pack-title-line {
   display: flex;
-  align-items: center;
-  gap: 16px;
-  margin: 12px 0 20px;
-}
-.pack-detail-heading > svg {
-  color: var(--blue);
-  flex-shrink: 0;
-}
-.pack-detail-heading .pack-title {
-  flex: 1;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 12px;
   min-width: 0;
 }
-.pack-detail-heading h3 {
-  margin: 0 0 4px;
+.pack-title-line > :deep(.source-select) {
+  max-width: 100%;
+}
+.pack-title h3 {
+  margin: 0;
+  max-width: 100%;
   font-size: 18px;
   line-height: 1.4;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.pack-detail-heading small,
-.pack-compatibility,
+.pack-title small,
 .pack-muted {
   font-size: 12px;
   color: var(--muted);
-}
-.pack-description {
-  font-size: 13px;
-  line-height: 1.8;
-  margin-bottom: 28px;
-  overflow-wrap: anywhere;
-}
-.pack-version {
-  font-size: 12px;
-  flex: 0 1 240px;
-  min-width: 120px;
-  justify-content: flex-end;
-}
-.pack-version :deep(.glass-select) {
-  flex: 1;
-  min-width: 0;
-  max-width: 440px;
 }
 .pack-more {
   margin-top: 12px;
   font-size: 12px;
 }
-.pack-compatibility {
-  font-family: var(--mono);
-  line-height: 1.8;
+.pack-version-compatibility,
+.pack-version-date {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--muted);
+  opacity: 0.72;
+  font-variant-numeric: tabular-nums;
+}
+.pack-title-actions {
+  display: flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 8px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.pack-download {
+  width: 34px;
+  height: 34px;
+}
+.pack-download:hover:not(:disabled) {
+  color: var(--blue);
+  background: transparent;
+  filter: drop-shadow(0 0 6px var(--glow));
+}
+.pack-title-line :deep(.source-select-trigger) {
+  gap: 7px;
+  flex-wrap: wrap;
+  justify-content: flex-start;
 }
 </style>

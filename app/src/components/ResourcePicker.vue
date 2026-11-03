@@ -4,6 +4,7 @@ import {
   ArrowLeft,
   Check,
   Image,
+  Info,
   LoaderCircle,
   Package,
   Plus,
@@ -12,7 +13,12 @@ import {
   X,
 } from "lucide-vue-next";
 import GlassSelect from "./GlassSelect.vue";
-import { t, translateMessage } from "../i18n";
+import ProjectImage from "./ProjectImage.vue";
+import ProjectDetails from "./ProjectDetails.vue";
+import ContentSwitch from "./ContentSwitch.vue";
+import CatalogTail from "./CatalogTail.vue";
+import { useCatalogFeed } from "../useCatalogFeed";
+import { t } from "../i18n";
 import { listRevealStyle } from "../listMotion";
 import type {
   ResourceKind,
@@ -34,6 +40,7 @@ const emit = defineEmits<{
   "update:modelValue": [value: ResourceSelection[]];
   back: [];
   error: [value: unknown];
+  link: [url: string];
 }>();
 const categories = [
   { value: "mods", label: "Mods", icon: Package, color: "#69dcb5" },
@@ -44,11 +51,7 @@ const kind = ref<ResourceKind>(props.loader ? "mods" : "resourcepacks");
 const platform = ref(props.platform);
 const query = ref("");
 const selectedOnly = ref(false);
-const hits = shallowRef<ResourceProject[]>([]);
-const total = ref(0);
-const offset = ref(0);
-const loading = ref(false);
-const failure = ref("");
+const inspected = shallowRef<ResourceProject>();
 const pending = ref(new Set<string>());
 const scope = computed(() => ({
   minecraft: props.minecraft,
@@ -56,6 +59,14 @@ const scope = computed(() => ({
   kind: kind.value,
   platform: platform.value,
 }));
+const feed = useCatalogFeed<ResourceProject>((offset) =>
+  props.rpc("search_resource_catalog", {
+    scope: scope.value,
+    query: query.value.trim(),
+    offset,
+  }),
+);
+const { hits, loading, failure, more, revision, scrollTop } = feed;
 const selectionKey = (platform: string, project: string) =>
   `${platform}/${project}`;
 const chosen = (project: string) =>
@@ -65,34 +76,11 @@ const chosen = (project: string) =>
 const icon = computed(
   () => categories.find((c) => c.value === kind.value)!.icon,
 );
-const context = computed(
-  () =>
-    `${props.minecraft} · ${props.loader ? `${props.loader.kind} ${props.loader.version}` : t("原版")}`,
-);
-let generation = 0;
 let disposed = false;
 let timer: ReturnType<typeof setTimeout> | undefined;
 async function search(append = false) {
-  const request = ++generation;
-  const next = append ? offset.value + 20 : 0;
-  if (!append) hits.value = [];
-  loading.value = true;
-  failure.value = "";
-  try {
-    const result = await props.rpc<{ hits: ResourceProject[]; total: number }>(
-      "search_resource_catalog",
-      { scope: scope.value, query: query.value.trim(), offset: next },
-    );
-    if (disposed || request !== generation) return;
-    hits.value = append ? [...hits.value, ...result.hits] : result.hits;
-    offset.value = next;
-    total.value = result.total;
-  } catch (error) {
-    if (!disposed && request === generation)
-      failure.value = translateMessage(String(error));
-  } finally {
-    if (!disposed && request === generation) loading.value = false;
-  }
+  clearTimeout(timer);
+  await feed.search(append);
 }
 function remove(selection: ResourceSelection) {
   emit(
@@ -144,6 +132,7 @@ async function toggle(project: ResourceProject) {
         version: version.id,
         name: project.name,
         number: version.number,
+        icon_url: project.icon_url,
       },
     ]);
   } catch (error) {
@@ -159,10 +148,7 @@ async function toggle(project: ResourceProject) {
 watch(
   [scope, query],
   () => {
-    generation++;
-    hits.value = [];
-    total.value = 0;
-    loading.value = true;
+    feed.invalidate(true);
     clearTimeout(timer);
     timer = setTimeout(() => void search(), 220);
   },
@@ -170,148 +156,202 @@ watch(
 );
 onBeforeUnmount(() => {
   disposed = true;
-  generation++;
   clearTimeout(timer);
 });
 </script>
 
 <template>
   <section class="resource-picker">
-    <header class="picker-context">
-      <button class="text-button" type="button" @click="$emit('back')">
-        <ArrowLeft :size="16" />{{ t("资源预选") }}
-      </button>
-      <span>{{ context }}</span>
-      <button
-        class="text-button picker-count"
-        :class="{ active: selectedOnly }"
-        :aria-pressed="selectedOnly"
-        @click="selectedOnly = !selectedOnly"
-      >
-        {{ t("已选 {count} 项", { count: modelValue.length }) }}
-      </button>
-    </header>
-    <div class="picker-tools">
-      <nav :aria-label="t('资源分类')">
+    <Transition name="picker-heading" appear>
+      <header class="picker-heading">
         <button
-          v-for="category in categories"
-          :key="category.value"
-          :class="{ active: kind === category.value && !selectedOnly }"
-          :style="{ '--resource-accent': category.color }"
-          :disabled="disabled || (category.value === 'mods' && !loader)"
-          :aria-pressed="kind === category.value && !selectedOnly"
-          @click="
-            kind = category.value;
-            selectedOnly = false;
-          "
+          class="icon-button picker-back"
+          type="button"
+          :aria-label="t('返回')"
+          :title="t('返回')"
+          @click="inspected ? (inspected = undefined) : $emit('back')"
         >
-          <component :is="category.icon" :size="16" />{{ t(category.label) }}
+          <ArrowLeft :size="18" />
         </button>
-      </nav>
-      <GlassSelect
-        id="resource-picker-platform"
-        :model-value="platform"
-        :options="[
-          { value: 'modrinth', label: 'Modrinth' },
-          { value: 'curseforge', label: 'CurseForge' },
-        ]"
-        :disabled="disabled"
-        compact
-        literal-labels
-        floating
-        @update:model-value="
-          platform = $event as ResourcePlatform;
-          selectedOnly = false;
-        "
-      />
-      <label class="picker-search"
-        ><Search :size="14" /><input
-          v-model="query"
-          :placeholder="t('搜索资源')"
-          :aria-label="t('搜索资源')"
-          @input="selectedOnly = false"
-      /></label>
-    </div>
-    <div class="picker-results">
-      <template v-if="selectedOnly">
-        <button
-          v-for="(item, index) in modelValue"
-          :key="selectionKey(item.platform, item.project)"
-          class="picker-card selected list-reveal-item"
-          :style="listRevealStyle(index)"
-          :disabled="disabled"
-          :aria-label="`${t('移除')} ${item.name}`"
-          @click="remove(item)"
-        >
-          <component
-            :is="categories.find((c) => c.value === item.kind)?.icon || Package"
-            :size="20"
-          /><span
-            ><strong>{{ item.name }}</strong
-            ><small
-              >{{ item.number }} ·
-              {{
-                item.platform === "curseforge" ? "CurseForge" : "Modrinth"
-              }}</small
-            ></span
-          ><X :size="16" />
-        </button>
-        <span v-if="!modelValue.length" class="picker-empty">{{
-          t("尚未预选资源")
-        }}</span>
-      </template>
-      <template v-else>
-        <button
-          v-for="(item, index) in hits"
-          :key="`${platform}/${kind}/${item.id}`"
-          class="picker-card list-reveal-item"
-          :class="{ selected: !!chosen(item.id) }"
-          :style="listRevealStyle(index)"
-          :disabled="disabled || pending.has(selectionKey(platform, item.id))"
-          :aria-pressed="!!chosen(item.id)"
-          @click="toggle(item)"
-        >
-          <component :is="icon" :size="20" /><span
-            ><strong>{{ item.name }}</strong
-            ><small>{{
-              chosen(item.id)?.number || item.description
-            }}</small></span
-          ><LoaderCircle
-            v-if="pending.has(selectionKey(platform, item.id))"
-            class="spin"
-            :size="16"
-          /><Check v-else-if="chosen(item.id)" :size="16" /><Plus
-            v-else
-            :size="16"
+        <nav class="picker-categories" :aria-label="t('资源分类')">
+          <button
+            v-for="category in categories"
+            :key="category.value"
+            :class="{ active: kind === category.value && !selectedOnly }"
+            :style="{ '--resource-accent': category.color }"
+            :disabled="disabled || (category.value === 'mods' && !loader)"
+            :aria-pressed="kind === category.value && !selectedOnly"
+            @click="
+              kind = category.value;
+              selectedOnly = false;
+              inspected = undefined;
+            "
+          >
+            <component :is="category.icon" :size="16" />{{ t(category.label) }}
+          </button>
+        </nav>
+        <div v-if="!inspected" class="picker-tools">
+          <GlassSelect
+            id="resource-picker-platform"
+            :model-value="platform"
+            :options="[
+              { value: 'modrinth', label: 'Modrinth' },
+              { value: 'curseforge', label: 'CurseForge' },
+            ]"
+            :disabled="disabled"
+            compact
+            literal-labels
+            floating
+            @update:model-value="
+              platform = $event as ResourcePlatform;
+              selectedOnly = false;
+            "
           />
-        </button>
-        <div v-if="failure" class="picker-empty">
-          <span>{{ failure }}</span
-          ><button class="text-button" @click="search()">
-            {{ t("重试") }}
+          <label class="picker-search"
+            ><Search :size="14" /><input
+              v-model="query"
+              :placeholder="t('搜索资源')"
+              :aria-label="t('搜索资源')"
+              @input="selectedOnly = false"
+          /></label>
+          <button
+            type="button"
+            class="text-button picker-count"
+            :class="{ active: selectedOnly }"
+            :aria-pressed="selectedOnly"
+            @click="selectedOnly = !selectedOnly"
+          >
+            {{ t("已选 {count} 项", { count: modelValue.length }) }}
           </button>
         </div>
-        <span v-else-if="!loading && !hits.length" class="picker-empty">{{
-          t("没有找到兼容资源")
-        }}</span>
-        <button
-          v-if="!failure && (loading || hits.length < total)"
-          class="text-button picker-more"
-          :disabled="loading"
-          @click="search(true)"
-        >
-          <LoaderCircle v-if="loading" class="spin" :size="16" /><span v-else>{{
-            t("加载更多")
+      </header>
+    </Transition>
+    <ContentSwitch
+      class="picker-content"
+      :content-key="
+        inspected
+          ? `${platform}/${inspected.id}`
+          : selectedOnly
+            ? 'selected'
+            : `list:${revision}`
+      "
+    >
+      <div class="picker-results" data-catalog-viewport>
+        <div v-if="inspected" class="picker-detail">
+          <div class="picker-detail-heading">
+            <ProjectImage :url="inspected.icon_url" :rpc="rpc" :size="44" />
+            <h3>{{ inspected.name }}</h3>
+            <button
+              class="text-button"
+              :disabled="
+                disabled || pending.has(selectionKey(platform, inspected.id))
+              "
+              :aria-pressed="!!chosen(inspected.id)"
+              @click="toggle(inspected)"
+            >
+              <Check v-if="chosen(inspected.id)" :size="16" /><Plus
+                v-else
+                :size="16"
+              />{{ t(chosen(inspected.id) ? "已预选" : "加入预选") }}
+            </button>
+          </div>
+          <ProjectDetails
+            :project="inspected"
+            :platform="platform"
+            :rpc="rpc"
+            @link="$emit('link', $event)"
+          />
+        </div>
+        <template v-else-if="selectedOnly">
+          <button
+            v-for="(item, index) in modelValue"
+            :key="selectionKey(item.platform, item.project)"
+            class="picker-card selected list-reveal-item"
+            :style="listRevealStyle(index)"
+            :disabled="disabled"
+            :aria-label="`${t('移除')} ${item.name}`"
+            @click="remove(item)"
+          >
+            <ProjectImage :url="item.icon_url" :rpc="rpc" :size="32"
+              ><component
+                :is="
+                  categories.find((c) => c.value === item.kind)?.icon || Package
+                "
+                :size="20" /></ProjectImage
+            ><span
+              ><strong>{{ item.name }}</strong
+              ><small
+                >{{ item.number }} ·
+                {{
+                  item.platform === "curseforge" ? "CurseForge" : "Modrinth"
+                }}</small
+              ></span
+            ><X :size="16" />
+          </button>
+          <span v-if="!modelValue.length" class="picker-empty">{{
+            t("尚未预选资源")
           }}</span>
-        </button>
-      </template>
-    </div>
-    <footer class="picker-footer">
-      <small>{{ t("预选资源将随此版本一起安装") }}</small
-      ><button type="button" class="button primary" @click="$emit('back')">
-        {{ t("完成选择") }}
-      </button>
-    </footer>
+        </template>
+        <template v-else>
+          <div
+            v-for="(item, index) in hits"
+            :key="`${platform}/${kind}/${item.id}`"
+            class="picker-entry list-reveal-item"
+            :style="listRevealStyle(index % 20)"
+          >
+            <button
+              class="picker-card"
+              :class="{ selected: !!chosen(item.id) }"
+              :disabled="
+                disabled || pending.has(selectionKey(platform, item.id))
+              "
+              :aria-pressed="!!chosen(item.id)"
+              @click="toggle(item)"
+            >
+              <ProjectImage :url="item.icon_url" :rpc="rpc" :size="36"
+                ><component :is="icon" :size="22"
+              /></ProjectImage>
+              <span
+                ><strong>{{ item.name }}</strong
+                ><small>{{
+                  chosen(item.id)?.number || item.description
+                }}</small></span
+              >
+              <LoaderCircle
+                v-if="pending.has(selectionKey(platform, item.id))"
+                class="spin"
+                :size="16"
+              /><Check v-else-if="chosen(item.id)" :size="16" /><Plus
+                v-else
+                :size="16"
+              />
+            </button>
+            <button
+              class="icon-button picker-info"
+              :aria-label="`${t('查看介绍')} ${item.name}`"
+              :title="t('查看介绍')"
+              @click="inspected = item"
+            >
+              <Info :size="16" />
+            </button>
+          </div>
+          <span
+            v-if="!failure && !loading && !hits.length"
+            class="picker-empty"
+            >{{ t("没有找到兼容资源") }}</span
+          >
+          <CatalogTail
+            v-model:position="scrollTop"
+            :loading="loading"
+            :more="more"
+            :failure="failure"
+            :disabled="disabled"
+            @load="search(true)"
+            @retry="feed.retry()"
+          />
+        </template>
+      </div>
+    </ContentSwitch>
   </section>
 </template>
 
@@ -322,36 +362,36 @@ onBeforeUnmount(() => {
   flex: 1;
   min-height: 0;
 }
-.picker-context,
-.picker-tools,
-.picker-footer {
+.picker-tools {
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 12px 24px;
-  flex-shrink: 0;
-}
-.picker-context > span {
-  font: 11px var(--mono);
-  color: var(--muted);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-left: auto;
+  min-width: 0;
+  flex: 1;
 }
 .picker-count {
-  margin-left: auto;
+  flex-shrink: 0;
   white-space: nowrap;
 }
-.picker-tools {
+.picker-heading {
+  display: flex;
+  align-items: center;
   gap: 12px;
-  padding-top: 2px;
+  padding: 12px 24px;
+  flex-shrink: 0;
+  min-width: 0;
 }
-.picker-tools nav {
+.picker-back {
+  flex-shrink: 0;
+}
+.picker-categories {
   display: flex;
   gap: 14px;
-  margin-right: auto;
+  flex-shrink: 0;
 }
-.picker-tools nav button {
+.picker-categories button {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -359,15 +399,15 @@ onBeforeUnmount(() => {
   background: transparent;
   color: var(--muted);
   padding: 8px 0;
-  font-size: 12px;
+  font-size: 14px;
   white-space: nowrap;
 }
-.picker-tools nav button.active,
-.picker-tools nav button:hover:not(:disabled) {
+.picker-categories button.active,
+.picker-categories button:hover:not(:disabled) {
   color: var(--resource-accent);
   text-shadow: 0 0 12px var(--resource-accent);
 }
-.picker-tools :deep(.glass-select) {
+.picker-tools :deep(.source-select) {
   width: 110px;
   flex-shrink: 0;
 }
@@ -375,8 +415,12 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 8px;
-  width: 160px;
+  flex: 0 1 160px;
+  min-width: 80px;
   color: var(--muted);
+}
+.picker-search svg {
+  flex-shrink: 0;
 }
 .picker-search input {
   border: 0;
@@ -386,6 +430,41 @@ onBeforeUnmount(() => {
   padding: 6px 0;
   font-size: 12px;
   outline: none;
+}
+.picker-content {
+  flex: 1;
+  min-height: 0;
+}
+.picker-entry {
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+}
+.picker-entry > .picker-card {
+  border-bottom: 0;
+  min-width: 0;
+  flex: 1;
+}
+.picker-info {
+  flex-shrink: 0;
+}
+.picker-detail-heading {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 12px 0 18px;
+}
+.picker-detail-heading h3 {
+  font-size: 18px;
+  font-weight: 500;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  flex: 1;
+  margin: 0;
+}
+.picker-detail-heading .text-button {
+  flex-shrink: 0;
+  font-size: 12px;
 }
 .picker-results {
   flex: 1;
@@ -412,7 +491,7 @@ onBeforeUnmount(() => {
 .picker-card > svg {
   flex-shrink: 0;
 }
-.picker-card > span {
+.picker-card > span:not(.project-image) {
   display: flex;
   flex-direction: column;
   gap: 5px;
@@ -439,13 +518,19 @@ onBeforeUnmount(() => {
   color: var(--blue);
   text-shadow: 0 0 12px var(--glow);
 }
-.picker-footer {
-  justify-content: space-between;
-  border-top: 1px solid var(--line);
+.picker-heading-enter-active {
+  transition:
+    opacity var(--motion-fade) var(--motion-ease),
+    transform var(--motion-row) var(--motion-ease);
 }
-.picker-footer small {
-  font-size: 11px;
-  color: var(--muted);
+.picker-heading-enter-from {
+  opacity: 0;
+  transform: translateX(-8px);
+}
+@media (prefers-reduced-motion: reduce) {
+  .picker-heading-enter-active {
+    transition: none;
+  }
 }
 .picker-empty {
   display: flex;
@@ -453,8 +538,5 @@ onBeforeUnmount(() => {
   padding: 24px 8px;
   color: var(--muted);
   font-size: 12px;
-}
-.picker-more {
-  margin: 14px auto 0;
 }
 </style>

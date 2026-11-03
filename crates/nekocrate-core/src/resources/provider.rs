@@ -204,6 +204,37 @@ impl Provider {
         let _ = storage::write_json(&cached, &value);
         Ok(value)
     }
+    /// Presentation may use a stale copy offline; dependency resolution may not.
+    pub(super) async fn get_display(
+        &self,
+        path: &str,
+        cancel: &CancellationToken,
+    ) -> Result<Value> {
+        let result = tokio::time::timeout(Duration::from_secs(8), self.get(path, &[], cancel))
+            .await
+            .map_err(|_| anyhow::anyhow!("项目介绍请求超时"))
+            .and_then(|value| value);
+        match result {
+            Ok(value) => Ok(value),
+            Err(error) if !cancel.is_cancelled() => {
+                let base = if self.platform == Platform::Modrinth {
+                    "https://api.modrinth.com/v2/"
+                } else {
+                    "https://api.curseforge.com/v1/"
+                };
+                let url = reqwest::Url::parse_with_params(
+                    &format!("{base}{path}"),
+                    &[] as &[(&str, String)],
+                )?;
+                let hash = hex::encode(ring::digest::digest(
+                    &ring::digest::SHA256,
+                    url.as_str().as_bytes(),
+                ));
+                storage::read_json(&self.cache.join(format!("{hash}.json"))).map_err(|_| error)
+            }
+            Err(error) => Err(error),
+        }
+    }
     async fn cf_class(&self, kind: ResourceKind, cancel: &CancellationToken) -> Result<u64> {
         match kind {
             ResourceKind::Mods => Ok(6),
@@ -327,10 +358,28 @@ pub(super) fn project(v: &Value, platform: Platform) -> Project {
             .or_else(|| v["id"].as_str())
             .unwrap_or_default();
         Project {
+            latest_version: v["latest_version"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned),
+            icon_url: v["icon_url"]
+                .as_str()
+                .and_then(super::presentation::image_url),
             id: id.into(),
             name: text(v, "title"),
             description: text(v, "description"),
             downloads: v["downloads"].as_u64().unwrap_or(0),
+            authors: v["author"]
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .into_iter()
+                .collect(),
+            categories: strings(if v["display_categories"].is_array() {
+                &v["display_categories"]
+            } else {
+                &v["categories"]
+            }),
             url: format!("https://modrinth.com/project/{id}"),
             kind: match v["project_type"].as_str() {
                 Some("mod") => Some(ResourceKind::Mods),
@@ -342,10 +391,34 @@ pub(super) fn project(v: &Value, platform: Platform) -> Project {
         }
     } else {
         Project {
+            latest_version: v["mainFileId"]
+                .as_u64()
+                .filter(|id| *id > 0)
+                .map(|id| id.to_string()),
+            icon_url: v["logo"]["thumbnailUrl"]
+                .as_str()
+                .or(v["logo"]["url"].as_str())
+                .and_then(super::presentation::image_url),
             id: v["id"].to_string(),
             name: text(v, "name"),
             description: text(v, "summary"),
             downloads: v["downloadCount"].as_f64().unwrap_or(0.0) as u64,
+            authors: v["authors"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .take(32)
+                .map(|author| text(author, "name"))
+                .filter(|s| !s.is_empty())
+                .collect(),
+            categories: v["categories"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .take(32)
+                .map(|category| text(category, "name"))
+                .filter(|s| !s.is_empty())
+                .collect(),
             url: text(&v["links"], "websiteUrl"),
             kind: match v["classId"].as_u64() {
                 Some(6) => Some(ResourceKind::Mods),
@@ -364,6 +437,7 @@ pub(super) fn parse_version(v: &Value, platform: Platform) -> Result<ResourceVer
             name: text(v, "name"),
             number: text(v, "version_number"),
             release_type: text(v, "version_type"),
+            published: v["date_published"].as_str().map(str::to_owned),
             games: strings(&v["game_versions"]),
             loaders: strings(&v["loaders"]),
             files: v["files"]
@@ -396,6 +470,7 @@ pub(super) fn parse_version(v: &Value, platform: Platform) -> Result<ResourceVer
             project: v["modId"].to_string(),
             name: text(v, "displayName"),
             number: text(v, "displayName"),
+            published: v["fileDate"].as_str().map(str::to_owned),
             release_type: match v["releaseType"].as_u64() {
                 Some(1) => "release",
                 Some(2) => "beta",

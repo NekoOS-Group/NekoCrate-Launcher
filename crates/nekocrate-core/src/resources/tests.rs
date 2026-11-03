@@ -759,6 +759,129 @@ fn cache_project(launcher: &Launcher, id: &str) {
 }
 
 #[tokio::test]
+async fn display_project_uses_cached_body_and_authors_without_installing_anything() {
+    let (_temp, launcher, _, _) = fixture(true);
+    cache(
+        &launcher,
+        "project/cat",
+        &[],
+        json!({"id":"cat", "title":"Cat", "project_type":"mod", "body":"## A cat world", "icon_url":"https://cdn.modrinth.com/cat.png"}),
+    );
+    cache(
+        &launcher,
+        "project/cat/members",
+        &[],
+        json!([{"user":{"name":"Neko", "username":"neko"}}]),
+    );
+    let details = launcher
+        .resource_project(Platform::Modrinth, "cat", &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(details.body, "## A cat world");
+    assert_eq!(details.authors, ["Neko"]);
+    assert!(details.project.icon_url.is_some());
+    let summary = launcher
+        .resource_project_summary(Platform::Modrinth, "cat", &CancellationToken::new())
+        .await
+        .unwrap();
+    assert_eq!(summary.icon_url, details.project.icon_url);
+    assert_eq!(summary.id, "cat");
+    assert!(
+        launcher
+            .resource_project(Platform::Modrinth, "../cat", &CancellationToken::new())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn modpack_filters_use_provider_categories_and_single_version_without_a_list() {
+    let (_temp, launcher, _, _) = fixture(true);
+    let cancel = CancellationToken::new();
+    cache(
+        &launcher,
+        "tag/category",
+        &[],
+        json!([
+            {"name":"magic","project_type":"modpack"},
+            {"name":"optimization","project_type":"modpack"},
+            {"name":"library","project_type":"mod"}
+        ]),
+    );
+    let categories = launcher
+        .modpack_categories(Platform::Modrinth, &cancel)
+        .await
+        .unwrap();
+    assert_eq!(
+        categories.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(),
+        ["magic", "optimization"]
+    );
+    cache(
+        &launcher,
+        "search",
+        &[
+            ("query", "cats".into()),
+            ("offset", "20".into()),
+            ("limit", "20".into()),
+            (
+                "facets",
+                json!([["project_type:modpack"], ["categories:magic"]]).to_string(),
+            ),
+            ("index", "updated".into()),
+        ],
+        json!({"hits":[{"project_id":"cats","title":"Cats","project_type":"modpack", "latest_version":"new"}],"total_hits":21}),
+    );
+    let result = launcher
+        .search_modpacks_filtered(
+            Platform::Modrinth,
+            "cats",
+            20,
+            &ModpackFilters {
+                sort: ModpackSort::Updated,
+                category: "magic".into(),
+            },
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result.hits[0].latest_version.as_deref(), Some("new"));
+    // Only the single-version response is cached. A request for the full list
+    // would hit the network and cannot satisfy this test.
+    cache(
+        &launcher,
+        "version/new",
+        &[],
+        remote("new", "cats", json!([])),
+    );
+    let latest = launcher
+        .modpack_version(Platform::Modrinth, "cats", "new", &cancel)
+        .await
+        .unwrap();
+    assert_eq!(latest.id, "new");
+    assert!(
+        launcher
+            .modpack_version(Platform::Modrinth, "other", "new", &cancel)
+            .await
+            .is_err()
+    );
+    assert!(
+        launcher
+            .search_modpacks_filtered(
+                Platform::Modrinth,
+                "",
+                0,
+                &ModpackFilters {
+                    sort: ModpackSort::Newest,
+                    category: "magic\"],[\"project_type:mod".into()
+                },
+                &cancel
+            )
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
 async fn modpack_catalog_is_independent_of_destination_game_and_pages_versions() {
     let (_temp, launcher, _, _) = fixture(true);
     cache(
@@ -927,11 +1050,42 @@ async fn live_curseforge_build_credential_search_and_files() {
     let temp = tempfile::tempdir().unwrap();
     let launcher = Launcher::open(Some(temp.path().join("launcher"))).unwrap();
     let cancel = CancellationToken::new();
+    let categories = launcher
+        .modpack_categories(Platform::Curseforge, &cancel)
+        .await
+        .unwrap();
+    assert!(!categories.is_empty());
+    let filtered = launcher
+        .search_modpacks_filtered(
+            Platform::Curseforge,
+            "",
+            0,
+            &ModpackFilters {
+                sort: ModpackSort::Updated,
+                category: categories[0].id.clone(),
+            },
+            &cancel,
+        )
+        .await
+        .unwrap();
+    assert!(filtered.total > 0);
     let result = launcher
         .search_modpacks(Platform::Curseforge, "", 0, &cancel)
         .await
         .unwrap();
     let project = &result.hits.first().expect("Minecraft modpacks").id;
+    let latest = result.hits[0]
+        .latest_version
+        .as_deref()
+        .expect("default pack file");
+    assert_eq!(
+        launcher
+            .modpack_version(Platform::Curseforge, project, latest, &cancel)
+            .await
+            .unwrap()
+            .project,
+        *project
+    );
     let provider = provider::Provider::new(&launcher, Platform::Curseforge).unwrap();
     let files = provider
         .get(
@@ -1113,6 +1267,38 @@ async fn remote_install_uses_verified_cache_and_records_platform_ids() {
     assert_eq!(record.origin.platform, Platform::Modrinth);
     assert_eq!(record.origin.project.as_deref(), Some("cat"));
     assert_eq!(record.origin.version.as_deref(), Some("cat1"));
+}
+
+#[test]
+fn search_metadata_preserves_authors_and_featured_categories_for_both_providers() {
+    let mr = provider::project(
+        &json!({
+            "project_id": "cat", "title": "Cat", "downloads": 10000,
+            "author": "CatTeam", "display_categories": ["magic", "adventure"],
+            "categories": ["fabric", "magic", "adventure"]
+        }),
+        Platform::Modrinth,
+    );
+    assert_eq!(mr.downloads, 10000);
+    assert_eq!(mr.authors, ["CatTeam"]);
+    assert_eq!(mr.categories, ["magic", "adventure"]);
+    let cf = provider::project(
+        &json!({
+            "id": 123, "name": "Cat", "downloadCount": 12000.0,
+            "authors": [{"name": "CatTeam"}, {"name": "Neko"}],
+            "categories": [{"name": "Magic"}, {"name": "Adventure and RPG"}]
+        }),
+        Platform::Curseforge,
+    );
+    assert_eq!(cf.downloads, 12000);
+    assert_eq!(cf.authors, ["CatTeam", "Neko"]);
+    assert_eq!(cf.categories, ["Magic", "Adventure and RPG"]);
+    let old: Project = serde_json::from_value(json!({
+        "id": "old", "name": "Old", "description": "", "downloads": 0, "url": ""
+    }))
+    .unwrap();
+    assert!(old.authors.is_empty());
+    assert!(old.categories.is_empty());
 }
 
 #[test]

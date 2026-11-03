@@ -239,6 +239,168 @@ fn zipped_resource_packs_and_world_datapacks_expose_rich_descriptions_and_format
     assert_eq!(value(&data.sources[0], "包格式"), "15");
 }
 
+#[test]
+fn pack_readmes_and_shader_profiles_are_visible_without_installation_records() {
+    let (_temp, launcher, id, game) = fixture();
+    let readme = "# Cat shaders\n\nBy Neko.\n\n## Installation\nEnable with Iris.\n";
+    let properties = "# profile.ignored = X\nprofile.LOW = SHADOWS:512\nprofile.HIGH: SHADOWS:2048\nprofile.LOW = SHADOWS:1024\niris.features.required = COMPUTE_SHADERS \\\n    SSBO\niris.features.optional CUSTOM_IMAGES\n";
+    let shader = game.join("shaderpacks/Cat.zip");
+    archive(
+        &shader,
+        &[
+            ("shaders/shaders.properties", properties),
+            ("README.md", readme),
+            ("README.txt", "Duplicate instructions must not appear"),
+            ("shaders/README.md", "Nested duplicate"),
+        ],
+    );
+    let before = fs::read(&shader).unwrap();
+    let list = launcher
+        .version_content(&id, "pack", ContentKind::Shaderpacks)
+        .unwrap();
+    assert_eq!(list.files[0].has_metadata, Some(true));
+    let data = launcher
+        .version_content_metadata(&id, "pack", ContentKind::Shaderpacks, "Cat.zip")
+        .unwrap();
+    assert_eq!(data.sources.len(), 2);
+    assert_eq!(value(&data.sources[0], "配置档位"), "LOW · HIGH");
+    assert_eq!(
+        value(&data.sources[0], "声明的 Iris 必需功能"),
+        "COMPUTE_SHADERS · SSBO"
+    );
+    assert_eq!(
+        value(&data.sources[0], "声明的 Iris 可选功能"),
+        "CUSTOM_IMAGES"
+    );
+    assert_eq!(data.sources[1].description.as_deref(), Some(readme.trim()));
+    assert_eq!(data.sources[1].description_format, Some("markdown"));
+    assert!(!data.sources[1].revealable);
+    assert_eq!(
+        launcher
+            .version_content_source(
+                &id,
+                "pack",
+                ContentKind::Shaderpacks,
+                "Cat.zip",
+                "README.md"
+            )
+            .unwrap(),
+        readme
+    );
+    assert_eq!(fs::read(shader).unwrap(), before);
+
+    archive(
+        &game.join("resourcepacks/Cat.zip"),
+        &[
+            (
+                "pack.mcmeta",
+                r#"{"pack":{"pack_format":15,"description":"Cat textures"}}"#,
+            ),
+            (
+                "readme.md",
+                "# More about these textures\n\nA long description.",
+            ),
+        ],
+    );
+    let textures = launcher
+        .version_content_metadata(&id, "pack", ContentKind::Resourcepacks, "Cat.zip")
+        .unwrap();
+    assert_eq!(textures.sources.len(), 2);
+    assert_eq!(value(&textures.sources[0], "包格式"), "15");
+    assert_eq!(textures.sources[1].description_format, Some("markdown"));
+
+    let directory = game.join("shaderpacks/Folder/shaders");
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(directory.join("README.txt"), "Local shader instructions").unwrap();
+    let folder = launcher
+        .version_content_metadata(&id, "pack", ContentKind::Shaderpacks, "Folder")
+        .unwrap();
+    assert!(folder.sources[0].revealable);
+    assert_eq!(
+        folder.sources[0].description.as_deref(),
+        Some("Local shader instructions")
+    );
+    assert_eq!(folder.sources[0].description_format, None);
+    assert_eq!(
+        launcher
+            .version_content_path(
+                &id,
+                "pack",
+                ContentKind::Shaderpacks,
+                "Folder",
+                Some("shaders/README.txt")
+            )
+            .unwrap(),
+        directory.join("README.txt").canonicalize().unwrap()
+    );
+}
+
+#[test]
+fn pack_inspection_bounds_documents_and_does_not_expose_unrelated_files() {
+    let (_temp, launcher, id, game) = fixture();
+    archive(
+        &game.join("shaderpacks/Large.zip"),
+        &[
+            ("README.md", &"x".repeat(TEXT_LIMIT as usize + 1)),
+            ("shaders/shaders.properties", "profile.LOW = SHADOWS:512"),
+            ("shaders/private.glsl", "Do not expose"),
+        ],
+    );
+    let data = launcher
+        .version_content_metadata(&id, "pack", ContentKind::Shaderpacks, "Large.zip")
+        .unwrap();
+    assert_eq!(value(&data.sources[0], "配置档位"), "LOW");
+    assert_eq!(data.sources[1].issue.as_deref(), Some("元数据内容过大"));
+    assert!(
+        launcher
+            .version_content_source(
+                &id,
+                "pack",
+                ContentKind::Shaderpacks,
+                "Large.zip",
+                "README.md"
+            )
+            .is_err()
+    );
+    for source in [
+        "shaders/private.glsl",
+        "../README.md",
+        "shaders/../../README.md",
+        "/README.md",
+    ] {
+        assert!(
+            launcher
+                .version_content_source(&id, "pack", ContentKind::Shaderpacks, "Large.zip", source)
+                .is_err()
+        );
+    }
+    #[cfg(unix)]
+    {
+        let folder = game.join("shaderpacks/Escape");
+        fs::create_dir_all(folder.join("shaders")).unwrap();
+        let outside = game.parent().unwrap().join("outside.md");
+        fs::write(&outside, "Do not expose").unwrap();
+        std::os::unix::fs::symlink(&outside, folder.join("README.md")).unwrap();
+        let data = launcher
+            .version_content_metadata(&id, "pack", ContentKind::Shaderpacks, "Escape")
+            .unwrap();
+        assert!(data.sources[0].issue.is_some());
+        assert_eq!(data.sources[0].description, None);
+        assert!(!data.sources[0].revealable);
+        assert!(
+            launcher
+                .version_content_source(
+                    &id,
+                    "pack",
+                    ContentKind::Shaderpacks,
+                    "Escape",
+                    "README.md"
+                )
+                .is_err()
+        );
+    }
+}
+
 fn level_bytes() -> Vec<u8> {
     use fastnbt::Value::{Byte, Compound, Int, Long, String as Str};
     fastnbt::to_bytes(&Compound(std::collections::HashMap::from([(

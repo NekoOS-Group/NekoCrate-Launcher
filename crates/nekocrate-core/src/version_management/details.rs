@@ -11,6 +11,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod packs;
 #[cfg(test)]
 mod tests;
 mod world;
@@ -44,7 +45,10 @@ pub(super) fn mark_available(working: &Path, content: &mut VersionContent, kind:
             file.has_metadata = Some(true);
         } else if kind != ContentKind::Mods {
             file.has_metadata = Some(match kind {
-                ContentKind::Datapacks | ContentKind::Resourcepacks => {
+                ContentKind::Resourcepacks | ContentKind::Shaderpacks => {
+                    packs::available(&path, kind)
+                }
+                ContentKind::Datapacks => {
                     if path.is_dir() {
                         path.join("pack.mcmeta").is_file()
                     } else {
@@ -75,6 +79,8 @@ pub struct ContentSource {
     pub revealable: bool,
     pub title: Option<String>,
     pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description_format: Option<&'static str>,
     pub fields: Vec<ContentField>,
     pub dependencies: Vec<ContentDependency>,
     pub issue: Option<String>,
@@ -99,6 +105,7 @@ impl ContentSource {
             revealable: false,
             title: None,
             description: None,
+            description_format: None,
             fields: Vec::new(),
             dependencies: Vec::new(),
             issue: None,
@@ -138,9 +145,9 @@ impl Launcher {
         let mut sources = match kind {
             ContentKind::Unresolved => bail!("此文件尚未下载，暂无本地元数据"),
             ContentKind::Mods => read_mod(&path)?,
-            ContentKind::Datapacks | ContentKind::Resourcepacks => read_pack(&path)?,
+            ContentKind::Datapacks => read_pack(&path)?,
+            ContentKind::Resourcepacks | ContentKind::Shaderpacks => packs::read(&path, kind)?,
             ContentKind::Saves => world::read(&path),
-            ContentKind::Shaderpacks => Vec::new(),
         };
         if info.is_dir() {
             for source in &mut sources {
@@ -228,9 +235,9 @@ fn check_source(kind: ContentKind, source: &str) -> Result<()> {
     let allowed = match kind {
         ContentKind::Unresolved => false,
         ContentKind::Mods => MOD_DESCRIPTORS.contains(&source),
-        ContentKind::Datapacks | ContentKind::Resourcepacks => source == "pack.mcmeta",
+        ContentKind::Datapacks => source == "pack.mcmeta",
+        ContentKind::Resourcepacks | ContentKind::Shaderpacks => packs::allowed(kind, source),
         ContentKind::Saves => matches!(source, "level.dat" | "level.dat_old"),
-        ContentKind::Shaderpacks => false,
     };
     if !allowed {
         bail!("未找到元数据文件");
@@ -565,26 +572,30 @@ fn read_pack(path: &Path) -> Result<Vec<ContentSource>> {
             }
             bounded(&mut entry, TEXT_LIMIT)?
         };
-        let value: Value = serde_json::from_slice(&bytes)?;
-        let pack = &value["pack"];
-        if !pack.is_object() {
-            bail!("pack.mcmeta 缺少 pack 配置");
-        }
-        source.description = plain_text(&pack["description"]);
-        for (label, key) in [
-            ("包格式", "pack_format"),
-            ("最低格式", "min_format"),
-            ("最高格式", "max_format"),
-            ("支持的格式", "supported_formats"),
-        ] {
-            if let Some(v) = pack.get(key) {
-                source.field(label, scalar(v).unwrap_or_else(|| v.to_string()));
-            }
-        }
-        Ok(())
+        parse_pack(&mut source, &bytes)
     })();
     if let Err(error) = result {
         source.issue = Some(error.to_string());
     }
     Ok(vec![source])
+}
+
+fn parse_pack(source: &mut ContentSource, bytes: &[u8]) -> Result<()> {
+    let value: Value = serde_json::from_slice(bytes)?;
+    let pack = &value["pack"];
+    if !pack.is_object() {
+        bail!("pack.mcmeta 缺少 pack 配置");
+    }
+    source.description = plain_text(&pack["description"]);
+    for (label, key) in [
+        ("包格式", "pack_format"),
+        ("最低格式", "min_format"),
+        ("最高格式", "max_format"),
+        ("支持的格式", "supported_formats"),
+    ] {
+        if let Some(v) = pack.get(key) {
+            source.field(label, scalar(v).unwrap_or_else(|| v.to_string()));
+        }
+    }
+    Ok(())
 }

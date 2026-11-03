@@ -3688,3 +3688,17 @@ input:read-only {
   font-weight: normal;
   opacity: 0.65;
 }
+
+.project-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 1px 7px;
+  border-radius: 2px;
+  border: 1px solid color-mix(in srgb, var(--blue) 22%, transparent);
+  background: color-mix(in srgb, var(--blue) 8%, transparent);
+  color: var(--blue);
+  font-size: 10px;
+  line-height: 16px;
+  white-space: nowrap;
+}

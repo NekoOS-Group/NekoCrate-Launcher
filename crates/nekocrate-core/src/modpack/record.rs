@@ -23,6 +23,41 @@ pub(super) fn write_job(game: &Path, version: &str, job: &Job) -> Result<()> {
     storage::write_json(&job_path(game, version)?, &saved)
 }
 
+/// Recover an unfinished pack whose archive manifest was placed at the launch
+/// profile path. Only an exact match with the saved import is recoverable; a
+/// genuine profile with an incorrect ID must still fail normal validation.
+/// The caller holds the game-directory lock.
+pub(super) fn recover_manifest(game: &Path, version: &str, job: &Job) -> Result<bool> {
+    if job.completed {
+        return Ok(false);
+    }
+    let directory = game.join("versions").join(version);
+    let profile = archive::managed_destination(&directory, &format!("{version}.json"))?;
+    if !profile.is_file() || fs::metadata(&profile)?.len() > 8 * 1024 * 1024 {
+        return Ok(false);
+    }
+    let Ok(value) = storage::read_json::<Value>(&profile) else {
+        return Ok(false);
+    };
+    if value != job.pack.manifest || value.get("id").is_some() || value.get("mainClass").is_some() {
+        return Ok(false);
+    }
+    let manifest = archive::managed_destination(&directory, job.pack.manifest_name())?;
+    if profile == manifest {
+        return Ok(false);
+    }
+    if manifest.try_exists()? {
+        anyhow::ensure!(
+            storage::read_json::<Value>(&manifest).is_ok_and(|saved| saved == value),
+            "整合包清单与安装记录不一致，未覆盖文件"
+        );
+        fs::remove_file(&profile)?;
+    } else {
+        fs::rename(&profile, &manifest)?;
+    }
+    Ok(true)
+}
+
 pub(super) fn write_progress(game: &Path, version: &str, progress: f64) -> Result<()> {
     let directory = game.join("versions").join(version);
     storage::write_json(
@@ -108,7 +143,18 @@ impl Launcher {
                     .join("versions")
                     .join(&version.id)
                     .join(".nekocrate/migration.json");
-                let local_valid = read_job(&game, &version.id).is_ok();
+                let local = read_job(&game, &version.id);
+                let local_valid = local.is_ok();
+                if let Ok(job) = &local
+                    && let Err(error) = recover_manifest(&game, &version.id, job)
+                {
+                    self.0
+                        .modpack_migration_issues
+                        .lock()
+                        .unwrap()
+                        .insert((instance.id.clone(), version.id.clone()), error.to_string());
+                    continue;
+                }
                 let mut origin = version.clone();
                 if let Ok(value) = storage::read_json::<Value>(&marker)
                     && value["instance"].as_str() == Some(&instance.id)

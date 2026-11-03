@@ -13,6 +13,7 @@ mod cache;
 mod declarations;
 pub mod details;
 pub mod mods;
+pub mod presentation;
 pub(crate) use cache::SummaryCache;
 
 #[derive(Clone, Debug, Serialize)]

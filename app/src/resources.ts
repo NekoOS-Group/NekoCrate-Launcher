@@ -13,10 +13,14 @@ export interface ResourceTarget {
   shared: boolean;
 }
 export interface ResourceProject {
+  latest_version?: string | null;
+  icon_url?: string | null;
   id: string;
   name: string;
   description: string;
   downloads: number;
+  authors?: string[];
+  categories?: string[];
   url: string;
 }
 export interface ResourceVersion {
@@ -25,8 +29,10 @@ export interface ResourceVersion {
   name: string;
   number: string;
   release_type: string;
+  published?: string | null;
 }
 export interface ResourceSelection {
+  icon_url?: string | null;
   platform: ResourcePlatform;
   kind: ResourceKind;
   project: string;

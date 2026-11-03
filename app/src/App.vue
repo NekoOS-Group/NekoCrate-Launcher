@@ -16,6 +16,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { projectLink } from "./projectPresentation";
 import {
   Plus,
   Boxes,
@@ -3329,9 +3330,11 @@ async function openFolder(id?: string) {
   }
 }
 async function openLink(url: string) {
+  const external = projectLink(url);
+  if (!external) return;
   try {
-    if (desktop) await openUrl(url);
-    else window.open(url, "_blank", "noopener");
+    if (desktop) await openUrl(external);
+    else window.open(external, "_blank", "noopener,noreferrer");
   } catch (e) {
     error.value = message(e);
   }
@@ -4803,6 +4806,7 @@ onUnmounted(() => {
           v-if="modal === 'library'"
           ref="resourceManager"
           :rpc="rpc"
+          @link="openLink"
           :busy="busy"
           :running="snapshot.running"
           :mod-actions="modActions"
@@ -4821,6 +4825,8 @@ onUnmounted(() => {
           @manage="manageResourceVersion"
         />
         <VersionManager
+          :rpc="rpc"
+          @link="openLink"
           ref="versionManager"
           v-else-if="modal === 'manage' && managedInstance"
           :initial-version="managedInitialVersion"
@@ -4921,9 +4927,12 @@ onUnmounted(() => {
           @submit="submitDownload"
           @close="modal = null"
         >
-          <template #content>
+          <template #content="{ searchTarget, filterTarget, setPackDetail }">
             <ModpackBrowser
               v-if="additionSection === 'modpacks'"
+              :search-target="searchTarget"
+              :filter-target="filterTarget"
+              @detail="setPackDetail"
               :busy="busy"
               :rpc="rpc"
               :download="downloadOnlineModpack"
@@ -4936,7 +4945,6 @@ onUnmounted(() => {
               @continue="continueDownloadTask(modpackDownloadTask)"
               @error="error = message($event)"
               @link="openLink"
-              @import="openModpack()"
               @pause="setDownloadPaused(true)"
               @resume="setDownloadPaused(false)"
               @cancel="cancel"
@@ -4954,6 +4962,7 @@ onUnmounted(() => {
               :disabled="busy || downloadSubmitting"
               :rpc="rpc"
               @back="additionSection = 'game'"
+              @link="openLink"
               @error="error = message($event)"
             />
           </template>

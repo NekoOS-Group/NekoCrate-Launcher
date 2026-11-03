@@ -13,8 +13,11 @@ mod imports;
 pub use imports::{DetectedResource, LocalImport, ResourceCopySource};
 mod install;
 mod modpacks;
+mod presentation;
 mod provider;
-pub use modpacks::{ModpackArchive, ModpackVersions};
+pub use modpacks::{ModpackArchive, ModpackCategory, ModpackFilters, ModpackSort, ModpackVersions};
+pub use presentation::ProjectDetails;
+pub(crate) use presentation::image_type;
 pub use provider::{ResourceCatalog, ResourceScope, ResourceSelection};
 mod selection;
 pub(crate) use selection::has_selection;
@@ -60,10 +63,18 @@ pub struct ResourceTarget {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Project {
+    #[serde(default)]
+    pub latest_version: Option<String>,
+    #[serde(default)]
+    pub icon_url: Option<String>,
     pub id: String,
     pub name: String,
     pub description: String,
     pub downloads: u64,
+    #[serde(default)]
+    pub authors: Vec<String>,
+    #[serde(default)]
+    pub categories: Vec<String>,
     pub url: String,
     pub kind: Option<ResourceKind>,
 }
@@ -85,6 +96,8 @@ pub struct ResourceVersion {
     pub name: String,
     pub number: String,
     pub release_type: String,
+    #[serde(default)]
+    pub published: Option<String>,
     pub files: Vec<ResourceFile>,
     pub dependencies: Vec<ResourceDependency>,
     pub games: Vec<String>,
@@ -406,6 +419,7 @@ pub(crate) fn provenance_source(
         revealable: false,
         title: Some("安装来源".into()),
         description: None,
+        description_format: None,
         fields,
         dependencies: record
             .origin

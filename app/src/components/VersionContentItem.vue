@@ -12,6 +12,8 @@ import {
 } from "vue";
 import {
   Braces,
+  Ban,
+  Download,
   ChevronRight,
   LoaderCircle,
   Settings2,
@@ -25,6 +27,15 @@ import {
   type ResourceCopySource,
 } from "../useResourceTransfer";
 import GlassSelect from "./GlassSelect.vue";
+import LocalContentImage from "./LocalContentImage.vue";
+import ProjectDetails from "./ProjectDetails.vue";
+import {
+  declaredProject,
+  localContentMedia,
+  type ContentPresentation,
+} from "../localContentPresentation";
+import type { ResourceRpc } from "../projectPresentation";
+import type { ResourceProject } from "../resources";
 import { locale, t, translateMessage } from "../i18n";
 import { formatBytes } from "../downloadWorkflow";
 import type { ContentKind, ContentMetadata, LocalContentFile } from "../types";
@@ -37,6 +48,9 @@ const ConfigEditor = defineAsyncComponent({
   },
   delay: 0,
 });
+const Description = defineAsyncComponent(
+  () => import("./ProjectDescription.vue"),
+);
 
 import {
   configDrafts,
@@ -46,6 +60,7 @@ import {
   type ModConfigDocument,
 } from "../modManagement";
 const props = defineProps<{
+  rpc: ResourceRpc;
   selected?: boolean;
   select?: (event: MouseEvent, file: LocalContentFile) => boolean;
   dragSources?: () => ResourceCopySource[];
@@ -79,6 +94,7 @@ const props = defineProps<{
   dependencyTargets: ReadonlyMap<string, string>;
 }>();
 const emit = defineEmits<{
+  link: [url: string];
   error: [error: unknown];
   changed: [file: string];
   "show-mod": [id: string, version: string, file: string];
@@ -125,6 +141,24 @@ const rawSources = ref<
 >({});
 const expanded = ref(false);
 const metadata = ref<ContentMetadata | null>(null);
+const presentation = ref<ContentPresentation>();
+const hasArtwork = computed(() =>
+  ["mods", "resourcepacks", "shaderpacks"].includes(props.kind),
+);
+const onlineIcon = ref<string | null>();
+const project = computed(
+  () => presentation.value?.project || declaredProject(props.file),
+);
+const projectSummary = computed<ResourceProject>(() => ({
+  id: project.value?.id || "",
+  name: displayName.value,
+  description: "",
+  downloads: 0,
+  url: "",
+  kind: ["mods", "resourcepacks", "shaderpacks"].includes(props.kind)
+    ? (props.kind as "mods" | "resourcepacks" | "shaderpacks")
+    : undefined,
+}));
 const archivePrefix = computed(() =>
   metadata.value?.size != null
     ? `${props.file.file_name.split("/").pop()}::`
@@ -136,14 +170,16 @@ const openingFolder = ref(false);
 const available = computed(
   () => !props.file.declaration || props.file.declaration.status === "local",
 );
-const canExpand = computed(() =>
-  !available.value
-    ? !!props.file.declaration
-    : props.file.has_metadata === false
-      ? false
-      : metadata.value
-        ? metadata.value.sources.length > 0
-        : props.file.has_metadata === true,
+const canExpand = computed(
+  () =>
+    !!project.value ||
+    (!available.value
+      ? !!props.file.declaration
+      : props.file.has_metadata === false
+        ? false
+        : metadata.value
+          ? metadata.value.sources.length > 0
+          : props.file.has_metadata === true),
 );
 const statusLabel = computed(() => {
   const status = props.file.declaration?.status;
@@ -167,12 +203,12 @@ const progress = computed(() => {
 const hasDisplayName = computed(
   () =>
     !!props.file.declaration ||
-    ["mods", "resourcepacks"].includes(props.kind) ||
+    hasArtwork.value ||
     props.file.name !== props.file.file_name.split("/").pop(),
 );
 const displayName = computed(() => {
   if (
-    ["mods", "resourcepacks"].includes(props.kind) &&
+    hasArtwork.value &&
     props.file.name === props.file.file_name.split("/").pop()
   ) {
     return (
@@ -413,6 +449,7 @@ async function loadDetails() {
   if (
     !canExpand.value ||
     !available.value ||
+    props.file.has_metadata === false ||
     !expanded.value ||
     metadata.value ||
     loading.value
@@ -461,6 +498,18 @@ function showDependency(id: string) {
 }
 async function reveal() {
   const identity = panelId.value;
+  if (hasArtwork.value && !presentation.value) {
+    try {
+      const result = await localContentMedia(props.rpc).load(
+        { id: props.instanceId, version: props.version, kind: props.kind },
+        props.file,
+      );
+      if (identity !== panelId.value) return;
+      presentation.value = result;
+    } catch {
+      /* A missing icon/source must not prevent local inspection. */
+    }
+  }
   expanded.value = canExpand.value;
   void loadDetails();
   highlighted.value = true;
@@ -529,6 +578,8 @@ watch(
     configLoading.value = false;
     expanded.value = false;
     metadata.value = null;
+    presentation.value = undefined;
+    onlineIcon.value = undefined;
     loading.value = false;
     failed.value = false;
     rawSources.value = {};
@@ -606,32 +657,60 @@ onBeforeUnmount(() => {
         "
         @click.stop="activateMod"
       >
-        <LoaderCircle
-          v-if="modDownloading || (modSaving && !available)"
-          :size="18"
-          class="spin"
-          aria-hidden="true"
-        />
-        <svg
-          v-else
-          width="18"
-          height="18"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          stroke-width="1.5"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          aria-hidden="true"
+        <LocalContentImage
+          :rpc="rpc"
+          :instance-id="instanceId"
+          :version="version"
+          :kind="kind"
+          :file="file"
+          :online-icon="onlineIcon"
+          :size="32"
+          @presentation="presentation = $event"
         >
-          <path class="mod-state-shell" d="m12 2 9 5v10l-9 5-9-5V7z" />
-          <path
-            v-if="modState !== 'missing'"
-            d="m3 7 9 5 9-5M12 12v10M7.5 4.5l9 5"
-          />
-          <path v-else d="M12 7v10m-3-3 3 3 3-3" />
-        </svg>
+          <svg
+            width="22"
+            height="22"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path class="mod-state-shell" d="m12 2 9 5v10l-9 5-9-5V7z" />
+            <path d="m3 7 9 5 9-5M12 12v10M7.5 4.5l9 5" />
+          </svg>
+        </LocalContentImage>
+        <Transition name="mod-state-mark">
+          <span
+            v-if="modState !== 'enabled' || modSaving || modDownloading"
+            class="mod-state-mark"
+            :key="modSaving || modDownloading ? 'busy' : modState"
+            aria-hidden="true"
+          >
+            <LoaderCircle
+              v-if="modSaving || modDownloading"
+              :size="13"
+              class="spin"
+            />
+            <Ban v-else-if="modState === 'disabled'" :size="13" />
+            <Download v-else :size="13" />
+          </span>
+        </Transition>
       </button>
+      <LocalContentImage
+        v-else-if="hasArtwork"
+        :rpc="rpc"
+        :instance-id="instanceId"
+        :version="version"
+        :kind="kind"
+        :file="file"
+        :online-icon="onlineIcon"
+        :size="32"
+        @presentation="presentation = $event"
+        ><component :is="icon" :size="22"
+      /></LocalContentImage>
       <span
         v-else
         class="content-item-icon"
@@ -723,7 +802,7 @@ onBeforeUnmount(() => {
         v-if="canExpand"
         type="button"
         class="content-item-expand"
-        :aria-label="`${t('元数据')} · ${file.name}`"
+        :aria-label="`${t(project ? '项目介绍' : '元数据')} · ${file.name}`"
         :aria-expanded="expanded"
         :aria-controls="panelId"
         @click.stop="toggle"
@@ -751,6 +830,15 @@ onBeforeUnmount(() => {
       >
         <div class="content-item-clip">
           <div class="content-item-detail">
+            <ProjectDetails
+              v-if="project && !configOpen"
+              :key="`${project.platform}/${project.id}`"
+              :project="projectSummary"
+              :platform="project.platform"
+              :rpc="rpc"
+              @loaded="onlineIcon = $event.project.icon_url"
+              @link="$emit('link', $event)"
+            />
             <section
               v-if="configOpen && modActions"
               class="mod-config"
@@ -927,7 +1015,22 @@ onBeforeUnmount(() => {
                     ></component
                   >
                 </header>
-                <p v-if="source.description" class="content-description">
+                <div
+                  v-if="
+                    source.description &&
+                    source.description_format === 'markdown'
+                  "
+                  class="content-local-description"
+                >
+                  <Description
+                    :body="source.description"
+                    format="markdown"
+                    base=""
+                    :rpc="rpc"
+                    @link="$emit('link', $event)"
+                  />
+                </div>
+                <p v-else-if="source.description" class="content-description">
                   {{ source.description }}
                 </p>
                 <dl v-if="source.fields.length" class="content-fields">
@@ -1160,7 +1263,8 @@ span.content-item-toggle {
   outline: 1px solid var(--tab-color);
   outline-offset: -1px;
 }
-.content-item-heading.disabled {
+.content-item-heading.disabled .content-item-label,
+.content-item-heading.disabled .content-item-expand {
   opacity: 0.55;
 }
 .content-item-heading {
@@ -1284,6 +1388,9 @@ span.content-item-toggle {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   user-select: text;
+}
+.content-local-description {
+  margin-bottom: 14px;
 }
 .content-fields {
   display: grid;
@@ -1447,6 +1554,9 @@ span.content-item-toggle {
 
 <style scoped>
 .content-state-button {
+  position: relative;
+  width: 32px;
+  height: 32px;
   box-sizing: content-box;
   padding: 8px;
   margin: -8px;
@@ -1457,6 +1567,46 @@ span.content-item-toggle {
   transition:
     color 180ms ease-out,
     filter 180ms ease-out;
+}
+.content-state-button :deep(.local-content-image) {
+  transition:
+    opacity 180ms ease-out,
+    filter 180ms ease-out;
+}
+.content-state-button[data-state="disabled"] :deep(.local-content-image) {
+  opacity: 0.45;
+  filter: grayscale(1);
+}
+.mod-state-mark {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  display: grid;
+  place-items: center;
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  background: var(--night);
+  color: var(--tab-color);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--tab-color) 25%, transparent);
+  pointer-events: none;
+}
+.mod-state-mark-enter-active,
+.mod-state-mark-leave-active {
+  transition:
+    opacity 140ms ease-out,
+    transform 180ms var(--motion-ease);
+}
+.mod-state-mark-enter-from,
+.mod-state-mark-leave-to {
+  opacity: 0;
+  transform: scale(0.75);
+}
+@media (prefers-reduced-motion: reduce) {
+  .mod-state-mark-enter-active,
+  .mod-state-mark-leave-active {
+    transition: none;
+  }
 }
 .content-state-button[data-state="enabled"] .mod-state-shell {
   fill: currentColor;

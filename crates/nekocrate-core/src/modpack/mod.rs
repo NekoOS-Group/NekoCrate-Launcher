@@ -434,6 +434,7 @@ impl Launcher {
         let _directory_guard = self.idle(id)?;
         let mut job = self.pack_job(id, selected)?;
         let game = self.available_game_dir(id)?;
+        record::recover_manifest(&game, selected, &job)?;
         let target = game.join("versions").join(selected);
         let instance = self.instance(id)?;
         crate::download::check_cancel(cancel)?;
