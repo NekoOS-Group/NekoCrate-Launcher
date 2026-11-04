@@ -5,6 +5,7 @@ import grassSide from "./assets/blocks/grass_block_side.png";
 import grassOverlay from "./assets/blocks/grass_block_side_overlay.png";
 import ice from "./assets/blocks/ice.png";
 import bricks from "./assets/blocks/bricks.png";
+import mossyCobblestone from "./assets/blocks/mossy_cobblestone.png";
 import slime from "./assets/blocks/slime_block.png";
 import stone from "./assets/blocks/stone_bricks.png";
 import craftingTop from "./assets/blocks/crafting_table_top.png";
@@ -24,7 +25,7 @@ import hayTop from "./assets/blocks/hay_block_top.png";
 export interface InstanceIconDefinition {
   id: number;
   name: string;
-  faces?: {
+  faces: {
     top: string;
     side: string;
     front?: string;
@@ -49,7 +50,11 @@ export const instanceIcons: InstanceIconDefinition[] = [
   },
   { id: 1, name: "冰块", faces: { top: ice, side: ice } },
   { id: 2, name: "红砖", faces: { top: bricks, side: bricks } },
-  { id: 3, name: "苔石" },
+  {
+    id: 3,
+    name: "苔石",
+    faces: { top: mossyCobblestone, side: mossyCobblestone },
+  },
   { id: 4, name: "橡木木板", faces: { top: oak, side: oak } },
   { id: 5, name: "樱花木板", faces: { top: cherry, side: cherry } },
   {

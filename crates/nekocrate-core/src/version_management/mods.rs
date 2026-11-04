@@ -11,6 +11,51 @@ use std::{
 
 const TEXT_LIMIT: usize = 512 * 1024;
 #[derive(Serialize)]
+pub struct DroppedConfig {
+    pub name: String,
+    pub text: String,
+    pub format: String,
+}
+
+pub fn read_dropped_config(path: &Path) -> Result<DroppedConfig> {
+    let metadata = fs::symlink_metadata(path)?;
+    anyhow::ensure!(
+        metadata.is_file() && !metadata.file_type().is_symlink(),
+        "请选择普通配置文件"
+    );
+    let format = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    anyhow::ensure!(
+        [
+            "json",
+            "json5",
+            "toml",
+            "cfg",
+            "conf",
+            "properties",
+            "yaml",
+            "yml",
+            "ini"
+        ]
+        .contains(&format.as_str()),
+        "此处只接收配置文件"
+    );
+    let text = String::from_utf8(bounded(path)?).context("配置文件必须是 UTF-8 文本")?;
+    anyhow::ensure!(!text.contains('\0'), "配置文件含有二进制内容");
+    Ok(DroppedConfig {
+        name: path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
+        text,
+        format,
+    })
+}
+#[derive(Serialize)]
 pub struct ModConfigFile {
     pub path: String,
     pub size: u64,
@@ -260,7 +305,7 @@ impl Launcher {
             .filter(|(name, _)| ids.iter().any(|id| matches_id(name, id)))
             .map(|(_, file)| file)
             .collect();
-        found.sort_by(|a, b| a.path.cmp(&b.path));
+        crate::sorting::sort_by(&mut found, |a, b| a.path.cmp(&b.path));
         found.truncate(256);
         Ok(found)
     }
@@ -440,6 +485,23 @@ mod tests {
                 .is_err()
         );
         assert!(game.join("mods/cat.jar").exists());
+    }
+    #[test]
+    fn dropped_configuration_is_bounded_text_and_has_no_write_side_effects() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cat.toml");
+        fs::write(&path, "# keep comment\nenabled=true\n").unwrap();
+        let document = read_dropped_config(&path).unwrap();
+        assert_eq!(document.format, "toml");
+        assert!(document.text.starts_with("# keep"));
+        assert_eq!(fs::read_to_string(&path).unwrap(), document.text);
+        fs::write(&path, vec![b'x'; TEXT_LIMIT + 1]).unwrap();
+        assert!(read_dropped_config(&path).is_err());
+        fs::write(&path, b"binary\0data").unwrap();
+        assert!(read_dropped_config(&path).is_err());
+        let binary = dir.path().join("cat.jar");
+        fs::write(&binary, b"text").unwrap();
+        assert!(read_dropped_config(&binary).is_err());
     }
     #[test]
     fn config_matching_validation_conflicts_and_backup() {

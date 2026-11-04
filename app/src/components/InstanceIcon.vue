@@ -9,14 +9,13 @@ const material = computed(
 );
 const tintId = useId();
 const tintMatrix = computed(() => {
-  const tint = material.value.faces?.tint;
+  const tint = material.value.faces.tint;
   if (!tint) return undefined;
   const [red, green, blue] = tint.map((channel) => channel / 255);
   return `${red} 0 0 0 0  0 ${green} 0 0 0  0 0 ${blue} 0 0  0 0 0 1 0`;
 });
 const cubeFaces = computed(() => {
   const faces = material.value.faces;
-  if (!faces) return [];
   // Each projected cube edge is 30px: slanted (26, 15), vertical (0, 30).
   // Keep the cube centered at (32, 32) within the existing 64px viewport.
   return [
@@ -49,12 +48,7 @@ const cubeFaces = computed(() => {
 </script>
 
 <template>
-  <svg
-    v-if="material.faces"
-    class="instance-art block-art"
-    viewBox="0 0 64 64"
-    aria-hidden="true"
-  >
+  <svg class="instance-art block-art" viewBox="0 0 64 64" aria-hidden="true">
     <defs v-if="tintMatrix">
       <filter :id="tintId" color-interpolation-filters="sRGB">
         <feColorMatrix type="matrix" :values="tintMatrix" />
@@ -106,10 +100,4 @@ const cubeFaces = computed(() => {
       />
     </g>
   </svg>
-  <span
-    v-else
-    class="instance-art legacy-block-art"
-    :data-material="material.id"
-    aria-hidden="true"
-  />
 </template>

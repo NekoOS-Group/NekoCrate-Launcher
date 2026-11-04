@@ -64,25 +64,189 @@ Fork PR 在普通 Ubuntu runner 上安装依赖，避免依赖外部贡献者没
 
 ## 发布文件的职责
 
+### 可执行文件体积与诊断符号
+
+Release 使用 `lto = "fat"`，在整个 Rust 依赖图之间优化；开发和测试配置不变。
+保留原有速度优化等级、并行代码生成及 panic 展开行为。完整 LTO 增加最终链接工作，
+不为便携包再次编译。Cargo 不直接剥离符号，以便先保存可追溯的诊断资料。
+
+`scripts/release_symbols.py` 在编译之后、任何打包与更新签名之前执行：
+
+- macOS：保存含符号的原始 Mach-O，再用 `strip -x` 去掉分发程序的局部符号，
+  恢复 ad hoc 签名以执行启动检查。原文件可按地址解析函数名；当前无完整源码行调试信息。
+- Linux：用 `objcopy --only-keep-debug` 保存符号文件，`strip --strip-unneeded`
+  精简 ELF，并添加 `.gnu_debuglink`。保留动态链接、栈展开和 build ID 信息。
+- Windows：编译时启用 `CARGO_PROFILE_RELEASE_DEBUG=1` 生成独立 PDB，保存 PDB，
+  EXE 不再额外 strip；不删除异常处理表或资源段。
+
+诊断文件与包含提交、目标架构、处理前后大小和 SHA-256 的 `symbols.json` 一起保存为
+`diagnostic-symbols-<tag>-<platform>` Actions artifact，保留 90 天，不加入公开 Release
+附件。需要长期排查旧版本时应在到期前归档。这里的程序哈希对应打包签名前的共享
+二进制；最终安装包哈希仍由 BUILDINFO 记录。符号处理在临时副本上完成后替换程序，
+避免修改 Cargo 通过硬链接共用的缓存文件。
+
+直接返回 JSON 的后台 IPC 操作通过统一的 blocking task 入口执行，进入 Tokio
+之前擦除闭包和结果的类型，避免每种命令都生成一套任务调度、join 和析构代码。
+序列化在同一个后台任务中完成，保持原有 JSON 结构与错误链；不改变下载状态机。
+JSON 读写的文件操作也由非泛型公共函数执行，保留各类型的直接反序列化。
+
+2026-11-04 的 macOS ARM64 同一工作区、同一前端产物对比（原始可执行文件，
+不是 DMG 或压缩包）：
+
+| 构建 | 字节数 | MiB |
+| --- | ---: | ---: |
+| 原配置基线 | 28,139,968 | 26.84 |
+| FatLTO | 23,706,528 | 22.61 |
+| 加上后台命令与 JSON 文件操作去重 | 23,464,304 | 22.38 |
+| 再剥离局部符号、恢复 ad hoc 签名 | 19,674,576 | 18.76 |
+
+总计减少 30.08%；只比较同样剥离且重新签名的程序，代码去重额外节省
+165,888 字节。Mach-O 符号分析中 Tokio `raw::poll` 的不同地址由 324 个降到 301 个。
+二进制单独 gzip-6 压缩由 11,953,721 降到 9,939,477 字节；这不是整个应用包的大小。
+Windows/Linux 的 FatLTO 收益需要原生发布构建测量，不能套用 macOS 百分比。
+
+对已发布 dev0.9.7 文件的分析副本，仅做符号精简（不包含本轮 FatLTO 和代码去重）：
+
+| 平台 | 原始文件 | 精简后 | 降幅 |
+| --- | ---: | ---: | ---: |
+| Linux ELF | 37,964,720 字节 / 36.21 MiB | 29,388,120 字节 / 28.03 MiB | 22.6% |
+| Windows EXE | 28,101,120 字节 / 26.80 MiB | 28,101,120 字节 / 26.80 MiB | 0% |
+
+这些副本未分发，也不代表当前源码重新构建的最终大小。Windows 的符号已主要位于
+独立 PDB，不能靠同样的 strip 获得 Linux 的收益；最终收益应比较新构建的 EXE。
+
+### 运行时代码与链接审计
+
+2026-11-04 在上述 FatLTO 基础上继续检查实际 Mach-O 符号、各平台动态库表及
+排除构建依赖/过程宏后的 Cargo 依赖树。最大的可移除部分是未使用的 Tauri IPC
+命令，而不是另一套浏览器或 HTTP 客户端。
+
+`build.removeUnusedCommands = true` 让 Tauri 按静态 capabilities 裁掉未授权的命令。
+将 `core:default` 改为实际需要的事件订阅/取消订阅、窗口标题与最小化/恢复/聚焦，
+保留文件选择与链接打开。应用不使用运行时新增 capability，因此关闭 `dynamic-acl`，
+其余原有桌面默认功能保留。Rust 直接调用的菜单、文件定位、更新安装仍保留；裁掉的
+是未使用的前端入口。机制与限制见 [Tauri 官方说明](https://v2.tauri.app/concept/size/#remove-unused-commands)。
+
+同一前端、图标、FatLTO、剥离规则及 gzip-6 的最终实测：
+
+| 文件 | 本轮前 | 本轮后 | 减少 |
+| --- | ---: | ---: | ---: |
+| macOS ARM64 可执行文件 | 19,674,544 字节 | 17,159,680 字节 | 12.78% |
+| 通用 `.app.tar.gz` | 10,903,891 字节 | 10,124,618 字节 | 7.15% |
+
+本阶段的包为 9.66 MiB，但仍高于十进制 10 MB 约 125 KB。未修改任何图片、字体、
+前端代码或压缩级别。按不同符号地址统计，Tokio `raw::poll` 从 301 个降到 93 个；
+Tauri 异步响应相关函数的地址区间合计约 526 KiB 降到 83 KiB。这些是含内联影响的
+符号归属估计，不是移除整个 crate 可直接节省的大小。
+
+依赖和动态链接的结论：
+
+| 项目 | 实际情况与处理 |
+| --- | --- |
+| Linux `libdbus` | `keyring/vendored` 原先把 C 库静态编入程序；现移除此 feature，通过 pkg-config 链接系统 `libdbus-1.so.3`。构建镜像已有 `libdbus-1-dev`，DEB 显式增加 `libdbus-1-3` 运行依赖，原生发布检查验证 ELF 的动态依赖。 |
+| macOS WebKit/AppKit/Security 等 | 实际 Mach-O 已链接系统 framework，不在包内静态携带。 |
+| Linux GTK/WebKitGTK、Windows 系统 DLL | 已发布文件的动态库表证实在使用系统运行库；继续保留这些链接。 |
+| Rust 标准库、Tokio、Reqwest/Rustls | 静态链接保留。系统没有可直接复用的匹配 Rust 动态库；拆分后仍须分发库和管理 ABI/加载路径，不等于减少总包体积。 |
+| `flate2`/`miniz_oxide` | 可研究系统 zlib，但最终符号中压缩/解压核心仅约 29 KiB；暂不为这点体积切换后端及其性能特征。 |
+| `base64` 多版本 | updater 使用 0.22，HTTP/应用使用 0.23；最终可见相关代码约 11 KiB。没有为统一版本而维护上游分叉。 |
+| `getrandom`、CoreFoundation/CoreGraphics 多版本 | 不同上游要求的适配层；依赖树中的多个版本不代表复制了系统库。最终 CoreFoundation 具名函数约 1 KiB，CoreGraphics 大部分调用已内联或消除。 |
+| 图片、TOML、SHA-2 等依赖 | 必须区分编译期和运行期。没有新的 `image`、`sysinfo` 或第二套 Reqwest；PNG 仍参与原生菜单图标，TOML 用于 Mod 元数据/配置，Linux SHA-2 用于 Secret Service。不能按锁文件名称直接删库。 |
+
+移除 vendored feature 同时清除了锁文件中的 OpenSSL/openssl-src 等可选依赖。
+原先这些项没有出现在审计到的 macOS/Linux 实际运行时 OpenSSL 链接路径中，因此
+不将锁文件减少行数计为可执行文件节省。
+
+Linux 旧 dev0.9.7 的静态 D-Bus 有 601 个 C 函数符号、合计 107,632 字节机器码，
+还不含常量等数据。此数值只说明旧文件中确实有静态副本；新的 Linux/Windows
+原生构建与最终大小尚未验证。D-Bus 的系统链接要求见 [dbus-rs 文档](https://docs.rs/crate/dbus/0.9.12)，
+Rust 库链接约束见 [Rust Reference](https://doc.rust-lang.org/reference/linkage.html)。
+
+验证包括工作区 Rust 测试、原生 JS SDK 的文件选择/链接/窗口/拖入监听调用测试、
+Clippy，以及最终 macOS 包的签名、嵌入资源、编译后权限、两种运行模式和迁移检查。
+`--verify-frontend` 直接验证生成后的 ACL，避免只看源 JSON 而漏掉发布构建差异。
+
+### IPC 泛型代码去重
+
+在上述命令裁剪后继续测量，保留两项有实际收益的改动：
+
+- 桌面 `Request` 和资源管理 `Action` 继续接受原来的 `op` / `kind` JSON 字段。
+  `tagged_json` 将同一 JSON 对象交给 Serde 的 `EnumAccess`，通过 remote derive
+  复用字段类型、默认值和必填校验，避免每个内部标签变体生成一套 `ContentDeserializer`。
+  此适配器只用于 JSON IPC；磁盘配置与网络响应的读取路径不变。
+- 后台 IPC 操作通过 `blocking` 共用 Tokio 任务入口。直接回传前端的结果共用
+  `Value`；路径和复制计划等中间结果仍保留 Rust 类型，按返回类型共享任务实现，
+  不经过 JSON 往返或 `Any` 转换。增加的闭包装箱只发生在这些界面操作中，未修改
+  每文件下载、校验或渲染的热路径。
+
+同一前端、资源、FatLTO、符号处理和 gzip-6 下，2026-11-04 macOS ARM64 本地实测：
+
+| 阶段 / 文件 | 字节 |
+| --- | ---: |
+| 本轮前，可执行文件 | 17,159,680 |
+| 仅 IPC JSON 解析去重后 | 16,894,928 |
+| 再合并直接返回 JSON 的后台调用 | 16,795,568 |
+| 再合并有类型中间结果，最终可执行文件 | 16,745,936 |
+| 本轮前，完整通用 `.app.tar.gz` | 10,124,618 |
+| 最终完整通用 `.app.tar.gz` | 9,984,058 |
+
+可执行文件减少 413,744 字节（2.41%），完整包减少 140,560 字节（1.39%）。
+本地完整归档为 9.984 MB / 9.52 MiB，低于十进制 10 MB；未压缩的程序仍为
+16.746 MB。这不代表 Windows/Linux 构建大小，也不保证后续增加功能后仍低于此值。
+
+按 Mach-O 不同函数地址估算，`ContentDeserializer` 相关实现从 114 份降至 5 份，
+其地址区间合计由 385,968 降至 7,972 字节；新的 JSON 适配与派生解析自身仍有约
+199 KB 代码，因此不能将旧解析代码的全部体积计为净节省。Tokio `raw::poll` 从
+93 份降至 80 份。最终净收益以上表的实际文件为准。
+
+验证：384 项工作区 Rust 测试通过、8 项原有测试忽略；Clippy、格式和原生 JS SDK
+权限测试通过。新增回归覆盖借用/拥有的 JSON、缺省值、嵌套命令、中文路径、完整
+u64 范围及非法输入。正式二进制的 IPC Future 仍为 424 字节，继续使用堆上分派，
+避免重现 Windows 启动栈溢出。最终归档解压后通过签名、前端资源、ACL 和便携模式
+验证；同一程序的安装模式、改名和迁移检查也通过。未发布本轮产物。
+
+### 分发格式
+
 | 文件 | 用途 | 是否为客户端更新所需 |
 | --- | --- | --- |
 | macOS `.dmg` | 面向用户的拖拽安装介质 | 手动安装入口 |
-| macOS `.app.tar.gz` | Tauri updater 使用的应用归档 | 是 |
+| macOS `.app.tar.gz` | 唯一的通用应用归档，便携运行与两种模式更新共用 | 是 |
 | Windows `-setup.exe` | 安装版下载与自动更新共用 | 是 |
-| Windows `-portable.exe` / Linux `.elf` | 单个便携程序，下载与更新共用 | 是 |
-| macOS `-portable.app.tar.gz` | 内置便携模式的 `.app`，下载与更新共用 | 是 |
+| Windows `-win-amd64.exe` / Linux `.elf` | 单个便携程序，下载与更新共用 | 是 |
 | Linux `.deb` | 发行版包管理器安装 | 当前自动更新不使用 |
 | `latest.json` | 版本、各平台包地址及内嵌签名 | 是 |
 | `BUILDINFO.json` | 提交、平台，以及统一的文件大小与 SHA-256 校验清单 | 否，供校验与追溯 |
 
-从 dev0.9.5 开始，共公开七个安装/更新/便携文件和两个 JSON 文件，不再构建或发布
-AppImage 和 portable ZIP。普通桌面构建与 `portable` feature 构建共用 Core、前端
-和第三方依赖缓存，只增加桌面 crate 的编译与链接。便携模式随程序携带，不依赖
-文件名或外部标记。macOS 便携 `.app` 换入便携二进制后重新进行 ad hoc 签名。
+合并 macOS 更新包后，共公开六个安装/更新文件和两个 JSON 文件；文件名不含
+`portable`，不再构建或发布 AppImage、portable ZIP 或第二份 macOS 更新归档。每个平台只编译一次桌面程序，安装包与便携包共用该程序；
+不再启用 `portable` feature 或进行第二次编译与链接。发布版默认使用便携目录，
+安装包部署 `nekocrate.runtime.json`（`{"schema":1,"mode":"installed"}`）：Windows
+放在 EXE 旁，macOS 放在 `.app/Contents/Resources`，Linux DEB 放在
+`/usr/lib/nekocrate-launcher`。Linux 只查找当前程序对应的相对安装目录，避免本机
+另一个已安装版本影响便携副本；配置损坏时明确报错，不静默切换数据目录。
 
-便携更新目标为 `darwin-aarch64-portable`、`windows-x86_64-portable-exe`、
-`linux-x86_64-elf`。保留安装版 macOS/Windows 的原目标；Linux DEB 交由包管理器
-维护。旧 AppImage 和 dev0.9.4 便携用户手动迁移一次，不把旧目标指向不兼容格式。
+打包使用 `--no-binary-patching`，防止 Tauri 将安装包类型写入共享程序，尤其避免
+便携 ELF 被标记为 DEB 后调用包管理器更新。Windows 更新入口仍按运行时模式选择目标。
+Windows/Linux 的独立文件直接复制同一可执行文件；macOS 通用 `.app` 去掉安装模式
+配置后重新进行 ad hoc 签名，因此与 DMG 内 App 的程序代码相同，但签名数据和完整文件
+哈希可能不同。macOS 的 Tauri bundling 关闭自动生成更新归档，再单独生成、签名一次通用包。
+发布检查用同一个二进制验证配置选定安装模式、去掉配置转为便携模式、改名和迁移。
+
+macOS 两种模式共用 `darwin-aarch64-unified` 更新目标。安装版在替换前将当前 App 的
+规范路径保存到系统数据目录 `runtime-modes/<路径 SHA-256>.json`；更新后根据该记录
+继续使用系统目录。记录位于签名包外，不修改下载包、不破坏签名，不影响其他位置的
+副本。保存失败时停止安装；损坏的记录明确报错，不静默切换成新的便携数据目录。
+便携更新不写这份全局记录。显式的运行模式配置仍优先。
+
+Windows 单文件更新目标保留 `windows-x86_64-portable-exe`，附件名改为 `-win-amd64.exe`；
+安装包继续使用 `windows-x86_64` 和 `-setup.exe`。Linux ELF 保留 `linux-x86_64-elf`，
+DEB 仍交由包管理器维护。内部目标名与公开附件名是不同概念。
+
+旧 macOS 客户端不会保存包外模式，因此不把通用包挂到旧 `darwin-aarch64` 或
+`darwin-aarch64-portable` 目标；这些客户端需要手动替换一次，安装用户用 DMG，便携
+用户替换 App 并保留旁边的数据。旧 Windows 便携客户端校验了 `-portable.exe` 文件名，
+也需手动替换一次。新的实例 ZIP 导出同时识别统一包和历史便携包，避免误用旧安装模式
+App；导出的 App 外层目录不再含 Portable 字样。此前的旧 AppImage 和 dev0.9.4 便携
+迁移要求仍然适用。
 
 不提供 `.app.zip`、独立 `.sig` 或 `SHA256SUMS`。构建在产物旁生成 `.sig`，
 收集时检查签名对应的公钥及版本，发布时内嵌到 `latest.json`。客户端安装前验证

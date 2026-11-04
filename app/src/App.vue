@@ -2,6 +2,7 @@
 import { t, locale, setLanguage, translateMessage } from "./i18n";
 import {
   computed,
+  provide,
   defineAsyncComponent,
   nextTick,
   onMounted,
@@ -75,6 +76,7 @@ import GlassDialog from "./components/GlassDialog.vue";
 import DownloadWorkflow from "./components/DownloadWorkflow.vue";
 import ErrorNotice from "./components/ErrorNotice.vue";
 import FolderDrop from "./components/FolderDrop.vue";
+import InstanceTarget from "./components/InstanceTarget.vue";
 import { useFolderDrop } from "./useFolderDrop";
 import {
   createWorkflow,
@@ -96,6 +98,11 @@ import {
 } from "./networkSettings";
 import SkinStage from "./components/SkinStage.vue";
 import WorldBackdrop from "./components/WorldBackdrop.vue";
+import { announceResources } from "./resourceArrival";
+import { draggedProjectUrl, type DroppedProject } from "./projectDrop";
+import ProjectDropPreview from "./components/ProjectDropPreview.vue";
+import GameExport from "./components/GameExport.vue";
+import { gameTransferKey, exportEdge } from "./gameTransfer";
 import VersionMenu from "./components/VersionMenu.vue";
 import VersionDownload from "./components/VersionDownload.vue";
 import ModpackImport from "./components/ModpackImport.vue";
@@ -691,6 +698,33 @@ const form = reactive({
   loader: "vanilla",
   loader_version: "",
 });
+const gameImport = ref<DetectedResource>();
+const importPrefix = ref("");
+const importTargetId = ref<string | null>(null);
+const importTarget = computed(
+  () => instances.value.find((i) => i.id === importTargetId.value) || null,
+);
+const importArchiveOptions = computed(
+  () =>
+    gameImport.value?.game_directories?.map((item) => ({
+      value: item.prefix,
+      label: item.name,
+      detail: item.prefix,
+    })) || [],
+);
+const creationTitle = computed(() =>
+  gameImport.value
+    ? gameImport.value.format === "instance_archive"
+      ? "导入游戏目录"
+      : "导入版本"
+    : "新建实例",
+);
+function chooseArchiveDirectory(prefix: string) {
+  importPrefix.value = prefix;
+  form.name =
+    gameImport.value?.game_directories?.find((item) => item.prefix === prefix)
+      ?.name || form.name;
+}
 const launchDirectory = ref<LaunchDirectory | null>(null);
 let directoryRequest = 0;
 watch(
@@ -712,7 +746,7 @@ watch(
 );
 const invalidCreationLocation = computed(
   () =>
-    (modal.value === "create" ||
+    ((modal.value === "create" && !importTarget.value) ||
       (modal.value === "version" && !editing.value)) &&
     form.location === "external" &&
     !form.external_directory.trim(),
@@ -1079,7 +1113,11 @@ const {
   () => {
     hoveredInstance.value = null;
   },
-  { allowed: canRemoveDraggedInstance, remove: removeDraggedInstance },
+  {
+    allowed: canRemoveDraggedInstance,
+    remove: removeDraggedInstance,
+    export: openGameExport,
+  },
 );
 watch([modal, utility, showLogs], ([dialog, panel, logs]) => {
   if (dialog || panel || logs) instanceDockExpanded.value = false;
@@ -1548,7 +1586,11 @@ async function rpc<T = unknown>(
 const folderDrop = useFolderDrop({
   rpc,
   sync,
-  select: selectInstance,
+  select: async (id, version) => {
+    selectInstance(id);
+    const instance = instances.value.find((i) => i.id === id);
+    if (instance && version) await selectVersion(instance, version);
+  },
   busy: () => busy.value,
   error: (text) => {
     error.value = text;
@@ -1599,6 +1641,183 @@ function finishDropBrowse() {
   dropVersionMenu.value?.endDrop();
   instanceDockExpanded.value = dockBeforeDrop;
 }
+const exportSession = ref<{ instance: Instance; version?: string }>();
+function openGameExport(id: string, version?: string) {
+  const instance = instances.value.find((i) => i.id === id);
+  if (
+    !instance ||
+    busy.value ||
+    hasInstanceTask(id) ||
+    snapshot.value.running.includes(id)
+  ) {
+    notify("请先结束游戏或当前任务");
+    return;
+  }
+  exportSession.value = { instance, version };
+}
+function buildGameExport(platform?: string) {
+  const session = exportSession.value!;
+  return action<{ id: string; name: string; size: number }>(
+    "导出 ZIP",
+    "export_game",
+    { id: session.instance.id, version: session.version, platform },
+    true,
+  );
+}
+function versionCopyTarget(
+  source: string,
+  version: string,
+  element: Element | null,
+) {
+  const surface = element?.closest<HTMLElement>("[data-resource-instance]");
+  const instance = instances.value.find(
+    (i) => i.id === surface?.dataset.resourceInstance,
+  );
+  const issue = !instance
+    ? t("请拖到目标游戏目录")
+    : source === instance.id
+      ? t("版本已在此实例中")
+      : busy.value ||
+          hasInstanceTask(instance.id) ||
+          hasInstanceTask(source) ||
+          snapshot.value.running.includes(instance.id) ||
+          snapshot.value.running.includes(source)
+        ? t("请先结束游戏或当前任务")
+        : instance.versions.some(
+              (v) => v.id.toLowerCase() === version.toLowerCase(),
+            )
+          ? t("目标已有同名版本")
+          : undefined;
+  return { surface: surface || null, instance, issue };
+}
+provide(gameTransferKey, {
+  preview(id, version, element, x, y) {
+    dropInteraction.value = true;
+    // Only expand the instance overflow; do not replace the source version list.
+    if (element?.closest("[data-drop-overflow]"))
+      instanceDockExpanded.value = true;
+    if (exportEdge(x, y)) {
+      showDropHint(null, t("松开以导出版本 ZIP"));
+      return;
+    }
+    const target = versionCopyTarget(id, version, element);
+    showDropHint(
+      target.surface,
+      target.issue ||
+        t("复制 {version} 到 {name}", { version, name: target.instance!.name }),
+      !!target.issue,
+    );
+  },
+  drop(id, version, element, x, y) {
+    if (exportEdge(x, y)) {
+      openGameExport(id, version);
+      return true;
+    }
+    const target = versionCopyTarget(id, version, element);
+    if (!target.instance) return false;
+    if (target.issue) {
+      notify(target.issue);
+      return true;
+    }
+    void action<Instance>(
+      "复制版本",
+      "copy_version",
+      { id, version, target: target.instance.id },
+      true,
+    ).then(async (result) => {
+      if (!result) return;
+      selectInstance(result.id);
+      await selectVersion(result, version);
+      notify(t("已复制 {version} 到 {name}", { version, name: result.name }));
+    });
+    return true;
+  },
+  finish() {
+    clearDropHint();
+    dropInteraction.value = false;
+  },
+  export: openGameExport,
+});
+const droppedPack = ref<DroppedProject>();
+const projectPreview = ref<DroppedProject>();
+let resolvingProject = false;
+function useDroppedResource(
+  project: DroppedProject,
+  instance: Instance,
+  version: string,
+) {
+  if (!openResources(instance, version, project.kind)) return;
+  if (resourceSession.value) {
+    resourceSession.value.platform = project.platform;
+    resourceSession.value.project = project.project;
+  }
+  projectPreview.value = undefined;
+}
+async function receiveProjectLink(event: DragEvent) {
+  const url = draggedProjectUrl(event.dataTransfer);
+  if (!url) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const scope = dropScope(event.target as Element);
+  endIncoming();
+  if (busy.value || resolvingProject) {
+    rejectDrop(scope.surface, t("请等待当前任务完成。"));
+    return;
+  }
+  resolvingProject = true;
+  try {
+    const project = await rpc<DroppedProject>("resolve_project_link", { url });
+    const detected: DetectedResource = {
+      path: url,
+      name: project.project.name,
+      format: project.kind === "modpack" ? "modpack" : "resource",
+      kinds: project.kind === "modpack" ? [] : [project.kind as ResourceKind],
+      issue: null,
+    };
+    const issue = resourceDropIssue([detected], scope.kind);
+    if (issue) throw new Error(issue);
+    if (project.kind === "modpack") {
+      if (scope.destination || selectedInstance.value)
+        newVersion(scope.destination || selectedInstance.value!);
+      else {
+        newInstance();
+        editing.value = null;
+        modal.value = "version";
+      }
+      additionSection.value = "modpacks";
+      droppedPack.value = project;
+    } else if (
+      scope.target &&
+      scope.target.instance.versions.find((v) => v.id === scope.target!.version)
+        ?.installed
+    ) {
+      useDroppedResource(project, scope.target.instance, scope.target.version);
+    } else projectPreview.value = project;
+  } catch (e) {
+    rejectDrop(scope.surface, message(e));
+  } finally {
+    resolvingProject = false;
+  }
+}
+function previewProjectLink(event: DragEvent) {
+  // Browsers protect payload text during dragover; text types suffice to permit
+  // the drop, while receiveProjectLink strictly validates both URL and API data.
+  if (
+    event.dataTransfer?.files.length ||
+    !Array.from(event.dataTransfer?.types || []).some(
+      (t) => t === "text/uri-list" || t === "text/plain",
+    )
+  )
+    return;
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+  showDropHint(
+    (event.target as Element)?.closest(
+      "[data-drop-kind], [data-resource-instance]",
+    ),
+    t("打开项目并选择兼容版本"),
+  );
+}
 const resourceSession = ref<ResourceSession>();
 const versionManager = ref<{ refresh: () => Promise<void> }>();
 const resourceManager = ref<{
@@ -1613,6 +1832,19 @@ const resourceTransfer = useResourceTransfer({
   busy: () => busy.value || libraryBusy.value || managing.value,
   copy: copyDraggedResource,
   copyMany: copyDraggedResources,
+  preview: async (sources, target) => {
+    const preview = await rpc<{ existing: string[] }>("preview_resource_drop", {
+      sources,
+      id: target.instance,
+      version: target.version,
+      world: target.world,
+    });
+    return preview.existing.length
+      ? t("已有 {count} 个同名文件，将检查是否相同", {
+          count: preview.existing.length,
+        })
+      : undefined;
+  },
   exportMany: (sources) => rpc("export_resources", { sources }),
   export: (source) => rpc("export_resource", { source }),
   browse: browseDropTarget,
@@ -1634,11 +1866,23 @@ async function copyDraggedResources(
     })),
     id: target.instance,
     version: target.version,
+    ...(target.world ? { world: target.world } : {}),
   });
   if (copied === undefined) return;
   if (copied) notify(t("已复制 {count} 项资源", { count: sources.length }));
   await versionManager.value?.refresh();
   await resourceManager.value?.refresh();
+  if (copied)
+    announceResources(
+      target.instance,
+      target.version,
+      sources[0].kind,
+      sources.map((s) =>
+        s.kind === "datapacks" && target.world
+          ? `saves/${target.world}/datapacks/${s.file.split("/").pop()}`
+          : s.file,
+      ),
+    );
 }
 async function copyDraggedResource(
   source: ResourceCopySource,
@@ -1653,6 +1897,7 @@ async function copyDraggedResource(
     },
     id: target.instance,
     version: target.version,
+    ...(target.world ? { world: target.world } : {}),
   });
   if (copied === undefined) return;
   notify(
@@ -1667,6 +1912,11 @@ async function copyDraggedResource(
     await Promise.all([
       versionManager.value?.refresh(),
       resourceManager.value?.refresh(),
+    ]);
+    announceResources(target.instance, target.version, source.kind, [
+      source.kind === "datapacks" && target.world
+        ? `saves/${target.world}/datapacks/${source.file.split("/").pop()}`
+        : source.file,
     ]);
   }
 }
@@ -1707,10 +1957,11 @@ function openResources(
   version: string,
   kind = "mods",
   files?: DetectedResource[],
+  world?: string,
 ) {
   if (busy.value || snapshot.value.running.includes(instance.id)) {
     notify("请先结束游戏或当前任务");
-    return;
+    return false;
   }
   resourceSession.value = {
     instance,
@@ -1729,7 +1980,9 @@ function openResources(
       ? kind
       : "mods") as ResourceKind,
     files,
+    world,
   };
+  return true;
 }
 async function prepareResources(op: string, data: Record<string, unknown>) {
   return action<ResourcePlan>("解析资源依赖", op, data);
@@ -1744,8 +1997,18 @@ async function installResources(plan: ResourcePlan) {
   );
   return result === true;
 }
-function resourcesInstalled() {
-  void versionManager.value?.refresh();
+async function resourcesInstalled(plan?: ResourcePlan) {
+  await Promise.all([
+    versionManager.value?.refresh(),
+    resourceManager.value?.refresh(),
+  ]);
+  if (plan)
+    announceResources(
+      plan.target.instance,
+      plan.target.version,
+      plan.entries[0]?.kind || "mods",
+      plan.entries.map((e) => e.destination),
+    );
 }
 async function handleResourceDrop(
   paths: string[],
@@ -1763,8 +2026,39 @@ async function handleResourceDrop(
     const issue = resourceDropIssue(files, kind);
     if (issue) throw new Error(issue);
     if (busy.value) throw new Error(t("请等待当前任务完成。"));
+    if (target && hasInstanceTask(target.instance.id))
+      throw new Error(t("请先结束游戏或当前任务"));
     const route = routeResourceDrop(files);
+    if (route === "game") {
+      if (["instance", "version"].includes(kind || "") && !destination)
+        throw new Error("目标实例已不存在，请重新选择");
+      const file = files[0];
+      if (
+        file.format === "version_directory" &&
+        file.game_directory &&
+        !destination
+      ) {
+        if (modal.value === "add") modal.value = null;
+        folderDrop.handle({ type: "drop", paths });
+      } else {
+        newInstance();
+        gameImport.value = file;
+        importTargetId.value =
+          file.format === "version_directory"
+            ? destination?.id || selectedInstance.value?.id || null
+            : null;
+        form.name = file.version || file.name.replace(/\.zip$/i, "");
+        const prefix = file.game_directories?.[0]?.prefix;
+        if (prefix) chooseArchiveDirectory(prefix);
+      }
+      return;
+    }
     if (route === "folders") {
+      if (
+        destination &&
+        files.some((file) => file.format === "version_directory")
+      )
+        throw new Error("请逐个导入版本目录");
       if (modal.value === "add") modal.value = null;
       folderDrop.handle({ type: "drop", paths });
       return;
@@ -1785,7 +2079,13 @@ async function handleResourceDrop(
       kind && !["instance", "version"].includes(kind)
         ? kind
         : files[0]?.kinds[0] || "mods";
-    openResources(target.instance, target.version, resourceKind, files);
+    openResources(
+      target.instance,
+      target.version,
+      resourceKind,
+      files,
+      surface?.closest<HTMLElement>("[data-drop-world]")?.dataset.dropWorld,
+    );
   } catch (e) {
     rejectDrop(surface || null, message(e));
   }
@@ -1801,6 +2101,7 @@ let dropDisposed = false;
 let incomingPaths: string[] = [];
 let incomingFiles: Promise<DetectedResource[]> | undefined;
 let incomingRevision = 0;
+const incomingPreviews = new Map<string, Promise<{ existing: string[] }>>();
 let lastDropPoint: { x: number; y: number } | undefined;
 function incomingElement() {
   return lastDropPoint
@@ -1848,6 +2149,19 @@ async function previewIncoming() {
     showDropHint(scope.surface, t("导入缺失文件"));
     return;
   }
+  if (scope.kind === "config") {
+    const issue = scope.surface?.dataset.dropDisabled
+      ? t("请先结束游戏或当前任务")
+      : incomingPaths.length !== 1
+        ? t("请一次拖入一个配置文件")
+        : !/\.(json5?|toml|cfg|conf|properties|yaml|yml|ini)$/i.test(
+              incomingPaths[0] || "",
+            )
+          ? t("此处只接收配置文件")
+          : undefined;
+    showDropHint(scope.surface, issue || t("比较并替换配置"), !!issue);
+    return;
+  }
   if (scope.kind === "skins" || scope.kind === "java") {
     const issue =
       scope.kind === "skins" &&
@@ -1870,7 +2184,50 @@ async function previewIncoming() {
       element !== incomingElement()
     )
       return;
-    const issue = resourceDropIssue(files, scope.kind);
+    const issue =
+      resourceDropIssue(files, scope.kind) ||
+      (busy.value ||
+      (scope.target &&
+        (snapshot.value.running.includes(scope.target.instance.id) ||
+          hasInstanceTask(scope.target.instance.id)))
+        ? t("请先结束游戏或当前任务")
+        : undefined) ||
+      (files[0]?.format === "version_directory" &&
+      scope.destination?.versions.some(
+        (v) => v.id.toLowerCase() === files[0].version?.toLowerCase(),
+      )
+        ? t("目标已有同名版本")
+        : undefined);
+    let duplicate: string | undefined;
+    if (!issue && scope.target && files.every((f) => f.format === "resource")) {
+      const args = {
+        id: scope.target.instance.id,
+        version: scope.target.version,
+        paths: incomingPaths,
+        world:
+          scope.surface?.closest<HTMLElement>("[data-drop-world]")?.dataset
+            .dropWorld,
+        kind: [
+          "mods",
+          "resourcepacks",
+          "datapacks",
+          "shaderpacks",
+          "saves",
+        ].includes(scope.kind || "")
+          ? scope.kind
+          : undefined,
+      };
+      const key = JSON.stringify(args);
+      if (!incomingPreviews.has(key))
+        incomingPreviews.set(key, rpc("preview_resource_drop", args));
+      const result = await incomingPreviews.get(key)!;
+      if (revision !== incomingRevision || element !== incomingElement())
+        return;
+      if (result.existing.length)
+        duplicate = t("已有 {count} 个同名文件，将检查是否相同", {
+          count: result.existing.length,
+        });
+    }
     const label =
       files[0]?.format === "resource"
         ? resourceKindLabel(
@@ -1881,7 +2238,17 @@ async function previewIncoming() {
         : resourceKindLabel(files[0]?.format || "");
     showDropHint(
       scope.surface,
-      issue || t("导入{kind}", { kind: label }),
+      issue ||
+        duplicate ||
+        (scope.target
+          ? t("导入{kind}到 {name} · {version}", {
+              kind: label,
+              name: scope.target.instance.name,
+              version:
+                scope.surface?.closest<HTMLElement>("[data-drop-world]")
+                  ?.dataset.dropWorld || scope.target.version,
+            })
+          : t("导入{kind}", { kind: label })),
       !!issue,
     );
   } catch (error) {
@@ -1891,6 +2258,7 @@ async function previewIncoming() {
 }
 function endIncoming() {
   incomingRevision++;
+  incomingPreviews.clear();
   incomingPaths = [];
   incomingFiles = undefined;
   manualPackDragging.value = false;
@@ -1910,6 +2278,16 @@ async function receiveFiles(
   if (scope.manual) {
     if (manualTask?.modpack_status?.missing.length)
       await supplyPackFiles(paths, manualTask);
+    return;
+  }
+  if (scope.kind === "config") {
+    if (scope.surface?.dataset.dropDisabled) {
+      rejectDrop(scope.surface, t("请先结束游戏或当前任务"));
+      return;
+    }
+    scope.surface?.dispatchEvent(
+      new CustomEvent("nekocrate-file-drop", { detail: { paths } }),
+    );
     return;
   }
   if (scope.kind === "java" || scope.kind === "skins") {
@@ -1936,6 +2314,19 @@ async function receiveFiles(
     rejectDrop(scope.surface, message(error));
   }
 }
+function clearProjectHint(event: DragEvent) {
+  if (!event.relatedTarget && !incomingPaths.length) clearDropHint();
+}
+onMounted(() => {
+  document.addEventListener("dragover", previewProjectLink);
+  document.addEventListener("drop", receiveProjectLink);
+  document.addEventListener("dragleave", clearProjectHint);
+});
+onUnmounted(() => {
+  document.removeEventListener("dragover", previewProjectLink);
+  document.removeEventListener("drop", receiveProjectLink);
+  document.removeEventListener("dragleave", clearProjectHint);
+});
 async function listenForFolders() {
   try {
     const stop = await getCurrentWindow().onDragDropEvent((e) => {
@@ -2109,6 +2500,9 @@ async function action<T>(
         "download_modpack",
         "download_declared_mod",
         "resource_manager",
+        "import_game",
+        "copy_version",
+        "export_game",
       ].includes(op),
       title,
       status: "running",
@@ -2125,7 +2519,9 @@ async function action<T>(
               : version?.loader
                 ? "loader"
                 : op
-            : op,
+            : op === "export_game" && data.platform
+              ? "export_game_portable"
+              : op,
           title,
         ),
     });
@@ -2292,6 +2688,9 @@ async function chooseInstanceDirectory() {
   }
 }
 function resetInstanceDraft() {
+  gameImport.value = undefined;
+  importTargetId.value = null;
+  importPrefix.value = "";
   const baseName = t("新实例");
   const names = new Set(
     instances.value.map((instance) => instance.name.trim()),
@@ -2513,10 +2912,39 @@ async function submit() {
   let result: Instance | boolean | undefined;
   if (modal.value === "create") {
     if (invalidCreationLocation.value || directoryPicking.value) return;
-    result = await action<Instance>("创建实例", "create", {
-      name: form.name,
-      directory: form.location === "external" ? form.external_directory : null,
-    });
+    if (gameImport.value) {
+      const importing = action<Instance>(
+        creationTitle.value,
+        "import_game",
+        {
+          request: {
+            path: gameImport.value.path,
+            archive_prefix:
+              gameImport.value.format === "instance_archive"
+                ? importPrefix.value
+                : null,
+            target: importTarget.value?.id || null,
+            name: form.name,
+            icon: form.icon,
+            directory:
+              !importTarget.value && form.location === "external"
+                ? form.external_directory
+                : null,
+          },
+        },
+        true,
+      );
+      // Use the existing task graph during extraction/copying. Closing it does
+      // not cancel the operation; failed/cancelled imports can be retried there.
+      modal.value = null;
+      utility.value = "downloads";
+      result = await importing;
+    } else
+      result = await action<Instance>("创建实例", "create", {
+        name: form.name,
+        directory:
+          form.location === "external" ? form.external_directory : null,
+      });
   }
   if (result !== undefined) {
     if (typeof result === "object") selectInstance(result.id);
@@ -2736,7 +3164,7 @@ async function continueDownloadTask(
       await sync();
     }
     downloadControlBusy.value = false;
-    const result = await action<{ path?: string }>(
+    const result = await action<{ path?: string; id?: string }>(
       task.title,
       task.operation,
       task.arguments,
@@ -2745,6 +3173,8 @@ async function continueDownloadTask(
     );
     if (result?.path && task.operation === "download_modpack")
       await openModpack(result.path);
+    if (result?.id && task.operation === "import_game")
+      selectInstance(result.id);
   } catch (e) {
     error.value = message(e);
   } finally {
@@ -2816,6 +3246,7 @@ async function resumePack() {
   }
 }
 function newVersion(instance: Instance) {
+  droppedPack.value = undefined;
   packPreview.value = null;
   additionSection.value =
     current.value?.workflow.steps[0]?.id === "pack_archive_resolve"
@@ -3539,6 +3970,44 @@ onUnmounted(() => {
 
 <template>
   <div class="shell" :data-theme="theme">
+    <Transition
+      name="dialog"
+      appear
+      @before-leave="prepareDialogLeave"
+      @after-leave="finishDialogLeave"
+    >
+      <ProjectDropPreview
+        v-if="projectPreview"
+        :project="projectPreview"
+        :instances="instances"
+        :rpc="rpc"
+        @close="projectPreview = undefined"
+        @link="openLink"
+        @select="
+          (instance, version) =>
+            projectPreview &&
+            useDroppedResource(projectPreview, instance, version)
+        "
+      />
+    </Transition>
+    <Transition
+      name="dialog"
+      appear
+      @before-leave="prepareDialogLeave"
+      @after-leave="finishDialogLeave"
+    >
+      <GameExport
+        v-if="exportSession"
+        :instance="exportSession.instance"
+        :version="exportSession.version"
+        :rpc="rpc"
+        :build="buildGameExport"
+        :task="current?.operation === 'export_game' ? current : undefined"
+        :cancel="cancel"
+        @close="exportSession = undefined"
+        @error="error = message($event)"
+      />
+    </Transition>
     <ResourceTransferOverlay :drag="resourceTransfer" />
     <DropTargetOverlay />
     <ErrorNotice
@@ -4790,7 +5259,11 @@ onUnmounted(() => {
       <GlassDialog
         :notice="translateMessage(notice)"
         v-if="modal"
-        :label="modal === 'edit' ? form.name : t(modalTitles[modal])"
+        :label="
+          modal === 'edit'
+            ? form.name
+            : t(modal === 'create' ? creationTitle : modalTitles[modal])
+        "
         :locked="
           modal === 'library'
             ? libraryBusy
@@ -4929,6 +5402,8 @@ onUnmounted(() => {
         >
           <template #content="{ searchTarget, filterTarget, setPackDetail }">
             <ModpackBrowser
+              :initial-project="droppedPack"
+              :key="droppedPack?.project.id || 'catalog'"
               v-if="additionSection === 'modpacks'"
               :search-target="searchTarget"
               :filter-target="filterTarget"
@@ -4986,8 +5461,17 @@ onUnmounted(() => {
               @open-directory="editing && openFolder(editing.id)"
             />
             <h2 v-else class="dialog-heading" tabindex="-1" autofocus>
-              {{ t(modalTitles[modal]) }}
+              {{ t(modal === "create" ? creationTitle : modalTitles[modal]) }}
             </h2>
+            <InstanceTarget
+              v-if="
+                modal === 'create' && gameImport?.format === 'version_directory'
+              "
+              :target="importTarget"
+              :instances="instances"
+              :disabled="busy"
+              @select="importTargetId = $event"
+            />
             <button
               class="icon-button"
               :disabled="modal !== 'edit' && busy"
@@ -5046,8 +5530,28 @@ onUnmounted(() => {
           >
           <form v-else @submit.prevent="submit">
             <div class="modal-fields">
+              <div
+                v-if="modal === 'create' && gameImport"
+                class="field list-reveal-item"
+                :style="listRevealStyle(0)"
+              >
+                <GlassSelect
+                  v-if="importArchiveOptions.length > 1"
+                  id="archive-directory"
+                  :model-value="importPrefix"
+                  :options="importArchiveOptions"
+                  :disabled="busy"
+                  :aria-label="t('游戏目录')"
+                  literal-labels
+                  floating
+                  @update:model-value="chooseArchiveDirectory"
+                />
+                <span v-else class="import-source-name">{{
+                  gameImport.name
+                }}</span>
+              </div>
               <label
-                v-if="modal === 'create'"
+                v-if="modal === 'create' && !importTarget"
                 class="field list-reveal-item"
                 :style="listRevealStyle(0)"
               >
@@ -5060,7 +5564,7 @@ onUnmounted(() => {
                   maxlength="80"
               /></label>
               <InstanceLocation
-                v-if="modal === 'create'"
+                v-if="modal === 'create' && !importTarget"
                 class="list-reveal-item"
                 :style="listRevealStyle(1)"
                 v-model="form.location"
@@ -5142,6 +5646,14 @@ onUnmounted(() => {
                 <button
                   type="button"
                   class="text-button"
+                  :disabled="busy || instanceSaving"
+                  @click="editing && openGameExport(editing.id)"
+                >
+                  <Download :size="16" />{{ t("导出 ZIP") }}
+                </button>
+                <button
+                  type="button"
+                  class="text-button"
                   :disabled="
                     busy || instanceSaving || !editing?.selected_version
                   "
@@ -5192,7 +5704,13 @@ onUnmounted(() => {
                   v-if="modal === 'edit' ? instanceSaving : busy"
                   class="spin"
                   :size="16"
-                />{{ modal === "edit" ? t("保存") : t("创建实例") }}
+                />{{
+                  modal === "edit"
+                    ? t("保存")
+                    : gameImport
+                      ? t("导入")
+                      : t("创建实例")
+                }}
               </button>
             </div>
           </form>
@@ -5212,7 +5730,7 @@ onUnmounted(() => {
         @close="resourceSession = undefined"
       >
         <ResourceBrowser
-          :key="`${resourceSession.instance.id}:${resourceSession.version}`"
+          :key="`${resourceSession.instance.id}:${resourceSession.version}:${resourceSession.project?.id || ''}:${resourceSession.platform}`"
           :session="resourceSession"
           :busy="busy"
           :task="resourceTask"

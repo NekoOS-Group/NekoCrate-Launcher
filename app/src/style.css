@@ -811,12 +811,6 @@ input::placeholder {
     opacity 180ms,
     filter 180ms;
 }
-.legacy-block-art {
-  background-image: url("./assets/instance-blocks.png");
-  background-repeat: no-repeat;
-  background-size: 200% 200%;
-  background-position: 0 0;
-}
 .block-art image {
   image-rendering: pixelated;
 }
@@ -828,15 +822,6 @@ input::placeholder {
   opacity: 1;
   filter: drop-shadow(0 0 4px color-mix(in srgb, var(--blue) 55%, transparent))
     drop-shadow(0 0 9px var(--glow));
-}
-.instance-art[data-material="1"] {
-  background-position: 100% 0;
-}
-.instance-art[data-material="2"] {
-  background-position: 0 100%;
-}
-.instance-art[data-material="3"] {
-  background-position: 100% 100%;
 }
 .running-dot {
   position: absolute;
@@ -1278,6 +1263,13 @@ input::placeholder {
 }
 .import-link {
   margin-right: auto;
+}
+.import-source-name {
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .button {
   display: inline-flex;

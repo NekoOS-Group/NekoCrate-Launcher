@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 mod archive;
 mod content_download;
 mod install_files;
+mod install_plan;
 
 mod provider;
 mod record;
@@ -472,100 +473,23 @@ impl Launcher {
         job.completed = false;
         record::write_job(&game, selected, &job)?;
         self.set_installed(id, selected, false)?;
-        if repair {
-            job.files_done = false;
+        install_plan::InstallPack {
+            launcher: self,
+            id,
+            selected,
+            game: &game,
+            target: &target,
+            instance: &instance,
+            job: &mut job,
+            settings: &settings,
+            downloader: &downloader,
+            cancel,
+            sink: &sink,
+            key,
+            repair,
         }
-        if job.files_done {
-            // Recover if files disappeared between an interruption and resuming.
-            job.files_done = job.pack.files.iter().all(|file| {
-                file.path.as_ref().is_some_and(|path| {
-                    overridden.contains(&path.to_lowercase())
-                        || archive::installed_destination(&target, path).is_ok_and(|p| p.is_file())
-                })
-            });
-        }
-        if !job.files_done {
-            install_files::ContentInstall {
-                launcher: self,
-                id,
-                selected,
-                game: &game,
-                target: &target,
-                downloader: &downloader,
-                cancel,
-                sink: &sink,
-            }
-            .run(&mut job, key)
-            .await?;
-            job.files_done = true;
-            record::write_job(&game, selected, &job)?;
-        }
-        self.save_download_progress(id, selected, 70.0)?;
-        sink(Event::workflow("pack_overrides", "写入整合包配置"));
-        if !job.overrides_done {
-            let source = job.archive.clone();
-            let pack = job.pack.clone();
-            let out = target.clone();
-            let token = cancel.clone();
-            tokio::task::spawn_blocking(move || archive::extract(&source, &pack, &out, &token))
-                .await??;
-            job.overrides_done = true;
-            record::write_job(&game, selected, &job)?;
-        }
-        self.save_download_progress(id, selected, 80.0)?;
-        sink(Event::workflow("pack_game", "安装游戏与加载器"));
-        let pack_sink = sink.clone();
-        let loader_sink: EventSink = Arc::new(move |mut event| {
-            event.step = Some("pack_game".into());
-            pack_sink(event);
-        });
-        let profile = if let Some(profile) = job.pending_profile.as_ref().filter(|_| !repair) {
-            profile.clone()
-        } else {
-            crate::loader::installer::Install {
-                root: self.root(),
-                game: &game,
-                working_directory: &version::instance_working_directory(
-                    &game, &instance, selected,
-                )?,
-                minecraft: &job.pack.minecraft,
-                loader: job.pack.loader.as_ref(),
-                id: selected,
-                explicit_java: instance.java_path.as_deref(),
-                downloader: &downloader,
-                cancel,
-                sink: &loader_sink,
-                auto_java: settings.auto_java,
-            }
-            .run()
-            .await?
-        };
-        crate::download::check_cancel(cancel)?;
-        sink(Event::workflow("java", "Java 已准备好"));
-        job.pending_profile = Some(profile.clone());
-        record::write_job(&game, selected, &job)?;
-        // Imports can run beside network work, but final publication waits for
-        // their atomic copies and final hash checks to finish.
-        let _manual = self.0.pack_import.lock().await;
-        let status = self.modpack_status(id, selected).await?;
-        if !status.missing.is_empty() {
-            sink(Event {
-                pack_missing: Some(status),
-                step: Some("pack_files".into()),
-                ..Event::new("pack_manual", "自动安装已完成，等待手动导入文件")
-            });
-            return Ok(false);
-        }
-        sink(Event::workflow("finalize", "完成整合包安装"));
-        // Publish the launch profile only after all dependencies and overrides exist.
-        storage::write_json(&version::metadata_path(&game, selected)?, &profile)?;
-        job.completed = true;
-        job.pending_profile = None;
-        record::write_job(&game, selected, &job)?;
-        self.set_installed(id, selected, true)?;
-        downloader.finish_installation(&sink).await;
-        sink(Event::new("complete", "整合包已安装"));
-        Ok(true)
+        .run()
+        .await
     }
 }
 struct ActiveModpack<'a>(&'a std::sync::Mutex<Option<(String, String)>>);

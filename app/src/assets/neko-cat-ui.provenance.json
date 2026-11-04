@@ -1,0 +1,15 @@
+{
+  "asset": "neko-cat-ui.webp",
+  "source": "neko-cat.png",
+  "source_provenance": "neko-cat.provenance.json",
+  "source_sha256": "370a1f83155a8959c558a8018a3683112227fbce1673fa4be73c4c420c9cdaa8",
+  "purpose": "About-page icon at 96 CSS pixels, with 4x pixel density. Original retained for native desktop icon generation.",
+  "width": 384,
+  "height": 384,
+  "encoding": "Lossless WebP with transparency; downsampled from the original PNG.",
+  "processing": [
+    "sips --resampleHeightWidth 384 384 neko-cat.png --out neko-cat-ui.png",
+    "cwebp -lossless -z 9 -exact neko-cat-ui.png -o neko-cat-ui.webp"
+  ],
+  "sha256": "86bc9d80190504d5e7f0abed82352356d84729873c1fdbae4653fddb3682d5c5"
+}

@@ -126,7 +126,7 @@ pub(super) async fn versions(
         _ => unreachable!(),
     };
     result.retain(|v| crate::archive_support::component(&v.version).is_ok());
-    result.sort_by(|a, b| natural_cmp(&b.version, &a.version));
+    crate::sorting::sort_by(&mut result, |a, b| natural_cmp(&b.version, &a.version));
     result.dedup_by(|a, b| a.version == b.version);
     Ok(result)
 }

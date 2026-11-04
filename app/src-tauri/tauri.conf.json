@@ -1,14 +1,15 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "猫咪盒子启动器",
-  "version": "0.9.7-dev.1",
+  "version": "0.9.8-dev.1",
   "mainBinaryName": "nekocrate-launcher",
   "identifier": "dev.nekocrate.launcher",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "npm run build",
-    "frontendDist": "../dist"
+    "frontendDist": "../dist",
+    "removeUnusedCommands": true
   },
   "app": {
     "windows": [
@@ -26,6 +27,9 @@
   },
   "bundle": {
     "active": true,
+    "resources": {
+      "resources/nekocrate.runtime.json": "nekocrate.runtime.json"
+    },
     "targets": [
       "app"
     ],

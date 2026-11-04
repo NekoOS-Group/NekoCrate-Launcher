@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { resourceArrival, arrivalFileKey } from "../resourceArrival";
 import {
   computed,
   inject,
@@ -94,6 +95,44 @@ type CacheEntry = {
   files: number;
   parts: CachePart[];
 };
+const arrivalKeys = ref<string[]>([]);
+let arrivalTimer: ReturnType<typeof setTimeout> | undefined;
+let scrolledArrival = "";
+async function highlightArrivals() {
+  const arrival = resourceArrival.value;
+  if (!arrival || Date.now() - arrival.time > 2400) return;
+  arrivalKeys.value = filtered.value
+    .filter(
+      (row) =>
+        arrival.files.includes(
+          arrivalFileKey(resourceKind.value, row.file.file_name),
+        ) &&
+        row.owners.some(
+          (owner) =>
+            owner.id === arrival.instance && owner.version === arrival.version,
+        ),
+    )
+    .map((row) => row.key);
+  const first = arrivalKeys.value[0];
+  if (first && scrolledArrival !== `${arrival.time}:${first}`) {
+    scrolledArrival = `${arrival.time}:${first}`;
+    await nextTick();
+    document
+      .querySelector(".rm-resource-tile.is-arriving")
+      ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+}
+watch(resourceArrival, (arrival) => {
+  if (!arrival) return;
+  resourceKind.value = arrival.kind as typeof resourceKind.value;
+  query.value = "";
+  void highlightArrivals();
+  clearTimeout(arrivalTimer);
+  arrivalTimer = setTimeout(() => {
+    arrivalKeys.value = [];
+  }, 2400);
+});
+onBeforeUnmount(() => clearTimeout(arrivalTimer));
 const props = defineProps<{
   rpc: Rpc;
   busy: boolean;
@@ -510,6 +549,7 @@ async function refresh() {
     }
   }
 }
+watch(filtered, () => void highlightArrivals());
 watch(
   [tab, resourceKind],
   () => {
@@ -1048,6 +1088,7 @@ defineExpose({ drop, refresh });
             :style="listRevealStyle(index, 20, resourceRowStagger)"
             :class="{
               active: resourceKey === row.key,
+              'is-arriving': arrivalKeys.includes(row.key),
               'is-selected': selection.contains(row),
               'resource-drag-handle':
                 isResourceDragKind(resourceKind) &&
@@ -2004,5 +2045,13 @@ button:disabled {
   .rm-search input {
     width: 110px;
   }
+}
+</style>
+
+<style scoped>
+.rm-resource-tile.is-arriving {
+  filter: drop-shadow(0 0 8px var(--accent));
+  outline: 1px dashed var(--accent);
+  outline-offset: -3px;
 }
 </style>

@@ -29,102 +29,134 @@ pub(crate) struct Install<'a> {
     pub auto_java: bool,
 }
 impl Install<'_> {
-    pub async fn run(&self) -> Result<Value> {
-        let Self {
-            root,
-            game,
-            minecraft,
-            loader,
-            id,
-            downloader,
-            cancel,
-            sink,
-            ..
-        } = self;
-        let base = minecraft::version(root, minecraft, downloader, cancel, sink).await?;
-        // Shared vanilla metadata is immutable; never overwrite an unrelated local profile.
-        let base_value = serde_json::to_value(&base)?;
-        let base_path = version::metadata_path(game, minecraft)?;
-        if !base_path.exists() {
-            storage::write_json(&base_path, &base_value)?;
-        }
-        sink(Event::workflow("loader", "安装加载器"));
-        let mut profile = match loader {
-            None => json!({"id":id,"inheritsFrom":minecraft}),
-            Some(loader) if loader.kind == "fabric" => {
-                fabric::profile(root, minecraft, &loader.version, downloader, cancel).await?
+    #[inline(never)]
+    pub fn run(&self) -> futures_util::future::BoxFuture<'_, Result<Value>> {
+        Box::pin(async move {
+            let Self {
+                root,
+                game,
+                minecraft,
+                loader,
+                id,
+                downloader,
+                cancel,
+                sink,
+                ..
+            } = self;
+            let base = minecraft::version(root, minecraft, downloader, cancel, sink).await?;
+            // Shared vanilla metadata is immutable; never overwrite an unrelated local profile.
+            let base_value = serde_json::to_value(&base)?;
+            let base_path = version::metadata_path(game, minecraft)?;
+            if !base_path.exists() {
+                storage::write_json(&base_path, &base_value)?;
             }
-            Some(loader) => {
-                // Processors need the original client JAR, not a merged/patched one.
-                let client = base
-                    .downloads
-                    .get("client")
-                    .context("元数据缺少客户端文件")?;
-                downloader
-                    .file(
-                        &FileSpec {
-                            url: client.url.clone(),
-                            path: version::client_path(game, &base)?,
-                            hash: client.sha1.clone(),
-                            sha256: false,
-                            size: client.size,
-                        },
-                        cancel,
-                        &self.step("loader"),
-                    )
-                    .await?;
-                self.forge(loader, &base).await?
+            sink(Event::workflow("loader", "安装加载器"));
+            let mut profile = match loader {
+                None => json!({"id":id,"inheritsFrom":minecraft}),
+                Some(loader) if loader.kind == "fabric" => {
+                    fabric::profile(root, minecraft, &loader.version, downloader, cancel).await?
+                }
+                Some(loader) => {
+                    // Processors need the original client JAR, not a merged/patched one.
+                    let client = base
+                        .downloads
+                        .get("client")
+                        .context("元数据缺少客户端文件")?;
+                    downloader
+                        .file(
+                            &FileSpec {
+                                url: client.url.clone(),
+                                path: version::client_path(game, &base)?,
+                                hash: client.sha1.clone(),
+                                sha256: false,
+                                size: client.size,
+                            },
+                            cancel,
+                            &self.step("loader"),
+                        )
+                        .await?;
+                    self.forge(loader, &base).await?
+                }
+            };
+            profile["id"] = json!(id);
+            profile["inheritsFrom"] = json!(minecraft);
+            profile["jar"] = json!(minecraft);
+            let resolved = version::resolve_chain(&[base_value, profile.clone()])?;
+            if resolved.loader.as_ref() != *loader {
+                bail!("安装器生成的加载器与所选版本不一致");
             }
-        };
-        profile["id"] = json!(id);
-        profile["inheritsFrom"] = json!(minecraft);
-        profile["jar"] = json!(minecraft);
-        let resolved = version::resolve_chain(&[base_value, profile.clone()])?;
-        if resolved.loader.as_ref() != *loader {
-            bail!("安装器生成的加载器与所选版本不一致");
-        }
-        sink(Event::workflow("files", "下载与校验游戏文件"));
-        minecraft::install_files(
-            game,
-            &resolved.version,
-            downloader,
-            cancel,
-            &self.files_sink(),
-        )
-        .await?;
-        sink(Event::workflow("java", "准备 Java"));
-        let runtime = java::ensure(
-            root,
-            java::JavaRequirement::for_working_directory(
-                &resolved.version,
-                self.working_directory,
-                self.explicit_java,
-            )
-            .await?,
-            self.explicit_java,
-            self.auto_java,
-            downloader,
-            cancel,
-            &self.step("java"),
-        )
-        .await?;
-        storage::write_json(
-            &game.join("versions").join(id).join("runtime.json"),
-            &runtime,
-        )?;
-        let mut result = serde_json::to_value(resolved.version)?;
-        result["patches"] = json!([{"id":"game", "version":minecraft}]);
-        // Keep the archive throughout retries/cancellation of later game-file steps.
-        if let Some(loader) =
-            loader.filter(|loader| matches!(loader.kind.as_str(), "forge" | "neoforge"))
-            && let Err(error) = self.discard_forge_installer(loader).await
+            let version = resolved.version;
+            self.payload(&version).await?;
+            let mut profile = serde_json::to_value(&version)?;
+            profile["patches"] = json!([{"id":"game", "version":minecraft}]);
+            if let Some(loader) = loader.filter(|l| matches!(l.kind.as_str(), "forge" | "neoforge"))
+                && let Err(error) = self.discard_forge_installer(loader).await
+            {
+                sink(Event::new(
+                    "warning",
+                    format!("清理加载器安装包失败：{error:#}"),
+                ));
+            }
+            Ok(profile)
+        })
+    }
+    /// A saved profile is a preparation checkpoint, not proof that its files
+    /// still exist. Check generated libraries before skipping the installer;
+    /// the shared payload path restores assets, natives and Java from receipts.
+    pub async fn restore(&self, profile: &Value) -> Result<bool> {
+        let resolved = version::resolve_chain(std::slice::from_ref(profile))?;
+        if resolved.version.id != self.id
+            || resolved.minecraft_version != self.minecraft
+            || resolved.loader.as_ref() != self.loader
         {
-            sink(Event::new(
-                "warning",
-                format!("清理加载器安装包失败：{error:#}"),
-            ));
+            return Ok(false);
         }
-        Ok(result)
+        let empty = AssetIndex {
+            objects: HashMap::new(),
+            virtual_: false,
+            map_to_resources: false,
+        };
+        for file in minecraft::installation_files(self.game, &resolved.version, &empty)? {
+            if !self
+                .downloader
+                .verify(&file.path, &file, self.cancel)
+                .await?
+            {
+                return Ok(false);
+            }
+        }
+        self.payload(&resolved.version).await?;
+        Ok(true)
+    }
+    #[inline(never)]
+    fn payload<'a>(
+        &'a self,
+        version: &'a Version,
+    ) -> futures_util::future::BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let runtime = crate::installation::game::Payload {
+                root: self.root,
+                game: self.game,
+                working: self.working_directory,
+                version,
+                explicit_java: self.explicit_java,
+                auto_java: self.auto_java,
+                downloader: self.downloader,
+                cancel: self.cancel,
+                sink: self.sink,
+                files_sink: &self.files_sink(),
+            }
+            .run()
+            .await?;
+            storage::write_json(
+                &self
+                    .game
+                    .join("versions")
+                    .join(self.id)
+                    .join("runtime.json"),
+                &runtime,
+            )
+        })
     }
     async fn discard_forge_installer(&self, loader: &ModLoader) -> Result<()> {
         let cache = self

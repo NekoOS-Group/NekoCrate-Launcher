@@ -108,13 +108,28 @@ pub fn is_update_artifact(url: &str, tag: &str) -> bool {
     })
 }
 
-fn portable_asset(os: &str, arch: &str) -> &'static str {
-    match (os, arch) {
-        ("macos", "aarch64") => "mac-appsilicon-portable.app.tar.gz",
-        ("windows", "x86_64") => "win-amd64-portable.exe",
-        ("linux", "x86_64") => "linux-amd64.elf",
-        _ => "unsupported",
-    }
+fn standalone_url<'a>(release: &'a Release, os: &str, arch: &str) -> Option<&'a str> {
+    let suffixes: &[&str] = match (os, arch) {
+        // Old releases also have an installed-only .app.tar.gz: prefer their
+        // explicitly portable archive until the unified release is available.
+        ("macos", "aarch64") => &[
+            "mac-appsilicon-portable.app.tar.gz",
+            "mac-appsilicon.app.tar.gz",
+        ],
+        ("windows", "x86_64") => &["win-amd64.exe", "win-amd64-portable.exe"],
+        ("linux", "x86_64") => &["linux-amd64.elf"],
+        _ => &[],
+    };
+    suffixes.iter().find_map(|suffix| {
+        let expected = format!("NekoCrate-Launcher-{}-{suffix}", release.tag_name);
+        release
+            .assets
+            .iter()
+            .find(|a| {
+                a.name == expected && is_update_artifact(&a.browser_download_url, &release.tag_name)
+            })
+            .map(|a| a.browser_download_url.as_str())
+    })
 }
 
 pub async fn check(
@@ -151,17 +166,11 @@ pub async fn check(
         std::env::consts::ARCH,
     )?;
     if crate::portable::identity(root).is_some() {
-        let suffix = portable_asset(std::env::consts::OS, std::env::consts::ARCH);
-        let expected = format!("NekoCrate-Launcher-{}-{suffix}", status.latest_version);
         status.download_url = releases
             .iter()
             .find(|r| r.tag_name == status.latest_version)
-            .and_then(|r| {
-                r.assets.iter().find(|a| {
-                    a.name == expected && is_update_artifact(&a.browser_download_url, &r.tag_name)
-                })
-            })
-            .map(|a| a.browser_download_url.clone())
+            .and_then(|r| standalone_url(r, std::env::consts::OS, std::env::consts::ARCH))
+            .map(str::to_owned)
             .unwrap_or_else(|| format!("{RELEASES_URL}tag/{}", status.latest_version));
     }
     Ok(status)
@@ -170,6 +179,46 @@ pub async fn check(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn standalone_download_links_handle_new_names_and_legacy_mac_pairs() {
+        let mut release = release("dev9.9.9", true);
+        for suffix in [
+            "mac-appsilicon.app.tar.gz",
+            "mac-appsilicon-portable.app.tar.gz",
+            "win-amd64.exe",
+        ] {
+            let name = format!("NekoCrate-Launcher-dev9.9.9-{suffix}");
+            release.assets.push(Asset {
+                browser_download_url: format!("{RELEASES_URL}download/dev9.9.9/{name}"),
+                name,
+            });
+        }
+        assert!(
+            standalone_url(&release, "macos", "aarch64")
+                .unwrap()
+                .ends_with("-portable.app.tar.gz")
+        );
+        release
+            .assets
+            .retain(|asset| !asset.name.contains("portable"));
+        assert!(
+            standalone_url(&release, "macos", "aarch64")
+                .unwrap()
+                .ends_with("-mac-appsilicon.app.tar.gz")
+        );
+        assert!(
+            standalone_url(&release, "windows", "x86_64")
+                .unwrap()
+                .ends_with("-win-amd64.exe")
+        );
+        assert!(standalone_url(&release, "windows", "aarch64").is_none());
+        for asset in &mut release.assets {
+            asset.browser_download_url = asset
+                .browser_download_url
+                .replace("download/dev9.9.9/", "download/dev9.9.8/");
+        }
+        assert!(standalone_url(&release, "macos", "aarch64").is_none());
+    }
     #[test]
     fn updater_manifest_is_bound_to_the_selected_release_and_repository() {
         let mut releases = vec![release("dev0.5", true)];

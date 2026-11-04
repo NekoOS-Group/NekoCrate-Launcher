@@ -9,7 +9,7 @@ on:
       tag:
         description: Existing preview tag to build
         required: true
-        default: dev0.9.7
+        default: dev0.9.8
         type: string
 
 permissions:
@@ -247,22 +247,38 @@ jobs:
         working-directory: app
         env:
           CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
+          # MSVC stores diagnostic symbols in a PDB, outside the shipped EXE.
+          CARGO_PROFILE_RELEASE_DEBUG: ${{ runner.os == 'Windows' && '1' || '0' }}
+      - name: Save diagnostic symbols and shrink the shared executable
+        run: python scripts/release_symbols.py --target "${{ matrix.target }}"
+      - name: Preserve symbols for crash diagnosis
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostic-symbols-${{ env.RELEASE_TAG }}-${{ matrix.platform }}
+          path: artifacts/symbols/${{ matrix.target }}/*
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 6
       - name: Bundle and sign installers without recompiling
-        run: node "$RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" bundle --verbose --config src-tauri/tauri.release.conf.json --target "${{ matrix.target }}" --bundles "${{ matrix.bundles }}" --ci
+        # Runtime configuration selects the mode. Keep the shared binary intact;
+        # a DEB bundle tag would make a portable ELF invoke the package manager.
+        # macOS has one separately signed common archive. Avoid creating the
+        # redundant installed-mode .app.tar.gz as part of DMG packaging.
+        run: |
+          BUNDLE_CONFIG='{}'
+          if [ "${{ runner.os }}" = macOS ]; then
+            BUNDLE_CONFIG='{"bundle":{"createUpdaterArtifacts":false}}'
+          fi
+          node "$RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" bundle --verbose --no-binary-patching --config src-tauri/tauri.release.conf.json --config "$BUNDLE_CONFIG" --target "${{ matrix.target }}" --bundles "${{ matrix.bundles }}" --ci
         working-directory: app
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-      - name: Verify installed executable
+      - name: Verify the same executable in installed and portable layouts
         run: python scripts/frontend_artifact.py embedded --target "${{ matrix.target }}"
-      - name: Build portable entry point using the same dependency cache
-        run: node "$RUNNER_TEMP/tauri-cli/node_modules/@tauri-apps/cli/tauri.js" build --verbose --config src-tauri/tauri.release.conf.json --config src-tauri/tauri.portable.conf.json --features portable --target "${{ matrix.target }}" --no-bundle --ci -- --locked --timings
-        working-directory: app
-        env:
-          CURSEFORGE_API_KEY: ${{ secrets.CURSEFORGE_API_KEY }}
-      - name: Package portable application
+      - name: Package standalone application from the same executable
         run: python scripts/release_assets.py portable --tag "$RELEASE_TAG" --target "${{ matrix.target }}"
-      - name: Sign portable updater
+      - name: Sign standalone and common macOS updater
         run: |
           APP_VERSION=$(node -p 'require("./app/package.json").version')
           PORTABLE_FILE=$(python -c 'import sys; sys.path.insert(0, "scripts"); from portable_bundle import archive_path; from pathlib import Path; print(archive_path(Path("target") / sys.argv[1] / "release", sys.argv[2], sys.argv[3]))' "${{ matrix.target }}" "$RELEASE_TAG" "${{ matrix.platform }}")
@@ -270,8 +286,6 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-      - name: Verify portable startup and relocation without a marker
-        run: python scripts/frontend_artifact.py embedded --portable --target "${{ matrix.target }}"
       - name: Collect and verify architecture
         run: python scripts/release_assets.py collect --tag "$RELEASE_TAG" --target "${{ matrix.target }}"
       - uses: actions/upload-artifact@v4
@@ -326,7 +340,7 @@ jobs:
           gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' > "$RUNNER_TEMP/release-assets.txt"
           while IFS= read -r asset; do
             case "$asset" in
-              NekoCrate-Launcher-"$RELEASE_TAG"-*.sig|NekoCrate-Launcher-"$RELEASE_TAG"-*.app.zip|NekoCrate-Launcher-"$RELEASE_TAG"-*-portable.zip|NekoCrate-Launcher-"$RELEASE_TAG"-*.AppImage|SHA256SUMS)
+              NekoCrate-Launcher-"$RELEASE_TAG"-*.sig|NekoCrate-Launcher-"$RELEASE_TAG"-*.app.zip|NekoCrate-Launcher-"$RELEASE_TAG"-*-portable.zip|NekoCrate-Launcher-"$RELEASE_TAG"-*-portable.exe|NekoCrate-Launcher-"$RELEASE_TAG"-*-portable.app.tar.gz|NekoCrate-Launcher-"$RELEASE_TAG"-*.AppImage|SHA256SUMS)
                 gh release delete-asset "$RELEASE_TAG" "$asset" --yes ;;
             esac
           done < "$RUNNER_TEMP/release-assets.txt"

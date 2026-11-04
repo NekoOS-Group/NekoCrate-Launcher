@@ -9,6 +9,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod drop_preview;
+pub use drop_preview::ResourceDropPreview;
+mod links;
+pub use links::ProjectLink;
 mod imports;
 pub use imports::{DetectedResource, LocalImport, ResourceCopySource};
 mod install;

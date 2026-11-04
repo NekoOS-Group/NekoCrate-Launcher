@@ -10,7 +10,10 @@ mod download_stall;
 mod download_tasks;
 pub mod fabric;
 pub mod folder_import;
+pub mod game_export;
+pub mod game_import;
 mod game_options;
+mod installation;
 mod installer_cache;
 mod instance_creation;
 pub mod instance_discovery;
@@ -36,6 +39,7 @@ pub mod resource_manager;
 pub mod resources;
 mod runtime_compatibility;
 pub mod skin;
+mod sorting;
 pub mod storage;
 #[cfg(test)]
 mod test_http;
@@ -165,6 +169,7 @@ impl Launcher {
         launcher.migrate_modpack_records();
         launcher.refresh_local_versions(false)?;
         launcher.clean_old_java_archives();
+        launcher.clean_game_exports();
         if let Err(error) =
             download_tasks::reconcile(launcher.root(), &launcher.snapshot().database.instances)
         {
@@ -747,7 +752,7 @@ impl Launcher {
                 entry.installed = false;
             }
         }
-        versions.sort_by(|a, b| a.id.cmp(&b.id));
+        crate::sorting::sort_by(&mut versions, |a, b| a.id.cmp(&b.id));
         if !version.is_empty() && !versions.iter().any(|v| v.id == version) {
             storage::safe_version(version)?;
             versions.push(version::describe(self.root(), source, version));
@@ -1123,119 +1128,16 @@ impl Launcher {
         let _guard = self.0.operation.lock().await;
         let _directory_guard = self.idle(id)?;
         let sink = Event::scoped(sink, id, None);
-        sink(Event::workflow("metadata", "解析游戏版本"));
-        let instance = target()?;
-        let selected = instance
-            .selected()
-            .context("请先为此实例添加并选择一个版本")?;
-        let game = self.available_game_dir(id)?;
-        download::check_cancel(cancel)?;
-        let local: Option<serde_json::Value> =
-            storage::read_json(&version::metadata_path(&game, &selected.id)?).ok();
-        let is_fabric = local
-            .as_ref()
-            .and_then(version::detect_loader)
-            .is_some_and(|l| l.kind == "fabric");
-        if !is_fabric {
-            minecraft::check_local_install(&game, &selected.id)?;
-        }
-        let settings = self.settings();
-        let downloader = download::Downloader::new(self.root(), settings.clone())?
-            .for_installation(self.root(), id, &game, &selected.id, "game")?;
-        let downloader = if full_verification {
-            downloader.with_full_verification()
-        } else {
-            downloader
-        };
-        let v = if is_fabric {
-            sink(Event::new("stage", "解析 Fabric 版本"));
-            let mut profile = local.unwrap();
-            fabric::prepare_libraries(&mut profile, &downloader, cancel).await?;
-            // Save hashes so pause/cancel/restart can reuse exactly the same plan.
-            storage::write_json(&version::metadata_path(&game, &selected.id)?, &profile)?;
-            let parent_id = profile["inheritsFrom"]
-                .as_str()
-                .context("Fabric 配置缺少基础版本")?;
-            if !version::metadata_path(&game, parent_id)?.is_file() {
-                let parent =
-                    minecraft::version(self.root(), parent_id, &downloader, cancel, &sink).await?;
-                storage::write_json(&version::metadata_path(&game, parent_id)?, &parent)?;
-            }
-            version::resolve(self.root(), &game, &selected.id)?.version
-        } else {
-            sink(Event::new("stage", "获取官方版本元数据"));
-            minecraft::version(self.root(), &selected.id, &downloader, cancel, &sink).await?
-        };
-        // Resolving metadata does not change the game tree or its installed state.
-        self.set_installed(id, &selected.id, false)?;
-        sink(Event::workflow("files", "下载与校验游戏文件"));
-        let progress = Arc::new(Mutex::new((
-            selected.download_progress.min(99.0),
-            std::time::Instant::now(),
-        )));
-        let captured = progress.clone();
-        let launcher = self.clone();
-        let instance_id = id.to_owned();
-        let version_id = selected.id.clone();
-        let forward = Event::scoped(&sink, id, Some("files"));
-        let file_sink: EventSink = Arc::new(move |event| {
-            if event.kind == "progress" && event.total > 0 {
-                let percentage = if event.total_bytes > 0 {
-                    event.bytes as f64 / event.total_bytes as f64 * 100.0
-                } else {
-                    event.completed as f64 / event.total as f64 * 100.0
-                };
-                let mut state = captured.lock().unwrap();
-                state.0 = if event.reset_progress {
-                    percentage.clamp(0.0, 99.0)
-                } else {
-                    state.0.max(percentage.min(99.0))
-                };
-                if event.reset_progress
-                    || state.1.elapsed() >= std::time::Duration::from_secs(1)
-                    || event.completed == event.total
-                {
-                    if let Err(error) =
-                        launcher.save_download_progress(&instance_id, &version_id, state.0)
-                    {
-                        forward(Event::new("warning", format!("保存下载进度失败：{error}")));
-                    }
-                    state.1 = std::time::Instant::now();
-                }
-            }
-            forward(event);
-        });
-        let result = minecraft::install_files(&game, &v, &downloader, cancel, &file_sink).await;
-        // Also save the final fraction on a quick cancellation or error.
-        self.save_download_progress(id, &selected.id, progress.lock().unwrap().0)?;
-        result?;
-        sink(Event::workflow("java", "准备 Java"));
-        let java = java::ensure(
-            self.root(),
-            java::JavaRequirement::for_working_directory(
-                &v,
-                &version::instance_working_directory(&game, &instance, &selected.id)?,
-                instance.java_path.as_deref(),
-            )
-            .await?,
-            instance.java_path.as_deref(),
-            settings.auto_java,
-            &downloader,
+        installation::official::install(
+            self,
+            id,
+            target()?,
+            self.available_game_dir(id)?,
+            full_verification,
             cancel,
-            &Event::scoped(&sink, id, Some("java")),
+            &sink,
         )
-        .await?;
-        download::check_cancel(cancel)?;
-        sink(Event::workflow("finalize", "保存安装信息"));
-        let version_dir = self.game_dir(id)?.join("versions").join(&selected.id);
-        if !is_fabric {
-            storage::write_json(&version_dir.join(format!("{}.json", selected.id)), &v)?;
-        }
-        storage::write_json(&version_dir.join("runtime.json"), &java)?;
-        self.set_installed(id, &selected.id, true)?;
-        downloader.finish_installation(&sink).await;
-        sink(Event::new("complete", "游戏文件与 Java 已准备好"));
-        Ok(true)
+        .await
     }
     pub async fn begin_login(&self) -> Result<auth::DeviceChallenge> {
         auth::begin(

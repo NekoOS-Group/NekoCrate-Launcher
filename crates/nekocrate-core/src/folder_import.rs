@@ -21,6 +21,7 @@ pub struct FolderCandidate {
     pub versions: Vec<InstanceVersion>,
     pub existing_id: Option<String>,
     pub blocked: Option<String>,
+    pub preferred_version: Option<String>,
 }
 #[derive(Debug, Serialize)]
 pub struct FolderIssue {
@@ -64,6 +65,12 @@ pub(crate) fn resolve_game_directory(path: &Path) -> Result<PathBuf> {
         .with_context(|| format!("无法访问导入目录：{}", source.display()))?;
     if !source.is_dir() {
         bail!("导入来源必须是一个目录：{}", source.display());
+    }
+    if let Some((game, _)) = crate::game_import::directory_owner(&source) {
+        return Ok(game);
+    }
+    if crate::game_import::has_version_profile(&source) {
+        bail!("这是独立的版本目录，请拖入启动器并选择目标游戏目录");
     }
     // Explicitly selected standard game folders may be empty. Discovery by
     // recursive drag-and-drop still requires game content to avoid empty backups.
@@ -129,18 +136,30 @@ impl Launcher {
     ) -> Result<FolderScan> {
         let mut result = FolderScan::default();
         let mut roots = Vec::new();
+        let mut preferred = std::collections::HashMap::new();
         for path in paths {
             check_cancel(cancel)?;
             match storage::expand_user_path(path).and_then(|p| {
                 p.canonicalize()
                     .with_context(|| format!("无法访问目录：{}", path.display()))
             }) {
-                Ok(root) if root.is_dir() => roots.push(root),
+                Ok(root) if root.is_dir() => {
+                    if let Some((game, version)) = crate::game_import::directory_owner(&root) {
+                        if let Some(version) = version {
+                            preferred.entry(game.clone()).or_insert(version);
+                        }
+                        roots.push(game);
+                    } else if crate::game_import::has_version_profile(&root) {
+                        result.issue(&root, "这是独立的版本目录，请选择目标游戏目录");
+                    } else {
+                        roots.push(root);
+                    }
+                }
                 Ok(_) => result.issue(path, "请拖入文件夹"),
                 Err(error) => result.issue(path, error),
             }
         }
-        roots.sort_by(|a, b| {
+        crate::sorting::sort_by(&mut roots, |a, b| {
             a.components()
                 .count()
                 .cmp(&b.components().count())
@@ -164,7 +183,7 @@ impl Launcher {
             .collect();
         let mut seen = HashSet::new();
         for root in top_roots {
-            if root.starts_with(self.root()) {
+            if root.starts_with(self.root()) && !existing.iter().any(|(path, _)| path == &root) {
                 result.issue(&root, "已跳过启动器数据目录");
                 continue;
             }
@@ -185,7 +204,10 @@ impl Launcher {
                 if !entry.file_type().is_dir() {
                     continue;
                 }
-                if path.starts_with(self.root()) || !seen.insert(path.to_owned()) {
+                if (path.starts_with(self.root())
+                    && !existing.iter().any(|(directory, _)| directory == path))
+                    || !seen.insert(path.to_owned())
+                {
                     entries.skip_current_dir();
                     continue;
                 }
@@ -223,10 +245,11 @@ impl Launcher {
                     versions,
                     existing_id: same.map(|(_, i)| i.id.clone()),
                     blocked,
+                    preferred_version: preferred.get(path).cloned(),
                 });
             }
         }
-        result.candidates.sort_by(|a, b| a.path.cmp(&b.path));
+        crate::sorting::sort_by(&mut result.candidates, |a, b| a.path.cmp(&b.path));
         check_cancel(cancel)?;
         Ok(result)
     }
@@ -340,7 +363,7 @@ mod tests {
                 )
             })
             .collect();
-        files.sort_by(|a, b| a.0.cmp(&b.0));
+        crate::sorting::sort_by(&mut files, |a, b| a.0.cmp(&b.0));
         files
     }
 

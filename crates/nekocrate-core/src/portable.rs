@@ -1,4 +1,4 @@
-//! Portable packages use the same executable, with an explicit adjacent marker.
+//! Desktop releases default to portable mode; installed bundles carry a mode file.
 //! Only launcher-owned state uses the path codec; Minecraft metadata stays native.
 use crate::storage;
 use anyhow::{Context, Result, ensure};
@@ -10,6 +10,7 @@ use std::{
 };
 
 pub const MARKER: &str = "nekocrate.portable.json";
+pub const RUNTIME_CONFIG: &str = "nekocrate.runtime.json";
 pub const DATA_DIRECTORY: &str = ".nekocrate";
 const PREFIX: &str = "nekocrate-portable:/";
 
@@ -25,12 +26,12 @@ pub fn executable() -> Result<PathBuf> {
     Ok(std::env::current_exe()?)
 }
 
-static PORTABLE_BUILD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static PORTABLE_DEFAULT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Called once by the portable desktop entry point, before opening any data.
-/// The mode travels with the executable, independently of its name or location.
+/// Called by the release desktop entry point before opening any data.
+/// CLI and development builds retain their existing system-directory default.
 pub fn enable() {
-    PORTABLE_BUILD.store(true, std::sync::atomic::Ordering::Relaxed);
+    PORTABLE_DEFAULT.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
 pub fn package_directory(executable: &Path, platform: &str) -> Result<PathBuf> {
@@ -52,11 +53,136 @@ pub fn detect(executable: &Path, platform: &str) -> Result<Option<PathBuf>> {
     detect_mode(
         executable,
         platform,
-        PORTABLE_BUILD.load(std::sync::atomic::Ordering::Relaxed),
+        PORTABLE_DEFAULT.load(std::sync::atomic::Ordering::Relaxed),
     )
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Mode {
+    Installed,
+    Portable,
+}
+
+#[derive(Deserialize)]
+struct RuntimeConfig {
+    schema: u32,
+    mode: Mode,
+}
+
+fn configured_mode(executable: &Path, platform: &str) -> Result<Option<bool>> {
+    let system_root = if platform == "macos" {
+        storage::system_data_root()?
+    } else {
+        PathBuf::new()
+    };
+    configured_mode_in(executable, platform, &system_root)
+}
+
+fn configured_mode_in(
+    executable: &Path,
+    platform: &str,
+    system_root: &Path,
+) -> Result<Option<bool>> {
+    let directory = executable.parent().context("无法确定启动器所在目录")?;
+    let mut paths = vec![directory.join(RUNTIME_CONFIG)];
+    if platform == "macos" {
+        if let Some(bundle) = executable
+            .ancestors()
+            .find(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("app")))
+        {
+            paths.push(bundle.join("Contents/Resources").join(RUNTIME_CONFIG));
+        }
+    } else if platform == "linux" && directory.file_name().is_some_and(|name| name == "bin") {
+        // Only inspect the package next to THIS executable. A global /usr/lib
+        // fallback would make a portable copy inherit another installation's mode.
+        paths.push(
+            directory
+                .join("../lib/nekocrate-launcher")
+                .join(RUNTIME_CONFIG),
+        );
+    }
+    for path in paths {
+        if path.try_exists()? {
+            let config: RuntimeConfig =
+                storage::read_json(&path).context("启动器运行模式配置无效")?;
+            ensure!(config.schema == 1, "不支持的启动器运行模式配置版本");
+            return Ok(Some(matches!(config.mode, Mode::Portable)));
+        }
+    }
+    if platform == "macos" {
+        return remembered_macos_mode(executable, system_root);
+    }
+    Ok(None)
+}
+
+#[derive(Serialize, Deserialize)]
+struct InstalledApplication {
+    schema: u32,
+    bundle: PathBuf,
+}
+
+fn macos_bundle(executable: &Path) -> Option<&Path> {
+    executable.ancestors().find(|path| {
+        path.extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("app"))
+    })
+}
+
+fn macos_mode_record(bundle: &Path, system_root: &Path) -> PathBuf {
+    let hash = ring::digest::digest(&ring::digest::SHA256, bundle.as_os_str().as_encoded_bytes());
+    system_root
+        .join("runtime-modes")
+        .join(format!("{}.json", hex::encode(hash.as_ref())))
+}
+
+fn remembered_macos_mode(executable: &Path, system_root: &Path) -> Result<Option<bool>> {
+    let Some(bundle) = macos_bundle(executable) else {
+        return Ok(None);
+    };
+    let bundle = match bundle.canonicalize() {
+        Ok(bundle) => bundle,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let path = macos_mode_record(&bundle, system_root);
+    if !path.try_exists()? {
+        return Ok(None);
+    }
+    let record: InstalledApplication =
+        storage::read_json(&path).context("启动器运行模式记录无效")?;
+    ensure!(
+        record.schema == 1 && record.bundle == bundle,
+        "启动器运行模式记录不匹配"
+    );
+    Ok(Some(false))
+}
+
+/// The common macOS archive has no installed-mode resource. Save the current
+/// installed app's exact location outside the signed bundle before replacement.
+/// Portable updates never call this, and unrelated copies keep portable defaults.
+pub fn preserve_macos_installation(executable: &Path) -> Result<()> {
+    preserve_macos_installation_in(executable, &storage::system_data_root()?)
+}
+
+fn preserve_macos_installation_in(executable: &Path, system_root: &Path) -> Result<()> {
+    let bundle = macos_bundle(executable)
+        .context("更新程序不在 macOS App 内")?
+        .canonicalize()?;
+    let path = macos_mode_record(&bundle, system_root);
+    if remembered_macos_mode(executable, system_root)? == Some(false) {
+        return Ok(());
+    }
+    storage::write_json(&path, &InstalledApplication { schema: 1, bundle })
+        .context("无法保存启动器运行模式，更新尚未安装")
+}
+
 fn detect_mode(executable: &Path, platform: &str, portable: bool) -> Result<Option<PathBuf>> {
+    let portable = match configured_mode(executable, platform)? {
+        Some(false) => return Ok(None),
+        Some(true) => true,
+        None => portable,
+    };
     let base = package_directory(executable, platform)?;
     let marker = base.join(MARKER);
     if !portable && !marker.try_exists()? {
@@ -83,10 +209,12 @@ fn detect_mode(executable: &Path, platform: &str, portable: bool) -> Result<Opti
 }
 
 pub fn initialize(root: &Path) -> Result<Option<Identity>> {
-    let embedded = PORTABLE_BUILD.load(std::sync::atomic::Ordering::Relaxed)
-        && detect(&executable()?, std::env::consts::OS)?
-            .and_then(|path| path.canonicalize().ok())
-            .is_some_and(|path| path == root);
+    if root.file_name().is_none_or(|name| name != DATA_DIRECTORY) {
+        return Ok(None);
+    }
+    let embedded = detect(&executable()?, std::env::consts::OS)?
+        .and_then(|path| path.canonicalize().ok())
+        .is_some_and(|path| path == root);
     initialize_mode(root, embedded)
 }
 
@@ -313,6 +441,150 @@ mod tests {
         fs::create_dir_all(base).unwrap();
         fs::write(base.join(MARKER), r#"{"schema":1}"#).unwrap();
         base.join(DATA_DIRECTORY)
+    }
+
+    #[test]
+    fn common_macos_update_keeps_only_the_registered_app_installed() {
+        let temp = tempfile::tempdir().unwrap();
+        let system = temp.path().join("system-data");
+        let bundle = temp.path().join("Applications/Launcher.app");
+        let executable = bundle.join("Contents/MacOS/launcher");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        let configuration = bundle.join("Contents/Resources").join(RUNTIME_CONFIG);
+        fs::create_dir_all(configuration.parent().unwrap()).unwrap();
+        fs::write(&configuration, r#"{"schema":1,"mode":"installed"}"#).unwrap();
+        assert_eq!(
+            configured_mode_in(&executable, "macos", &system).unwrap(),
+            Some(false)
+        );
+        preserve_macos_installation_in(&executable, &system).unwrap();
+        // Simulate the updater replacing the entire signed app, without a mode resource.
+        fs::remove_dir_all(&bundle).unwrap();
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        assert_eq!(
+            configured_mode_in(&executable, "macos", &system).unwrap(),
+            Some(false)
+        );
+        preserve_macos_installation_in(&executable, &system).unwrap();
+        assert_eq!(
+            fs::read_dir(system.join("runtime-modes")).unwrap().count(),
+            1
+        );
+        let copied = temp
+            .path()
+            .join("Games/Launcher.app/Contents/MacOS/launcher");
+        fs::create_dir_all(copied.parent().unwrap()).unwrap();
+        assert_eq!(configured_mode_in(&copied, "macos", &system).unwrap(), None);
+        fs::write(
+            executable.parent().unwrap().join(RUNTIME_CONFIG),
+            r#"{"schema":1,"mode":"portable"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            configured_mode_in(&executable, "macos", &system).unwrap(),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn corrupt_or_unwritable_mode_records_do_not_silently_change_mode() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundle = temp.path().join("Launcher.app");
+        let executable = bundle.join("Contents/MacOS/launcher");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(&executable, b"current executable").unwrap();
+        let blocked = temp.path().join("blocked");
+        fs::write(&blocked, b"not a directory").unwrap();
+        assert!(preserve_macos_installation_in(&executable, &blocked).is_err());
+        assert_eq!(fs::read(&executable).unwrap(), b"current executable");
+        let system = temp.path().join("system-data");
+        preserve_macos_installation_in(&executable, &system).unwrap();
+        let record = macos_mode_record(&bundle.canonicalize().unwrap(), &system);
+        for invalid in [
+            "invalid".to_owned(),
+            serde_json::json!({"schema":1,"bundle":temp.path()}).to_string(),
+        ] {
+            fs::write(&record, invalid).unwrap();
+            assert!(configured_mode_in(&executable, "macos", &system).is_err());
+        }
+    }
+
+    #[test]
+    fn one_executable_uses_installed_configuration_or_defaults_to_portable() {
+        let temp = tempfile::tempdir().unwrap();
+        for (platform, executable, configuration) in [
+            (
+                "windows",
+                "Windows/renamed.exe",
+                "Windows/nekocrate.runtime.json",
+            ),
+            (
+                "linux",
+                "Linux/usr/bin/nekocrate-launcher",
+                "Linux/usr/lib/nekocrate-launcher/nekocrate.runtime.json",
+            ),
+            (
+                "macos",
+                "Mac/Renamed.app/Contents/MacOS/launcher",
+                "Mac/Renamed.app/Contents/Resources/nekocrate.runtime.json",
+            ),
+        ] {
+            let executable = temp.path().join(executable);
+            fs::create_dir_all(executable.parent().unwrap()).unwrap();
+            let configuration = temp.path().join(configuration);
+            fs::create_dir_all(configuration.parent().unwrap()).unwrap();
+            let base = package_directory(&executable, platform).unwrap();
+            fs::create_dir_all(base.join(".minecraft")).unwrap();
+            let expected = Some(base.join(DATA_DIRECTORY));
+            assert_eq!(detect_mode(&executable, platform, true).unwrap(), expected);
+            fs::write(&configuration, r#"{"schema":1,"mode":"installed"}"#).unwrap();
+            assert!(detect_mode(&executable, platform, true).unwrap().is_none());
+            // An old portable marker cannot override an explicit installed mode.
+            fs::write(base.join(MARKER), r#"{"schema":1}"#).unwrap();
+            assert!(detect_mode(&executable, platform, true).unwrap().is_none());
+            fs::remove_file(base.join(MARKER)).unwrap();
+            fs::remove_file(&configuration).unwrap();
+            assert_eq!(detect_mode(&executable, platform, true).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn invalid_runtime_configuration_never_silently_switches_data_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("launcher.exe");
+        let path = temp.path().join(RUNTIME_CONFIG);
+        for value in [
+            "{broken",
+            r#"{"schema":2,"mode":"installed"}"#,
+            r#"{"schema":1,"mode":"typo"}"#,
+        ] {
+            fs::write(&path, value).unwrap();
+            assert!(detect_mode(&executable, "windows", true).is_err());
+        }
+        fs::write(&path, r#"{"schema":1,"mode":"portable"}"#).unwrap();
+        assert_eq!(
+            detect_mode(&executable, "windows", false).unwrap(),
+            Some(temp.path().join(DATA_DIRECTORY))
+        );
+    }
+
+    #[test]
+    fn installed_linux_configuration_does_not_change_a_separate_portable_copy() {
+        let temp = tempfile::tempdir().unwrap();
+        let installed = temp.path().join("usr/bin/nekocrate-launcher");
+        fs::create_dir_all(installed.parent().unwrap()).unwrap();
+        let configuration = temp
+            .path()
+            .join("usr/lib/nekocrate-launcher")
+            .join(RUNTIME_CONFIG);
+        fs::create_dir_all(configuration.parent().unwrap()).unwrap();
+        fs::write(configuration, r#"{"schema":1,"mode":"installed"}"#).unwrap();
+        let portable = temp.path().join("games/renamed.elf");
+        assert!(detect_mode(&installed, "linux", true).unwrap().is_none());
+        assert_eq!(
+            detect_mode(&portable, "linux", true).unwrap(),
+            Some(temp.path().join("games/.nekocrate"))
+        );
     }
 
     #[test]

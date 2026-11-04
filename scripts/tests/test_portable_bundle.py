@@ -21,9 +21,10 @@ class PortableBundleTests(unittest.TestCase):
                 output = portable_bundle.archive_path(root, "dev9.9.9", platform)
                 portable_bundle.package(binary, output)
                 self.assertEqual(output.read_bytes(), binary.read_bytes())
+                self.assertNotIn("portable", output.name)
                 if os.name != "nt":
                     self.assertTrue(output.stat().st_mode & 0o111)
-            self.assertEqual(len(list((root / "bundle/portable").iterdir())), 2)
+            self.assertEqual(len(list((root / "bundle/standalone").iterdir())), 2)
             self.assertFalse(list(root.rglob("*.json")))
 
     @unittest.skipIf(os.name == "nt", "requires POSIX symlinks")
@@ -39,15 +40,21 @@ class PortableBundleTests(unittest.TestCase):
             link.symlink_to("Contents/MacOS/launcher")
             portable = root / "portable"
             portable.write_bytes(b"portable executable")
+            resources = app / "Contents/Resources"
+            resources.mkdir()
+            configuration = resources / portable_bundle.RUNTIME_CONFIG
+            configuration.write_text('{"schema":1,"mode":"installed"}')
             destination = root / "portable.app.tar.gz"
             with patch.object(portable_bundle.subprocess, "run") as sign:
                 portable_bundle.package(portable, destination, app)
             self.assertEqual(sign.call_count, 2)
             self.assertEqual(binary.read_bytes(), b"installed executable")
+            self.assertTrue(configuration.is_file())
             with tarfile.open(destination) as archive:
-                self.assertTrue(all(n.startswith("NekoCrate Portable.app") for n in archive.getnames()))
-                self.assertEqual(archive.extractfile("NekoCrate Portable.app/Contents/MacOS/launcher").read(), b"portable executable")
-                self.assertTrue(archive.getmember("NekoCrate Portable.app/current").issym())
+                self.assertTrue(all(n.startswith("App.app") for n in archive.getnames()))
+                self.assertEqual(archive.extractfile("App.app/Contents/MacOS/launcher").read(), b"portable executable")
+                self.assertTrue(archive.getmember("App.app/current").issym())
+                self.assertFalse(any(n.endswith(portable_bundle.RUNTIME_CONFIG) for n in archive.getnames()))
             link.unlink()
             link.symlink_to(root / "outside")
             with self.assertRaisesRegex(ValueError, "leaves application"):

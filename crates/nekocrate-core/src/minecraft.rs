@@ -236,7 +236,7 @@ pub fn native_artifact(l: &Library) -> Option<&Artifact> {
     );
     l.downloads.classifiers.get(&key)
 }
-fn asset_index_file(game: &Path, v: &Version) -> Result<FileSpec> {
+pub(crate) fn asset_index_file(game: &Path, v: &Version) -> Result<FileSpec> {
     Ok(FileSpec {
         url: v.asset_index.url.clone(),
         path: game
@@ -251,7 +251,11 @@ fn asset_index_file(game: &Path, v: &Version) -> Result<FileSpec> {
     })
 }
 
-fn installation_files(game: &Path, v: &Version, index: &AssetIndex) -> Result<Vec<FileSpec>> {
+pub(crate) fn installation_files(
+    game: &Path,
+    v: &Version,
+    index: &AssetIndex,
+) -> Result<Vec<FileSpec>> {
     let runtime_arch = crate::java::JavaRequirement::for_version(v).arch;
     let mut files = vec![];
     files.push(artifact_file(
@@ -355,17 +359,16 @@ pub async fn install_files(
     cancel: &CancellationToken,
     sink: &EventSink,
 ) -> Result<()> {
-    let index_file = asset_index_file(game, v)?;
-    downloader.file(&index_file, cancel, sink).await?;
-    let index: AssetIndex = storage::read_json(&index_file.path)?;
-    let files = installation_files(game, v, &index)?;
-    sink(Event::new(
-        "stage",
-        format!("校验并下载 {} 个游戏文件", files.len()),
-    ));
-    downloader.batch(files, cancel, sink).await?;
+    crate::installation::game::files(game, v, downloader, cancel, sink).await
+}
+
+pub(crate) fn prepare_runtime_files(
+    game: &Path,
+    v: &Version,
+    index: &AssetIndex,
+    cancel: &CancellationToken,
+) -> Result<()> {
     check_cancel(cancel)?;
-    sink(Event::workflow("natives", "准备原生库与资源映射"));
     let natives = game.join("versions").join(&v.id).join("natives");
     if natives.exists() {
         std::fs::remove_dir_all(&natives)?;

@@ -24,15 +24,24 @@ pub fn data_root(root: Option<PathBuf>) -> Result<PathBuf> {
     {
         return Ok(root);
     }
-    None.or_else(|| {
-        directories::ProjectDirs::from("dev", "NekoCrate", "NekoCrate")
-            .map(|p| p.data_local_dir().to_owned())
-    })
-    .context("无法确定数据目录")
+    system_data_root()
 }
+pub(crate) fn system_data_root() -> Result<PathBuf> {
+    directories::ProjectDirs::from("dev", "NekoCrate", "NekoCrate")
+        .map(|p| p.data_local_dir().to_owned())
+        .context("无法确定数据目录")
+}
+// Keep each record parser shared across discovery, checkpoints and recovery.
+#[inline(never)]
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
-    serde_json::from_slice(&fs::read(path).with_context(|| format!("无法读取 {}", path.display()))?)
+    serde_json::from_slice(&read_json_bytes(path)?)
         .with_context(|| format!("JSON 损坏：{}，请保留原文件后恢复备份", path.display()))
+}
+// Filesystem work does not depend on the deserialized type. Keep one copy even
+// under FatLTO instead of embedding it in every read_json<T> instantiation.
+#[inline(never)]
+fn read_json_bytes(path: &Path) -> Result<Vec<u8>> {
+    fs::read(path).with_context(|| format!("无法读取 {}", path.display()))
 }
 pub(crate) fn same_file_contents(a: &Path, b: &Path) -> Result<bool> {
     use ring::digest::{Context, SHA256};
@@ -58,9 +67,12 @@ pub(crate) fn same_file_contents(a: &Path, b: &Path) -> Result<bool> {
     };
     Ok(hash(a)?.as_ref() == hash(b)?.as_ref())
 }
+// Keep each record serializer shared across checkpoint call sites.
+#[inline(never)]
 pub fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
     atomic_write(path, &serde_json::to_vec_pretty(value)?)
 }
+#[inline(never)]
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<()> {
     atomic_write_with_backup(path, bytes, &path.with_extension("json.bak"))
 }

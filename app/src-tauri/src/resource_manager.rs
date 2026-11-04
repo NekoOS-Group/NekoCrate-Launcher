@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use tauri_plugin_opener::OpenerExt;
 
 #[derive(Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(remote = "Self", rename_all = "snake_case")]
 pub enum Action {
     Java,
     RegisterJava {
@@ -60,6 +60,12 @@ pub enum Action {
         id: String,
         path: PathBuf,
     },
+}
+
+impl<'de> Deserialize<'de> for Action {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        crate::tagged_json::deserialize(deserializer, "kind", Self::deserialize)
+    }
 }
 
 fn export_skin(
@@ -129,7 +135,7 @@ pub fn handle<'a>(
                 Ok(Value::Null)
             }
             other => {
-                tauri::async_runtime::spawn_blocking(move || -> Result<Value> {
+                crate::blocking::value(move || -> Result<Value> {
                     Ok(match other {
                         Action::Groups { content } => json!(launcher.resource_groups(content)),
                         Action::Cache => json!(launcher.resource_cache()?),

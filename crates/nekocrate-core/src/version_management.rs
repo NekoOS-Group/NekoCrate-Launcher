@@ -456,7 +456,9 @@ fn read_content(
 }
 
 fn sort_content(files: &mut [LocalContentFile]) {
-    files.sort_by_cached_key(|item| (item.name.to_lowercase(), item.file_name.to_lowercase()));
+    crate::sorting::sort_by_cached_key(files, |item| {
+        (item.name.to_lowercase(), item.file_name.to_lowercase())
+    });
 }
 fn apply_identity(file: &mut LocalContentFile, identity: ModIdentity) {
     if let Some(name) = identity.name {

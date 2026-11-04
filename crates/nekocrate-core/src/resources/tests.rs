@@ -1424,6 +1424,88 @@ async fn interrupted_publication_recovers_from_the_checkpoint_without_requiring_
 }
 
 #[tokio::test]
+async fn staged_local_archive_resumes_without_source_and_corrupt_stage_is_rebuilt() {
+    for corrupt in [false, true] {
+        let (temp, launcher, id, working) = fixture(true);
+        let source = temp.path().join("Map.zip");
+        archive(
+            &source,
+            &[("level.dat", "world"), ("region/r.0.0.mca", "region")],
+        );
+        let plan = launcher
+            .prepare_local_resources(
+                &id,
+                "1.20.1",
+                &[local(&source)],
+                None,
+                &CancellationToken::new(),
+            )
+            .unwrap();
+        let cancel = CancellationToken::new();
+        let stop = cancel.clone();
+        let stop_before_commit: EventSink = Arc::new(move |event| {
+            if event.kind == "workflow" && event.step.as_deref() == Some("resource_commit") {
+                stop.cancel();
+            }
+        });
+        assert!(
+            launcher
+                .install_resources(&id, "1.20.1", &plan.id, &cancel, &stop_before_commit)
+                .await
+                .is_err()
+        );
+        assert!(!working.join("saves/Map").exists());
+        let directory = task_dir(&plan.target, &plan.id).unwrap();
+        let checkpoint = read_plan(&directory.join("plan.json"), &working).unwrap();
+        assert!(checkpoint.entries[0].content_sha256.is_some());
+        assert!(!checkpoint.complete);
+        if corrupt {
+            fs::write(directory.join("stage/0/Map/level.dat"), b"corrupt").unwrap();
+        } else {
+            fs::remove_file(&source).unwrap();
+        }
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = events.clone();
+        let sink: EventSink = Arc::new(move |event| captured.lock().unwrap().push(event));
+        launcher
+            .install_resources(&id, "1.20.1", &plan.id, &CancellationToken::new(), &sink)
+            .await
+            .unwrap();
+        assert_eq!(
+            fs::read(working.join("saves/Map/level.dat")).unwrap(),
+            b"world"
+        );
+        assert_eq!(
+            events
+                .lock()
+                .unwrap()
+                .iter()
+                .flat_map(|e| &e.files)
+                .any(|f| f.cached),
+            !corrupt
+        );
+        assert!(
+            read_plan(&directory.join("plan.json"), &working)
+                .unwrap()
+                .complete
+        );
+        assert!(!directory.join("execution.json").exists());
+        // Termination after publication but before its completion checkpoint.
+        let mut checkpoint = read_plan(&directory.join("plan.json"), &working).unwrap();
+        checkpoint.complete = false;
+        save_plan(&checkpoint).unwrap();
+        install(&launcher, &plan).await.unwrap();
+        assert!(
+            read_plan(&directory.join("plan.json"), &working)
+                .unwrap()
+                .complete
+        );
+        assert!(!directory.join("execution.json").exists());
+        assert_eq!(records(&working).unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
 async fn batch_resource_copy_checks_every_file_before_installing_and_keeps_disabled_state() {
     let (_temp, launcher, id, working) = fixture(true);
     let target = copy_target(&launcher, &id, &working, true);
@@ -1713,4 +1795,86 @@ async fn selected_resources_survive_cancel_and_restart_and_finish_in_the_version
     );
     assert!(launcher.resource_plans(&id, "1.20.1").unwrap().is_empty());
     assert_eq!(records(&working).unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn datapack_drop_targets_one_world_and_preview_never_writes() {
+    let (temp, launcher, id, working) = fixture(true);
+    for name in ["First", "Second"] {
+        fs::create_dir_all(working.join("saves").join(name)).unwrap();
+        fs::write(working.join("saves").join(name).join("level.dat"), b"world").unwrap();
+    }
+    let path = temp.path().join("Pack.zip");
+    archive(
+        &path,
+        &[
+            (
+                "pack.mcmeta",
+                r#"{"pack":{"pack_format":15,"description":"test"}}"#,
+            ),
+            ("data/test/functions/run.mcfunction", "say hello"),
+        ],
+    );
+    let cancel = CancellationToken::new();
+    let inputs = [LocalImport {
+        path: path.clone(),
+        kind: Some(ResourceKind::Datapacks),
+    }];
+    let preview = launcher
+        .preview_resource_drop(
+            &id,
+            "1.20.1",
+            std::slice::from_ref(&path),
+            &[],
+            Some(ResourceKind::Datapacks),
+            Some("Second"),
+        )
+        .unwrap();
+    assert!(preview.existing.is_empty());
+    assert!(!working.join("saves/Second/datapacks").exists());
+    let plan = launcher
+        .prepare_local_resources(&id, "1.20.1", &inputs, Some("Second"), &cancel)
+        .unwrap();
+    install(&launcher, &plan).await.unwrap();
+    assert!(working.join("saves/Second/datapacks/Pack.zip").is_file());
+    assert!(!working.join("saves/First/datapacks").exists());
+    assert_eq!(
+        launcher
+            .preview_resource_drop(
+                &id,
+                "1.20.1",
+                std::slice::from_ref(&path),
+                &[],
+                Some(ResourceKind::Datapacks),
+                Some("Second")
+            )
+            .unwrap()
+            .existing,
+        vec!["Pack.zip"]
+    );
+    let source = ResourceCopySource {
+        kind: ResourceKind::Datapacks,
+        instance: id.clone(),
+        version: "1.20.1".into(),
+        file: "Second/Pack.zip".into(),
+    };
+    // The content API supplies the canonical listed key for nested world packs.
+    let listing = launcher
+        .version_content(&id, "1.20.1", ContentKind::Datapacks)
+        .unwrap();
+    let source = ResourceCopySource {
+        file: listing.files[0].file_name.clone(),
+        ..source
+    };
+    let copy = launcher
+        .prepare_resource_copies_to(&[source], &id, "1.20.1", Some("First"), &cancel)
+        .unwrap()
+        .unwrap();
+    install(&launcher, &copy).await.unwrap();
+    assert!(working.join("saves/First/datapacks/Pack.zip").is_file());
+    assert!(
+        launcher
+            .prepare_local_resources(&id, "1.20.1", &inputs, Some("../escape"), &cancel)
+            .is_err()
+    );
 }

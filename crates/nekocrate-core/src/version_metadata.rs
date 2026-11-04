@@ -359,9 +359,9 @@ impl Launcher {
                 size: metadata.len(),
             });
         }
-        result
-            .files
-            .sort_by_cached_key(|f| (!f.directory, f.name.to_lowercase()));
+        crate::sorting::sort_by_cached_key(&mut result.files, |f| {
+            (!f.directory, f.name.to_lowercase())
+        });
         Ok(result)
     }
 }

@@ -32,6 +32,21 @@ export function useVersionSorting<T extends { id: string }>(
   blocked: Readonly<Ref<boolean>>,
   move: (id: string, before: string | null) => Promise<boolean>,
   remove: (id: string) => Promise<boolean>,
+  transfer?: {
+    preview: (
+      id: string,
+      element: Element | null,
+      x: number,
+      y: number,
+    ) => void;
+    drop: (
+      id: string,
+      element: Element | null,
+      x: number,
+      y: number,
+    ) => boolean;
+    finish: () => void;
+  },
 ) {
   const list = ref<HTMLElement>();
   const ghost = ref<HTMLElement>();
@@ -76,6 +91,7 @@ export function useVersionSorting<T extends { id: string }>(
   const reduced = () =>
     window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   function clear() {
+    transfer?.finish();
     generation++;
     landing?.dispose();
     landing = undefined;
@@ -109,7 +125,18 @@ export function useVersionSorting<T extends { id: string }>(
       ...position.value,
       transform: instanceTranslation({ x: p.x + p.dx, y: p.y + p.dy }),
     };
-    if (!inside.value) return;
+    if (!inside.value) {
+      if (!hovered.value)
+        transfer?.preview(
+          dragged.value.id,
+          document.elementFromPoint(p.x, p.y),
+          p.x,
+          p.y,
+        );
+      else transfer?.finish();
+      return;
+    }
+    transfer?.finish();
     const delta =
       p.y < box.top + 28
         ? p.y - box.top - 28
@@ -230,6 +257,17 @@ export function useVersionSorting<T extends { id: string }>(
     frame = 0;
     if (p.target.hasPointerCapture(p.id)) p.target.releasePointerCapture(p.id);
     if (!id) return;
+    const handled =
+      commit &&
+      !deleting &&
+      !reordering &&
+      !blocked.value &&
+      transfer?.drop(id, document.elementFromPoint(p.x, p.y), p.x, p.y);
+    transfer?.finish();
+    if (handled) {
+      clear();
+      return;
+    }
     settling.value = true;
     removing.value = deleting;
     const ticket = ++generation;

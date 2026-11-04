@@ -375,242 +375,247 @@ async fn inspect_candidates(candidates: Vec<PathBuf>) -> Vec<JavaInfo> {
         .runtimes
 }
 
-pub async fn ensure(
-    root: &Path,
+// Installation and launch share one polling implementation; keep the large
+// discovery/download state machine out of every enclosing install future.
+#[inline(never)]
+pub fn ensure<'a>(
+    root: &'a Path,
     requirement: JavaRequirement,
-    explicit: Option<&str>,
+    explicit: Option<&'a str>,
     auto: bool,
-    downloader: &Downloader,
-    cancel: &CancellationToken,
-    sink: &EventSink,
-) -> Result<JavaInfo> {
-    if let Some(compatibility) = &requirement.compatibility {
-        sink(Event::new(
-            "info",
-            format!("Java 匹配范围：{}", requirement.description()),
-        ));
-        for reason in &compatibility.reasons {
-            sink(Event::new("info", reason.clone()));
-        }
-    }
-    if let Some(path) = explicit.filter(|p| !p.is_empty()) {
-        let info = tokio::select! {
-            info = inspect(Path::new(path)) => info?,
-            _ = cancel.cancelled() => bail!("Java 搜索已取消"),
-        };
-        if let Some(reason) = requirement.rejection(&info) {
-            bail!("所选 Java 不兼容：{reason} · {}", info.path);
-        }
-        sink(Event::new(
-            "info",
-            format!("使用指定 Java：{} · {}", info.version, info.path),
-        ));
-        return Ok(info);
-    }
-    let previous = requirement
-        .history
-        .as_ref()
-        .and_then(|history| history.previous(root));
-    let mut extra: Vec<_> = requirement.working_directory.iter().cloned().collect();
-    if let Some(home) = previous
-        .as_deref()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-    {
-        extra.push(home.to_owned());
-    }
-    let mut reported = std::collections::HashSet::new();
-    for expanded in [false, true] {
-        let available = tokio::select! {
-            result = discovery::discover(root, &extra, expanded) => result,
-            _ = cancel.cancelled() => bail!("Java 搜索已取消"),
-        };
-        for failure in available.failures {
-            if reported.insert(failure.clone()) {
-                sink(Event::new("warning", failure));
-            }
-        }
-        for candidate in &available.runtimes {
-            let reason = requirement.rejection(candidate);
-            let detail = format!(
-                "Java 候选：{} · {} · {}",
-                candidate.version,
-                candidate.path,
-                reason
-                    .as_ref()
-                    .map_or("满足硬性要求".into(), |r| format!("排除：{r}"))
-            );
-            if reported.insert(detail.clone()) {
-                sink(Event::new("info", detail));
-            }
-        }
-        if let Some(java) = requirement.select(&available.runtimes, previous.as_deref()) {
-            let why = if previous.as_deref() == Some(Path::new(&java.path)) {
-                "此前正常运行"
-            } else if java.major == requirement.major {
-                "本地推荐版本"
-            } else {
-                "满足已知兼容约束"
-            };
+    downloader: &'a Downloader,
+    cancel: &'a CancellationToken,
+    sink: &'a EventSink,
+) -> futures_util::future::BoxFuture<'a, Result<JavaInfo>> {
+    Box::pin(async move {
+        if let Some(compatibility) = &requirement.compatibility {
             sink(Event::new(
                 "info",
-                format!("使用本地 Java：{} · {}（{why}）", java.version, java.path),
+                format!("Java 匹配范围：{}", requirement.description()),
             ));
-            return Ok(java.clone());
+            for reason in &compatibility.reasons {
+                sink(Event::new("info", reason.clone()));
+            }
         }
-        if !expanded {
+        if let Some(path) = explicit.filter(|p| !p.is_empty()) {
+            let info = tokio::select! {
+                info = inspect(Path::new(path)) => info?,
+                _ = cancel.cancelled() => bail!("Java 搜索已取消"),
+            };
+            if let Some(reason) = requirement.rejection(&info) {
+                bail!("所选 Java 不兼容：{reason} · {}", info.path);
+            }
             sink(Event::new(
                 "info",
-                "常见位置未找到匹配 Java，正在补查实例附带运行时",
+                format!("使用指定 Java：{} · {}", info.version, info.path),
             ));
+            return Ok(info);
         }
-    }
-    if !auto {
-        bail!(
-            "未找到兼容的 {}，请指定 Java 路径或允许自动下载。",
-            requirement.description()
-        );
-    }
-    check_cancel(cancel)?;
-    let os = if cfg!(target_os = "macos") {
-        "mac"
-    } else if cfg!(windows) {
-        "windows"
-    } else {
-        "linux"
-    };
-    let arch = match requirement.arch {
-        "aarch64" => "aarch64",
-        "x86_64" => "x64",
-        _ => bail!("此架构暂不支持自动安装 Java，请手动配置"),
-    };
-    // Query only release metadata first. A mod can require a particular patch;
-    // validate the real release before downloading or installing its archive.
-    let releases: serde_json::Value = downloader
-        .json(
-            "https://api.adoptium.net/v3/info/available_releases",
-            cancel,
-        )
-        .await?;
-    let lts = releases["available_lts_releases"]
-        .as_array()
-        .context("Java 发行目录缺失")?;
-    let mut majors: Vec<u32> = releases["available_releases"]
-        .as_array()
-        .context("Java 发行目录缺失")?
-        .iter()
-        .filter_map(|n| n.as_u64().and_then(|n| u32::try_from(n).ok()))
-        .filter(|major| requirement.allowed_majors().contains(major))
-        .collect();
-    majors.sort_by_key(|major| {
-        (
-            *major != requirement.major,
-            !lts.iter().any(|v| v.as_u64() == Some((*major).into())),
-            major.abs_diff(requirement.major),
-        )
-    });
-    let mut selected = None;
-    for major in majors {
-        let image_type = download_image_type(major, requirement.jdk);
-        let url = format!(
-            "https://api.adoptium.net/v3/assets/latest/{major}/hotspot?architecture={arch}&image_type={image_type}&os={os}&vendor=eclipse"
-        );
-        let assets: serde_json::Value = downloader.json(&url, cancel).await?;
-        for asset in assets.as_array().context("Java 发行信息格式无效")? {
-            let version = asset["version"]["openjdk_version"]
-                .as_str()
-                .or_else(|| asset["version"]["semver"].as_str())
-                .context("Java 发行版本缺失")?;
-            let candidate = JavaInfo {
-                path: String::new(),
-                major,
-                version: version.into(),
-                arch: requirement.arch.into(),
-                jdk: image_type == "jdk",
+        let previous = requirement
+            .history
+            .as_ref()
+            .and_then(|history| history.previous(root));
+        let mut extra: Vec<_> = requirement.working_directory.iter().cloned().collect();
+        if let Some(home) = previous
+            .as_deref()
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+        {
+            extra.push(home.to_owned());
+        }
+        let mut reported = std::collections::HashSet::new();
+        for expanded in [false, true] {
+            let available = tokio::select! {
+                result = discovery::discover(root, &extra, expanded) => result,
+                _ = cancel.cancelled() => bail!("Java 搜索已取消"),
             };
-            if let Some(reason) = requirement.rejection(&candidate) {
+            for failure in available.failures {
+                if reported.insert(failure.clone()) {
+                    sink(Event::new("warning", failure));
+                }
+            }
+            for candidate in &available.runtimes {
+                let reason = requirement.rejection(candidate);
+                let detail = format!(
+                    "Java 候选：{} · {} · {}",
+                    candidate.version,
+                    candidate.path,
+                    reason
+                        .as_ref()
+                        .map_or("满足硬性要求".into(), |r| format!("排除：{r}"))
+                );
+                if reported.insert(detail.clone()) {
+                    sink(Event::new("info", detail));
+                }
+            }
+            if let Some(java) = requirement.select(&available.runtimes, previous.as_deref()) {
+                let why = if previous.as_deref() == Some(Path::new(&java.path)) {
+                    "此前正常运行"
+                } else if java.major == requirement.major {
+                    "本地推荐版本"
+                } else {
+                    "满足已知兼容约束"
+                };
                 sink(Event::new(
                     "info",
-                    format!("跳过 Java 发行版 {version}：{reason}"),
+                    format!("使用本地 Java：{} · {}（{why}）", java.version, java.path),
                 ));
-                continue;
+                return Ok(java.clone());
             }
-            selected = Some((major, image_type, asset["binary"]["package"].clone()));
-            break;
+            if !expanded {
+                sink(Event::new(
+                    "info",
+                    "常见位置未找到匹配 Java，正在补查实例附带运行时",
+                ));
+            }
         }
-        if selected.is_some() {
-            break;
+        if !auto {
+            bail!(
+                "未找到兼容的 {}，请指定 Java 路径或允许自动下载。",
+                requirement.description()
+            );
         }
-    }
-    let (major, image_type, package) =
-        selected.context("发行目录没有满足游戏、加载器和模组要求的 Java，请手动指定兼容版本")?;
-    sink(Event::new(
-        "stage",
-        format!(
-            "正在安装 {} {major} ({})",
-            if image_type == "jdk" { "JDK" } else { "Java" },
-            requirement.arch
-        ),
-    ));
-    let link = package["link"]
-        .as_str()
-        .context("暂无适合此系统的 Java，请指定本地 Java 路径")?;
-    let name = package["name"].as_str().context("Java 下载信息缺失")?;
-    let archive = root.join("cache/java").join(storage::safe_relative(name)?);
-    let archive_spec = FileSpec {
-        url: link.into(),
-        path: archive.clone(),
-        hash: package["checksum"]
-            .as_str()
-            .context("Java 校验值缺失")?
-            .into(),
-        sha256: true,
-        size: package["size"].as_u64().unwrap_or(0),
-    };
-    downloader.file(&archive_spec, cancel, sink).await?;
-    check_cancel(cancel)?;
-    let staging = root
-        .join("runtimes")
-        .join(format!(".install-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&staging)?;
-    let extraction = extract_runtime(&archive, &staging, cancel);
-    if let Err(e) = extraction {
-        let _ = std::fs::remove_dir_all(&staging);
-        return Err(e);
-    }
-    let relative = find_java(&staging)
-        .context("解压后未找到 Java 可执行文件")?
-        .strip_prefix(&staging)?
-        .to_path_buf();
-    let validation = inspect(&staging.join(&relative)).await.and_then(|java| {
-        anyhow::ensure!(java.major == major, "Java 安装包主版本与发行信息不符");
-        if let Some(reason) = requirement.rejection(&java) {
-            bail!("Java 安装包不满足启动要求：{reason}");
+        check_cancel(cancel)?;
+        let os = if cfg!(target_os = "macos") {
+            "mac"
+        } else if cfg!(windows) {
+            "windows"
+        } else {
+            "linux"
+        };
+        let arch = match requirement.arch {
+            "aarch64" => "aarch64",
+            "x86_64" => "x64",
+            _ => bail!("此架构暂不支持自动安装 Java，请手动配置"),
+        };
+        // Query only release metadata first. A mod can require a particular patch;
+        // validate the real release before downloading or installing its archive.
+        let releases: serde_json::Value = downloader
+            .json(
+                "https://api.adoptium.net/v3/info/available_releases",
+                cancel,
+            )
+            .await?;
+        let lts = releases["available_lts_releases"]
+            .as_array()
+            .context("Java 发行目录缺失")?;
+        let mut majors: Vec<u32> = releases["available_releases"]
+            .as_array()
+            .context("Java 发行目录缺失")?
+            .iter()
+            .filter_map(|n| n.as_u64().and_then(|n| u32::try_from(n).ok()))
+            .filter(|major| requirement.allowed_majors().contains(major))
+            .collect();
+        majors.sort_by_key(|major| {
+            (
+                *major != requirement.major,
+                !lts.iter().any(|v| v.as_u64() == Some((*major).into())),
+                major.abs_diff(requirement.major),
+            )
+        });
+        let mut selected = None;
+        for major in majors {
+            let image_type = download_image_type(major, requirement.jdk);
+            let url = format!(
+                "https://api.adoptium.net/v3/assets/latest/{major}/hotspot?architecture={arch}&image_type={image_type}&os={os}&vendor=eclipse"
+            );
+            let assets: serde_json::Value = downloader.json(&url, cancel).await?;
+            for asset in assets.as_array().context("Java 发行信息格式无效")? {
+                let version = asset["version"]["openjdk_version"]
+                    .as_str()
+                    .or_else(|| asset["version"]["semver"].as_str())
+                    .context("Java 发行版本缺失")?;
+                let candidate = JavaInfo {
+                    path: String::new(),
+                    major,
+                    version: version.into(),
+                    arch: requirement.arch.into(),
+                    jdk: image_type == "jdk",
+                };
+                if let Some(reason) = requirement.rejection(&candidate) {
+                    sink(Event::new(
+                        "info",
+                        format!("跳过 Java 发行版 {version}：{reason}"),
+                    ));
+                    continue;
+                }
+                selected = Some((major, image_type, asset["binary"]["package"].clone()));
+                break;
+            }
+            if selected.is_some() {
+                break;
+            }
         }
-        Ok(())
-    });
-    if let Err(error) = validation {
-        let _ = std::fs::remove_dir_all(&staging);
-        return Err(error);
-    }
-    let runtime = root
-        .join("runtimes")
-        .join(format!("{image_type}-{major}-{os}-{arch}"));
-    if runtime.exists() {
-        std::fs::remove_dir_all(&runtime)?;
-    }
-    std::fs::rename(&staging, &runtime)?;
-    let java = inspect(&runtime.join(relative)).await?;
-    if java.major != major || !requirement.matches(&java) {
-        bail!("安装后的 Java 版本与要求不匹配");
-    }
-    if let Err(error) = downloader.discard_installer(&archive_spec).await {
+        let (major, image_type, package) = selected
+            .context("发行目录没有满足游戏、加载器和模组要求的 Java，请手动指定兼容版本")?;
         sink(Event::new(
-            "warning",
-            format!("清理 Java 安装包失败：{error:#}"),
+            "stage",
+            format!(
+                "正在安装 {} {major} ({})",
+                if image_type == "jdk" { "JDK" } else { "Java" },
+                requirement.arch
+            ),
         ));
-    }
-    Ok(java)
+        let link = package["link"]
+            .as_str()
+            .context("暂无适合此系统的 Java，请指定本地 Java 路径")?;
+        let name = package["name"].as_str().context("Java 下载信息缺失")?;
+        let archive = root.join("cache/java").join(storage::safe_relative(name)?);
+        let archive_spec = FileSpec {
+            url: link.into(),
+            path: archive.clone(),
+            hash: package["checksum"]
+                .as_str()
+                .context("Java 校验值缺失")?
+                .into(),
+            sha256: true,
+            size: package["size"].as_u64().unwrap_or(0),
+        };
+        downloader.file(&archive_spec, cancel, sink).await?;
+        check_cancel(cancel)?;
+        let staging = root
+            .join("runtimes")
+            .join(format!(".install-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&staging)?;
+        let extraction = extract_runtime(&archive, &staging, cancel);
+        if let Err(e) = extraction {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(e);
+        }
+        let relative = find_java(&staging)
+            .context("解压后未找到 Java 可执行文件")?
+            .strip_prefix(&staging)?
+            .to_path_buf();
+        let validation = inspect(&staging.join(&relative)).await.and_then(|java| {
+            anyhow::ensure!(java.major == major, "Java 安装包主版本与发行信息不符");
+            if let Some(reason) = requirement.rejection(&java) {
+                bail!("Java 安装包不满足启动要求：{reason}");
+            }
+            Ok(())
+        });
+        if let Err(error) = validation {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(error);
+        }
+        let runtime = root
+            .join("runtimes")
+            .join(format!("{image_type}-{major}-{os}-{arch}"));
+        if runtime.exists() {
+            std::fs::remove_dir_all(&runtime)?;
+        }
+        std::fs::rename(&staging, &runtime)?;
+        let java = inspect(&runtime.join(relative)).await?;
+        if java.major != major || !requirement.matches(&java) {
+            bail!("安装后的 Java 版本与要求不匹配");
+        }
+        if let Err(error) = downloader.discard_installer(&archive_spec).await {
+            sink(Event::new(
+                "warning",
+                format!("清理 Java 安装包失败：{error:#}"),
+            ));
+        }
+        Ok(java)
+    })
 }
 fn download_image_type(major: u32, needs_jdk: bool) -> &'static str {
     // A modern JDK also serves vanilla games and avoids installing a second JVM

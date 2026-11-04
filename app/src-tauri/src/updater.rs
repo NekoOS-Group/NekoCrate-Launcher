@@ -204,12 +204,19 @@ impl UpdateManager {
                 }
             });
         #[cfg(target_os = "windows")]
-        if launcher.is_portable() {
-            builder = builder.target("windows-x86_64-portable-exe");
+        {
+            builder = builder.target(if launcher.is_portable() {
+                "windows-x86_64-portable-exe"
+            } else {
+                "windows-x86_64"
+            });
         }
         #[cfg(target_os = "macos")]
-        if launcher.is_portable() {
-            builder = builder.target("darwin-aarch64-portable");
+        {
+            // Older clients cannot preserve an installed mode outside the app.
+            // Give the common archive its own target rather than silently moving
+            // those installations into a fresh portable data directory.
+            builder = builder.target("darwin-aarch64-unified");
         }
         #[cfg(target_os = "linux")]
         {
@@ -227,9 +234,8 @@ impl UpdateManager {
             .context("无法读取更新信息")?
             .context("更新版本已变化，请重新检查更新")?;
         let expected_suffix = match std::env::consts::OS {
-            "windows" if launcher.is_portable() => "-win-amd64-portable.exe",
+            "windows" if launcher.is_portable() => "-win-amd64.exe",
             "windows" => "-win-amd64-setup.exe",
-            "macos" if launcher.is_portable() => "-mac-appsilicon-portable.app.tar.gz",
             "macos" => "-mac-appsilicon.app.tar.gz",
             "linux" => "-linux-amd64.elf",
             _ => unreachable!(),
@@ -295,7 +301,18 @@ impl UpdateManager {
             return Ok(());
         }
         let installed = tauri::async_runtime::spawn_blocking(move || {
-            let result = package.update.install(&package.bytes);
+            let result = (|| -> Result<()> {
+                #[cfg(target_os = "macos")]
+                {
+                    let executable = std::env::current_exe()?;
+                    // An explicit data-root override does not change the app's
+                    // default installed/portable mode after an ordinary restart.
+                    if nekocrate_core::portable::detect(&executable, "macos")?.is_none() {
+                        nekocrate_core::portable::preserve_macos_installation(&executable)?;
+                    }
+                }
+                Ok(package.update.install(&package.bytes)?)
+            })();
             (package, result)
         })
         .await;

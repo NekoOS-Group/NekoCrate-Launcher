@@ -22,14 +22,23 @@ impl Launcher {
         version: &str,
         directory: Option<&Path>,
     ) -> Result<Instance> {
-        let Some(directory) = directory else {
-            return self.create_instance(name, version);
-        };
         let _guard = self
             .0
             .operation
             .try_lock()
             .context("有任务正在运行，请稍后创建实例")?;
+        self.create_instance_at_unlocked(name, version, directory)
+    }
+
+    pub(crate) fn create_instance_at_unlocked(
+        &self,
+        name: &str,
+        version: &str,
+        directory: Option<&Path>,
+    ) -> Result<Instance> {
+        let Some(directory) = directory else {
+            return self.create_unlocked(name, version, None);
+        };
         validate(name, version)?;
         if directory.as_os_str().is_empty() {
             bail!("请选择外部文件夹");

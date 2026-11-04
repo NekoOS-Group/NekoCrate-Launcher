@@ -846,6 +846,7 @@ async fn offline_install_resumes_after_overrides_and_keeps_user_configuration_on
     let id = instance.selected_version.clone().unwrap();
     let directory = game.join("versions").join(&id);
     fs::write(directory.join("mods/test.jar"), b"mod").unwrap();
+    let journal_path = directory.join(".nekocrate/installation/modpack.json");
     let cancel = CancellationToken::new();
     let stop = cancel.clone();
     let sink: EventSink = Arc::new(move |event| {
@@ -868,6 +869,11 @@ async fn offline_install_resumes_after_overrides_and_keeps_user_configuration_on
         directory.join(".nekocrate/source.zip").is_file(),
         "interrupted install keeps its archive"
     );
+    let checkpoint = launcher.pack_job(&instance.id, &id).unwrap();
+    assert!(checkpoint.files_done && checkpoint.overrides_done);
+    assert!(checkpoint.pending_profile.is_none());
+    assert!(!checkpoint.completed);
+    assert!(!journal_path.exists());
     let sink: EventSink = Arc::new(|_| {});
     launcher
         .install(&instance.id, &CancellationToken::new(), &sink)
@@ -926,6 +932,7 @@ async fn offline_install_resumes_after_overrides_and_keeps_user_configuration_on
     job.files_done = false;
     job.completed = false;
     record::write_job(&game, &id, &job).unwrap();
+    fs::remove_file(version::metadata_path(&game, &id).unwrap()).unwrap();
     let cache = crate::download::object_path(
         &root.join("cache/objects"),
         &FileSpec {
@@ -948,6 +955,16 @@ async fn offline_install_resumes_after_overrides_and_keeps_user_configuration_on
             .await
             .unwrap()
     );
+    assert!(!version::metadata_path(&game, &id).unwrap().exists());
+    assert!(
+        cache.is_file(),
+        "waiting for manual files retains verified downloads"
+    );
+    let checkpoint = launcher.pack_job(&instance.id, &id).unwrap();
+    assert!(checkpoint.files_done && checkpoint.overrides_done);
+    assert!(checkpoint.pending_profile.is_some());
+    assert!(!checkpoint.completed);
+    assert!(!journal_path.exists());
     assert_eq!(
         fs::read(directory.join("mods/automatic.jar")).unwrap(),
         b"mod"
@@ -983,6 +1000,36 @@ async fn offline_install_resumes_after_overrides_and_keeps_user_configuration_on
             .iter()
             .any(|e| e.kind == "complete" && e.message == "整合包已安装")
     );
+    // Resume solely from the saved preparation. Removing the catalog's base
+    // profile makes a redundant loader installation fail offline, while the
+    // authoritative pending profile and file receipts remain sufficient.
+    fs::remove_file(root.join("metadata/versions/1.20.1.json")).unwrap();
+    events.lock().unwrap().clear();
+    assert!(
+        !launcher
+            .install(&instance.id, &CancellationToken::new(), &sink)
+            .await
+            .unwrap()
+    );
+    assert!(
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|e| e.step.as_deref() != Some("loader"))
+    );
+    assert!(
+        launcher
+            .pack_job(&instance.id, &id)
+            .unwrap()
+            .pending_profile
+            .is_some()
+    );
+    assert!(!version::metadata_path(&game, &id).unwrap().exists());
+
+    // A completed file checkpoint must not bless damaged bytes. It repairs
+    // from retained objects while reusing the saved game preparation.
+    fs::write(directory.join("mods/automatic.jar"), b"bad").unwrap();
     let supplied = temp.path().join("manual.jar");
     fs::write(&supplied, b"mod").unwrap();
     launcher
@@ -1002,6 +1049,18 @@ async fn offline_install_resumes_after_overrides_and_keeps_user_configuration_on
             .selected()
             .unwrap()
             .installed
+    );
+    assert!(version::metadata_path(&game, &id).unwrap().is_file());
+    assert_eq!(
+        fs::read(directory.join("mods/automatic.jar")).unwrap(),
+        b"mod"
+    );
+    let checkpoint = launcher.pack_job(&instance.id, &id).unwrap();
+    assert!(checkpoint.completed && checkpoint.pending_profile.is_none());
+    assert!(!journal_path.exists());
+    assert!(
+        !cache.exists(),
+        "only committed installations release their downloads"
     );
 }
 

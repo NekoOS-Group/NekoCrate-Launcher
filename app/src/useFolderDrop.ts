@@ -7,6 +7,7 @@ export interface FolderCandidate {
   versions: InstanceVersion[];
   existing_id: string | null;
   blocked: string | null;
+  preferred_version?: string | null;
 }
 interface FolderIssue {
   path: string;
@@ -25,7 +26,7 @@ export interface FolderImportResult {
 interface Options {
   rpc: <T>(op: string, data?: Record<string, unknown>) => Promise<T>;
   sync: () => Promise<void>;
-  select: (id: string) => void;
+  select: (id: string, version?: string | null) => void | Promise<void>;
   busy: () => boolean;
   error: (message: string) => void;
 }
@@ -129,7 +130,12 @@ export function useFolderDrop(options: Options) {
           `${result.failures[0]!.path}\n${result.failures[0]!.message}`,
         );
       await options.sync();
-      if (!disposed && linked[0]) options.select(linked[0].id);
+      if (!disposed && linked[0])
+        await options.select(
+          linked[0].id,
+          state.scan.candidates.find((c) => c.existing_id === linked[0].id)
+            ?.preferred_version,
+        );
     } catch (error) {
       if (!disposed) {
         if (state.phase === "importing")
@@ -175,7 +181,7 @@ export function useFolderDrop(options: Options) {
         } else if (only.existing_id) {
           await options.sync();
           if (disposed || revision !== generation) return;
-          options.select(only.existing_id);
+          await options.select(only.existing_id, only.preferred_version);
           showLinked([{ name: only.name, path: only.path }]);
           state.phase = null;
         } else if (!blocked.value) await importSelected();

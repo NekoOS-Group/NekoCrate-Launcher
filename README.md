@@ -37,6 +37,8 @@
 - 管理版本时，改名只修改显示名称，保留加载器 ID 与磁盘目录；移除版本会检查其他版本的依赖，并将该版本目录移入系统废纸篓／回收站，共享文件保留。四类内容按版本实际工作目录读取，数据包同时列出游戏目录与存档内的内容。
 - 拖入 ZIP 时按内部内容识别资源包、光影、存档或整合包；不匹配的区域会原地说明原因，不自动改投其他位置。手动补齐整合包文件只在任务内的缺失文件框接收。拖动已有资源时，悬停实例图标展开现有版本菜单，悬停折叠箭头展开更多实例；拖出窗口使用系统文件复制，保留源文件。
 - 将文件夹拖入桌面窗口，会在后台查找它及下层隐藏的 `.minecraft`。单个新目录直接关联，多个目录先预览勾选；默认名称取游戏目录的上层文件夹名。同目录不重复添加，游戏文件保持原位。扫描可取消，关联提示显示名称与路径并在 2 秒后消失。
+- 包含 `.minecraft` 的完整 ZIP 会打开新建实例流程，可修改名称并选择启动器数据目录或外部位置；压缩包包含多个游戏目录时先选择其中一个，只解压所选目录，不导入外层启动器或账户凭据。导入复用任务进度界面，取消或失败会清理本次创建的文件，不覆盖已有目录。沿用压缩包限制：最多 10 万项、单文件 1 GiB、总解压大小 8 GiB。
+- 将 `versions` 或 `versions/<版本>` 拖到主界面，会定位并关联所属游戏目录，单个版本还会自动选中；独立版本目录会要求选择目标实例。将版本目录拖到实例图标或版本条目上，可复制到该实例，新建实例也可作为目标；源文件保留，同名版本报冲突。复制会带上现有的基础版本和引用的共享依赖，缺失依赖保留为待下载状态。使用自定义外部工作目录的 HMCL 版本需关联原游戏目录，避免复制后仍读写原存档。
 - 自动 Java 下载依赖 Adoptium/GitHub 网络。无法访问时，可在实例设置中指定对应主版本的本地 Java。
 - macOS 是本地验证平台；Windows/Linux 配置了 CI 构建检查，未经本机实测。
 
@@ -82,15 +84,19 @@ npm --prefix app run tauri build -- --config src-tauri/tauri.local.conf.json
 
 Linux CI 和发布构建使用固定 digest 的 Ubuntu 22.04 预装依赖镜像。镜像升级前在全新的 runner 上比较三次 apt 安装与三次冷拉取；构建缓存自动保留各平台最新代次，定期清理旧标签范围与重复代次。规则、实测数据、手动操作和发布文件说明见 [构建基础设施](docs/build-infrastructure.md)。
 
-开发版本发布由 `.github/workflows/release.yml` 管理：先将提交推送到 `neko_dev` / `main`，再推送 `dev*` 标签；标签任务将构建调度到默认分支，复用跨版本的 Rust 发布缓存（手动发布也选择默认分支），实际源码仍固定为标签提交；发布提前复用相同提交已检查的前端产物，并与剩余 CI 检查并行编译；公开发布仍须等待完整 CI 成功，不再安装前端依赖、重跑检查或重建前端。三个原生 runner 仅安装锁定版本的 Tauri CLI，在编译前检查前端入口与资源，编译后执行实际二进制的 `--verify-frontend`，验证内嵌资源及 IPC 异步对象大小，不打开窗口或用户数据；分别编译并打包 macOS ARM64、Windows AMD64、Ubuntu 22.04 AMD64。全部成功后校验来源提交、架构与 SHA-256，上传 DMG、NSIS EXE、DEB，以及便携 EXE、ELF 和 `.app.tar.gz`，再公开 GitHub 预发布版。若 CI 失败或产物已过期，需要先重跑对应提交的 CI，再重跑发布任务。构建使用 Rust 1.93.1、Node.js 22 和锁定依赖，`docs/releases/<标签>.md` 保存发布说明。`dev0.1` 对应应用版本 `0.1.0-dev.1`；`dev0.2` 对应 `0.2.0-dev.1`；`dev0.3` 对应 `0.3.0-dev.1`；`dev0.3.1` 对应 `0.3.1-dev.1`；`dev0.3.2` 对应 `0.3.2-dev.1`；`dev0.4` 对应 `0.4.0-dev.1`；`dev0.5` 对应 `0.5.0-dev.1`；`dev0.6` 对应 `0.6.0-dev.1`；`dev0.7` 对应 `0.7.0-dev.1`；`dev0.7.1` 对应 `0.7.1-dev.1`；`dev0.8` 对应 `0.8.0-dev.1`；`dev0.9` 对应 `0.9.0-dev.1`；`dev0.9.1` 对应 `0.9.1-dev.1`；`dev0.9.2` 对应 `0.9.2-dev.1`；`dev0.9.3` 对应 `0.9.3-dev.1`；`dev0.9.4` 对应 `0.9.4-dev.1`；`dev0.9.5` 对应 `0.9.5-dev.1`；`dev0.9.6` 对应 `0.9.6-dev.1`；`dev0.9.7` 对应 `0.9.7-dev.1`。
+开发版本发布由 `.github/workflows/release.yml` 管理：先将提交推送到 `neko_dev` / `main`，再推送 `dev*` 标签；标签任务将构建调度到默认分支，复用跨版本的 Rust 发布缓存（手动发布也选择默认分支），实际源码仍固定为标签提交；发布提前复用相同提交已检查的前端产物，并与剩余 CI 检查并行编译；公开发布仍须等待完整 CI 成功，不再安装前端依赖、重跑检查或重建前端。三个原生 runner 仅安装锁定版本的 Tauri CLI，在编译前检查前端入口与资源，编译后执行实际二进制的 `--verify-frontend`，验证内嵌资源及 IPC 异步对象大小，不打开窗口或用户数据；分别编译并打包 macOS ARM64、Windows AMD64、Ubuntu 22.04 AMD64。全部成功后校验来源提交、架构与 SHA-256，上传 DMG、NSIS EXE、DEB，以及便携 EXE、ELF 和 `.app.tar.gz`，再公开 GitHub 预发布版。若 CI 失败或产物已过期，需要先重跑对应提交的 CI，再重跑发布任务。构建使用 Rust 1.93.1、Node.js 22 和锁定依赖，`docs/releases/<标签>.md` 保存发布说明。`dev0.1` 对应应用版本 `0.1.0-dev.1`；`dev0.2` 对应 `0.2.0-dev.1`；`dev0.3` 对应 `0.3.0-dev.1`；`dev0.3.1` 对应 `0.3.1-dev.1`；`dev0.3.2` 对应 `0.3.2-dev.1`；`dev0.4` 对应 `0.4.0-dev.1`；`dev0.5` 对应 `0.5.0-dev.1`；`dev0.6` 对应 `0.6.0-dev.1`；`dev0.7` 对应 `0.7.0-dev.1`；`dev0.7.1` 对应 `0.7.1-dev.1`；`dev0.8` 对应 `0.8.0-dev.1`；`dev0.9` 对应 `0.9.0-dev.1`；`dev0.9.1` 对应 `0.9.1-dev.1`；`dev0.9.2` 对应 `0.9.2-dev.1`；`dev0.9.3` 对应 `0.9.3-dev.1`；`dev0.9.4` 对应 `0.9.4-dev.1`；`dev0.9.5` 对应 `0.9.5-dev.1`；`dev0.9.6` 对应 `0.9.6-dev.1`；`dev0.9.7` 对应 `0.9.7-dev.1`；`dev0.9.8` 对应 `0.9.8-dev.1`。
 
 应用内更新使用 Tauri updater：macOS 安装后的 `.app`、Windows NSIS 安装版、Windows 便携版和 Linux 便携 ELF 支持下载、签名验证、安装替换及重启；开发模式、未安装的 macOS 二进制和 Linux DEB 保留手动安装入口。下载可取消，游戏或下载任务运行时保留准备好的更新，任务结束后点击「安装并重启」。已发布的 dev0.4 及以前版本仍需手动安装一次带更新器的新版本。
 
-发布 workflow 需要仓库 Actions Secret `TAURI_SIGNING_PRIVATE_KEY`，加密私钥另设 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。公钥固定在 `tauri.conf.json`；私钥保存在仓库外并备份，不能提交。发布额外提供 macOS `.app.tar.gz`、`latest.json` 和 `BUILDINFO.json`。构建时生成的签名内嵌到 `latest.json`，不再单独上传 `.sig`；`BUILDINFO.json` 的 `files` 统一记录各安装包和更新清单的大小与 SHA-256，不再提供 `SHA256SUMS` 或 `.app.zip`。更新清单绑定当前发布标签、版本及平台。客户端同时验证 HTTPS、更新签名及签名中的版本；该签名独立于 Apple / Windows 代码签名。
+发布 workflow 需要仓库 Actions Secret `TAURI_SIGNING_PRIVATE_KEY`，加密私钥另设 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。公钥固定在 `tauri.conf.json`；私钥保存在仓库外并备份，不能提交。macOS 的通用 `.app.tar.gz` 同时用于便携运行和两种模式的自动更新，另提供 `latest.json` 和 `BUILDINFO.json`。构建时生成的签名内嵌到 `latest.json`，不再单独上传 `.sig`；`BUILDINFO.json` 的 `files` 统一记录各安装包和更新清单的大小与 SHA-256，不再提供 `SHA256SUMS` 或 `.app.zip`。更新清单绑定当前发布标签、版本及平台。客户端同时验证 HTTPS、更新签名及签名中的版本；该签名独立于 Apple / Windows 代码签名。
 
 GitHub Release 的 macOS 开发包目前仍采用 [Tauri ad-hoc 签名](https://v2.tauri.app/distribute/sign/macos/#ad-hoc-signing)，未做 Apple 公证；本机自签私钥不会上传到 CI。Windows 开发包没有发布者代码签名。Linux 使用英文包名满足包管理器命名要求，桌面入口及窗口仍显示「猫咪盒子启动器」。
 
-便携模式内置于程序：Windows 直接下载 `-portable.exe`，Linux 下载 `.elf`；macOS 解压 `-portable.app.tar.gz` 得到可双击的 `.app`。不依赖程序名称或旁边的标记文件。每次启动使用程序所在目录，首次打开自动关联 `.minecraft`（不存在则创建），设置、Java、索引和任务保存在 `.nekocrate`。只移动程序会使用新位置的数据；需要保留游戏和设置时，关闭启动器后移动整个文件夹。安装版数据独立；旧便携标记仍兼容。Windows 需要 WebView2，Linux ELF 需要系统 GTK / WebKitGTK 运行库，macOS 游戏目录位于 `.app` 旁边。账户凭据留在系统凭据库，换电脑后重新登录。dev0.9.4 便携版和旧 AppImage 需手动迁移一次，详情见 [dev0.9.5 发布说明](docs/releases/dev0.9.5.md)。
+安装版与便携版共用一次编译生成的程序，发布版没有运行模式配置时默认便携运行：Windows 直接下载 `-win-amd64.exe`（安装包仍是 `-win-amd64-setup.exe`），Linux 下载 `.elf`；macOS 解压唯一的 `-mac-appsilicon.app.tar.gz` 得到可双击的 `.app`。安装包额外部署 `nekocrate.runtime.json`（`{"schema":1,"mode":"installed"}`），让同一程序使用系统应用数据目录；Windows 放在 EXE 旁，macOS 放在 `.app/Contents/Resources`，Linux DEB 放在 `/usr/lib/nekocrate-launcher`。macOS 安装版更新前将当前 App 路径登记在系统数据目录的 `runtime-modes` 中，因此替换为通用包后仍使用原数据；新位置的独立副本默认便携运行。CLI 与 `cargo ui` 仍默认使用系统应用数据目录，`NEKOCRATE_DATA_DIR` 仍优先。
+
+合并更新包后，macOS 使用新的统一更新目标。此前发布的 macOS 客户端及 Windows 便携客户端需要手动替换一次：安装版使用 DMG 覆盖原 App，便携版只替换程序并保留旁边的 `.nekocrate` 和 `.minecraft`。旧客户端写死了旧包名或不支持保留包外模式，因此不会将不兼容包伪装成旧更新目标。Windows 安装版和 Linux ELF 的更新入口不变。
+
+便携运行不依赖程序名称：每次启动使用程序所在目录，首次打开自动关联 `.minecraft`（不存在则创建），设置、Java、索引和任务保存在 `.nekocrate`。只移动程序会使用新位置的数据；需要保留游戏和设置时，关闭启动器后移动整个文件夹。安装版数据独立；旧便携标记仍兼容，显式运行模式配置优先。Windows 需要 WebView2，Linux ELF 需要系统 GTK / WebKitGTK / D-Bus 运行库（Debian/Ubuntu 的 D-Bus 包为 `libdbus-1-3`），macOS 游戏目录位于 `.app` 旁边。账户凭据留在系统凭据库，换电脑后重新登录。dev0.9.4 便携版和旧 AppImage 需手动迁移一次，详情见 [dev0.9.5 发布说明](docs/releases/dev0.9.5.md)。
 
 浏览器仅用于界面预览：在仓库根目录执行 `npm --prefix app run dev`。安装、账户和启动等操作需要桌面运行时，浏览器不会模拟成功结果。
 
@@ -144,3 +150,12 @@ scripts/                可复现的真实网络检查
 ## 许可证
 
 Copyright © NekoOS Group。启动器代码采用 [GNU GPL v3.0](LICENSE)（`GPL-3.0-only`）。第三方依赖和 Minecraft 原版素材保留各自的许可与权利声明；原版方块素材来源见 [provenance.json](app/src/assets/blocks/provenance.json)。
+
+### 拖放与 ZIP 导出
+
+- 将版本条目拖到另一个游戏目录图标可复制版本及其本地依赖；已有同名版本或目标正在运行时不覆盖。资源可混合拖入目标版本，预览会按真实类型分组；数据包可直接拖到存档条目。
+- Modrinth / CurseForge 项目链接可拖入窗口或指定版本，打开详情并选择兼容版本。配置文件可拖到已打开的配置编辑器，先比较内容，再备份并替换。
+- 实例设置和版本管理提供 ZIP 导出；也可将实例或版本拖到窗口边缘，松开打开导出面板。ZIP 生成后，可拖到文件管理器或选择保存位置。首次拖出需要先完成打包。
+- 导出面板可选附带 Windows x64、macOS Apple Silicon 或 Linux x64 便携版。启动器从官方发布下载，并验证签名和版本；可执行文件 / `.app` 与 `.minecraft` 并列。不附带当前启动器的账户数据库、凭据或托管 Java 环境；换平台后，缺少的 Java 和平台依赖由启动器补齐。
+- 单版本导出只收集该版本实际需要的本地游戏文件和依赖；`jar` 引用只携带基础 JAR，`inheritsFrom` 则同时携带继承配置。只有整个实例导出才包含其他版本。
+- 未拖出的临时 ZIP 在关闭导出面板时清理。已交给文件管理器的 ZIP 暂时保留，以免中断系统异步复制；超过一天后在下次启动或导出时清理。

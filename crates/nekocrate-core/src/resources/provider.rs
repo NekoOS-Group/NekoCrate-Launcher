@@ -235,7 +235,11 @@ impl Provider {
             Err(error) => Err(error),
         }
     }
-    async fn cf_class(&self, kind: ResourceKind, cancel: &CancellationToken) -> Result<u64> {
+    pub(super) async fn cf_class(
+        &self,
+        kind: ResourceKind,
+        cancel: &CancellationToken,
+    ) -> Result<u64> {
         match kind {
             ResourceKind::Mods => Ok(6),
             ResourceKind::Resourcepacks => Ok(12),

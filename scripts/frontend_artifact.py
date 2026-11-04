@@ -8,6 +8,7 @@ import os
 import shutil
 import tempfile
 from urllib.parse import unquote, urlsplit
+from portable_bundle import RUNTIME_CONFIG
 
 
 class EntryAssets(HTMLParser):
@@ -45,21 +46,39 @@ def verify(directory):
 def embedded(target, portable=False):
     root = Path(__file__).resolve().parents[1]
     suffix = ".exe" if "windows" in target else ""
-    binary = root / "target" / target / "release" / f"{'nekocrate-portable' if portable else 'nekocrate-launcher'}{suffix}"
+    binary = root / "target" / target / "release" / f"nekocrate-launcher{suffix}"
+    if "linux" in target:
+        dynamic = subprocess.check_output(["readelf", "-d", str(binary)], text=True)
+        if "Shared library: [libdbus-1.so.3]" not in dynamic:
+            raise ValueError("Linux releases must use the system libdbus shared library")
     subprocess.run([str(binary), "--verify-frontend"], check=True, timeout=30)
     print(f"Embedded frontend and IPC future size verified: {binary.name}")
     if not portable:
         with tempfile.TemporaryDirectory(prefix="NekoCrate-installed-") as temporary:
             base = Path(temporary)
-            relative = Path("Launcher.app/Contents/MacOS/launcher") if "apple" in target else Path(binary.name)
+            if "apple" in target:
+                relative = Path("Launcher.app/Contents/MacOS/launcher")
+                configuration = base / "Launcher.app/Contents/Resources" / RUNTIME_CONFIG
+            elif "linux" in target:
+                relative = Path("usr/bin/nekocrate-launcher")
+                configuration = base / "usr/lib/nekocrate-launcher" / RUNTIME_CONFIG
+            else:
+                relative = Path(binary.name)
+                configuration = base / RUNTIME_CONFIG
             executable = base / relative
             executable.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(binary, executable)
+            configuration.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(root / "app/src-tauri/resources" / RUNTIME_CONFIG, configuration)
             (base / ".minecraft").mkdir()
             environment = os.environ.copy()
-            environment["NEKOCRATE_DATA_DIR"] = str(base / ".nekocrate")
+            environment["NEKOCRATE_DATA_DIR"] = str(base / "system-data")
             subprocess.run([str(executable), "--verify-installed"], check=True, timeout=30, env=environment)
-        return
+            assert not (base / ".nekocrate").exists()
+            # The same bytes switch mode solely by removing the configuration.
+            configuration.unlink()
+            environment.pop("NEKOCRATE_DATA_DIR", None)
+            subprocess.run([str(executable), "--verify-portable"], check=True, timeout=30, env=environment)
     with tempfile.TemporaryDirectory(prefix="NekoCrate-portable-") as temporary:
         base = Path(temporary) / "NekoCrate 测试"
         base.mkdir()
@@ -84,7 +103,7 @@ def embedded(target, portable=False):
         subprocess.run([str(another), "--verify-portable"], check=True, timeout=30, env=environment)
         assert (fresh / ".nekocrate/portable.json").read_bytes() != identity
         assert not (fresh / "nekocrate.portable.json").exists()
-    print("Marker-free portable startup, rename, relocation and fresh directory verified")
+    print("Shared executable: configuration-selected mode, portable rename, relocation and fresh directory verified")
 
 
 if __name__ == "__main__":

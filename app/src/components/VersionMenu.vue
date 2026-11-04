@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { t } from "../i18n";
+import { gameTransferKey } from "../gameTransfer";
 import { dropInteraction } from "../dropSurface";
 import {
   computed,
+  inject,
   nextTick,
   onBeforeUnmount,
   onMounted,
@@ -28,6 +30,7 @@ const props = defineProps<{
   ) => Promise<boolean>;
   removeVersion: (id: string, version: string) => Promise<boolean>;
 }>();
+const transfer = inject(gameTransferKey, undefined);
 const versions = computed(
   () =>
     props.instance?.versions.map((version) => ({
@@ -68,6 +71,13 @@ const {
   computed(() => props.locked || props.disabled || !expanded.value),
   (version, before) => props.moveVersion(props.instance!.id, version, before),
   (version) => props.removeVersion(props.instance!.id, version),
+  {
+    preview: (version, element, x, y) =>
+      transfer?.preview(props.instance!.id, version, element, x, y),
+    drop: (version, element, x, y) =>
+      transfer?.drop(props.instance!.id, version, element, x, y) || false,
+    finish: () => transfer?.finish(),
+  },
 );
 
 function items() {

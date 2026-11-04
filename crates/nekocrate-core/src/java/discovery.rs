@@ -141,7 +141,7 @@ pub(super) async fn probe_candidates(root: &Path, mut candidates: Vec<PathBuf>) 
                 .push(format!("Java 探测失败：{} · {error:#}", path.display())),
         }
     }
-    found.runtimes.sort_by(|a, b| a.path.cmp(&b.path));
+    crate::sorting::sort_by(&mut found.runtimes, |a, b| a.path.cmp(&b.path));
     found.runtimes.dedup_by(|a, b| a.path == b.path);
     found.failures.sort();
     cache.entries.retain(|path, _| Path::new(path).is_file());

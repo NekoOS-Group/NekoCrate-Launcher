@@ -4,10 +4,6 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[features]
-# Only the desktop entry point differs; core and third-party crates are reused.
-portable = []
-
 [lib]
 name = "nekocrate_desktop"
 # Desktop binaries only need the Rust library; mobile library outputs add links.
@@ -18,7 +14,8 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 anyhow.workspace = true
-tauri = { version = "2", features = [] }
+# Capabilities are fixed at build time; keep all other desktop defaults.
+tauri = { version = "2", default-features = false, features = ["wry", "compression", "common-controls-v6", "x11", "dbus"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 nekocrate-core = { path = "../../crates/nekocrate-core" }
@@ -50,5 +47,5 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
-tauri = { version = "2", features = ["test"] }
+tauri = { version = "2", default-features = false, features = ["test"] }
 tempfile = "3"

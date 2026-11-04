@@ -1,5 +1,6 @@
 use super::*;
 use serde_json::json;
+use std::sync::Arc;
 
 #[tokio::test]
 async fn preparation_is_discoverable_isolated_and_does_not_overwrite_profiles() {
@@ -245,6 +246,11 @@ printf 'generated' > "$target"
     assert!(!version::metadata_path(&game, &id).unwrap().exists());
     assert!(!read_record(&game, &id).unwrap().completed);
     assert!(jar.is_file(), "failed installation retains its installer");
+    let journal_path = game
+        .join("versions")
+        .join(&id)
+        .join(".nekocrate/installation/loader.json");
+    assert!(!journal_path.exists());
     fs::remove_file(game.join("fail-processor")).unwrap();
     launcher.install(&instance.id, &token, &sink).await.unwrap();
     let installer_object = launcher
@@ -255,6 +261,7 @@ printf 'generated' > "$target"
     assert!(!jar.exists());
     assert!(!installer_object.exists());
     assert!(read_record(&game, &id).unwrap().completed);
+    assert!(!journal_path.exists());
     assert_eq!(
         version::resolve(launcher.root(), &game, &id)
             .unwrap()
@@ -286,5 +293,34 @@ printf 'generated' > "$target"
     assert_eq!(
         fs::read_to_string(game.join("processor-runs.txt")).unwrap(),
         format!("{runs}run\n")
+    );
+    // A modpack's prepared-profile checkpoint uses this same validation path.
+    // Valid generated outputs skip processors; changed ones must invalidate it.
+    let saved: serde_json::Value =
+        storage::read_json(&version::metadata_path(&game, &id).unwrap()).unwrap();
+    let current = launcher.instance(&instance.id).unwrap();
+    let record = read_record(&game, &id).unwrap();
+    let downloader = Downloader::new(launcher.root(), launcher.settings()).unwrap();
+    let working = version::instance_working_directory(&game, &current, &id).unwrap();
+    let preparation = installer::Install {
+        root: launcher.root(),
+        game: &game,
+        working_directory: &working,
+        minecraft: &record.minecraft,
+        loader: Some(&record.loader),
+        id: &id,
+        explicit_java: current.java_path.as_deref(),
+        downloader: &downloader,
+        cancel: &token,
+        sink: &sink,
+        auto_java: false,
+    };
+    assert!(preparation.restore(&saved).await.unwrap());
+    let runs = fs::read_to_string(game.join("processor-runs.txt")).unwrap();
+    fs::write(game.join("libraries").join(generated_path), b"corrupted").unwrap();
+    assert!(!preparation.restore(&saved).await.unwrap());
+    assert_eq!(
+        fs::read_to_string(game.join("processor-runs.txt")).unwrap(),
+        runs
     );
 }

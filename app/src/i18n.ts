@@ -27,6 +27,69 @@ export function setLanguage(preference: string, system: string) {
 
 /** Chinese source keys stay readable in templates; interpolate only after translation. */
 export const english: Readonly<Record<string, string>> = {
+  "导出 ZIP": "Export ZIP",
+  附带便携版启动器: "Include portable launcher",
+  平台: "Platform",
+  "生成 ZIP": "Create ZIP",
+  "保存 ZIP": "Save ZIP",
+  "拖到文件管理器，或点击保存": "Drag to your file manager, or click to save",
+  "松开以导出实例 ZIP": "Release to export instance ZIP",
+  "松开以导出版本 ZIP": "Release to export version ZIP",
+  版本已在此实例中: "This version is already in this instance",
+  目标已有同名版本: "The target already contains a version with this name",
+  请拖到目标游戏目录: "Drop onto the target game directory",
+  "复制 {version} 到 {name}": "Copy {version} to {name}",
+  "已复制 {version} 到 {name}": "Copied {version} to {name}",
+  复制版本: "Copy version",
+  请拖到目标存档: "Drop onto the target world",
+  "复制到 {name} · {version}": "Copy to {name} \u00b7 {version}",
+  请一次拖入一个配置文件: "Drop one configuration file at a time",
+  此处只接收配置文件: "This area accepts configuration files only",
+  配置文件格式不匹配: "Configuration formats do not match",
+  比较并替换配置: "Compare and replace configuration",
+  当前内容: "Current contents",
+  导入内容: "Incoming contents",
+  "仅预览变化附近的前 100 行":
+    "Preview limited to 100 lines around the changes",
+  内容相同: "Contents are identical",
+  备份并替换: "Back up and replace",
+  打开项目并选择兼容版本: "Open project and choose a compatible version",
+  "已有 {count} 个同名文件，将检查是否相同":
+    "{count} files share a name; contents will be checked",
+  "导入{kind}到 {name} · {version}":
+    "Import {kind} into {name} \u00b7 {version}",
+  收集游戏文件: "Collect game files",
+  打包游戏文件: "Package game files",
+  获取便携版启动器: "Get portable launcher",
+  加入便携版启动器: "Include portable launcher",
+
+  游戏目录压缩包: "Game directory archive",
+  版本目录: "Version directory",
+  版本集合目录: "Versions directory",
+  导入游戏目录: "Import game directory",
+  导入版本: "Import version",
+  "目标实例已不存在，请重新选择":
+    "The target instance no longer exists; choose another",
+  请逐个导入版本目录: "Import version folders one at a time",
+  检查导入内容: "Check import contents",
+  导入游戏文件: "Import game files",
+  读取版本并关联实例: "Read versions and register instance",
+  "版本配置损坏或与目录名称不一致，请检查版本目录":
+    "The version profile is invalid or does not match the folder name",
+  "此版本使用外部游戏目录，请关联原游戏目录以保留配置和存档":
+    "This version uses an external game directory; link the original game directory to preserve its configuration and worlds",
+  "完整游戏目录需要新建实例，不能合并到已有实例":
+    "A complete game directory must be imported into a new instance",
+  "压缩包中的游戏目录已变化，请重新拖入":
+    "The game directory in the archive has changed; drop it again",
+  "请选择包含同名版本 JSON 的版本目录":
+    "Select a version folder containing its matching version JSON",
+  来源与目标目录不能重叠: "Source and destination directories must not overlap",
+  "目标实例已有同名版本：{id}": "The target already contains version: {id}",
+  "这是独立的版本目录，请拖入启动器并选择目标游戏目录":
+    "Drop this standalone version folder into the launcher to choose a destination",
+  "这是独立的版本目录，请选择目标游戏目录":
+    "Choose a destination for this standalone version folder",
   资源预选: "Select resources",
   排序方式: "Sort by",
   类型: "Category",

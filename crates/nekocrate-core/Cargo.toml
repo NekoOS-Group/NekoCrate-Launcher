@@ -43,7 +43,8 @@ libc = "0.2"
 keyring = { version = "3", features = ["windows-native"] }
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Globalization", "Win32_System_Console", "Win32_System_SystemInformation"] }
 [target.'cfg(target_os = "linux")'.dependencies]
-keyring = { version = "3", features = ["sync-secret-service", "crypto-rust", "vendored"] }
+# GTK/WebKit desktops already provide libdbus; use the system shared library.
+keyring = { version = "3", features = ["sync-secret-service", "crypto-rust"] }
 # Preserve live /etc/localtime changes without unsafe tzset in a multithreaded process.
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 

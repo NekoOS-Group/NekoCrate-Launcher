@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {
   computed,
+  inject,
   nextTick,
   onBeforeUnmount,
   onBeforeUpdate,
@@ -10,6 +11,7 @@ import {
 } from "vue";
 import {
   Box,
+  Archive,
   Play,
   Check,
   FileCode2,
@@ -29,6 +31,9 @@ import {
   Trash2,
   X,
 } from "lucide-vue-next";
+import { resourceArrival } from "../resourceArrival";
+import { gameTransferKey } from "../gameTransfer";
+import { useVersionTransferPointer } from "../useVersionTransferPointer";
 import VersionMetadataPanel from "./VersionMetadataPanel.vue";
 import ResourceSelectionBar from "./ResourceSelectionBar.vue";
 import {
@@ -61,6 +66,7 @@ import type {
 import { anchorModFiles, modFileName, modRowKeys } from "../contentIdentity";
 import type { ModActions } from "../modManagement";
 import type { ResourceRpc } from "../projectPresentation";
+const gameTransfer = inject(gameTransferKey, undefined);
 const props = defineProps<{
   rpc: ResourceRpc;
   initialVersion?: string;
@@ -651,6 +657,17 @@ async function change(remove = false) {
     emit("busy", false);
   }
 }
+const versionTransfer = useVersionTransferPointer(
+  () => props.instance.id,
+  () => props.locked || saving.value,
+  gameTransfer,
+);
+watch(resourceArrival, (arrival) => {
+  if (arrival?.instance === props.instance.id) {
+    selected.value = arrival.version;
+    tab.value = arrival.kind as ContentKind;
+  }
+});
 defineExpose({ refresh });
 </script>
 
@@ -769,7 +786,9 @@ defineExpose({ refresh });
               :style="listRevealStyle(index)"
               :aria-current="item.id === selected ? 'true' : undefined"
               :disabled="saving"
-              @click="selected = item.id"
+              @pointerdown="versionTransfer.start($event, item.id)"
+              @dragstart.prevent
+              @click="!versionTransfer.suppress() && (selected = item.id)"
             >
               <Box :size="18" :class="{ pending: !item.installed }" />
               <span
@@ -814,6 +833,14 @@ defineExpose({ refresh });
               </div>
             </div>
             <div v-else key="actions" class="version-manager-action-row">
+              <button
+                class="text-button"
+                :disabled="locked || saving"
+                :title="t('导出 ZIP')"
+                @click="gameTransfer?.export(instance.id, selected)"
+              >
+                <Archive :size="14" />
+              </button>
               <button
                 class="text-button"
                 :disabled="saving || editingName"

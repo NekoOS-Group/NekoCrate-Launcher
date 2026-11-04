@@ -4,7 +4,7 @@ default-members = ["crates/nekocrate-core", "crates/nekocrate-cli"]
 resolver = "2"
 
 [workspace.package]
-version = "0.9.7-dev.1"
+version = "0.9.8-dev.1"
 edition = "2024"
 license = "GPL-3.0-only"
 rust-version = "1.93"
@@ -18,3 +18,9 @@ tokio-util = "0.7"
 uuid = { version = "1", features = ["v4"] }
 # Share the HTTP client with tauri-plugin-updater; retain ring for TLS.
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "form", "multipart", "stream", "rustls-no-provider", "http2", "system-proxy", "socks"] }
+
+[profile.release]
+# Optimize across crate boundaries. Keep symbols until release_symbols.py saves
+# the matching diagnostic artifact and applies the platform's stripping policy.
+lto = "fat"
+strip = "none"

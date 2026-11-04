@@ -477,7 +477,7 @@ impl Downloader {
         self.full_verification = true;
         self
     }
-    async fn verify(
+    pub(crate) async fn verify(
         &self,
         path: &Path,
         file: &FileSpec,
@@ -614,31 +614,35 @@ impl Downloader {
     pub async fn verified(path: &Path, hash: &str, sha256: bool, size: u64) -> Result<bool> {
         crate::verification::verify_full(path, hash, sha256, size).await
     }
-    pub async fn file(
-        &self,
-        file: &FileSpec,
-        cancel: &CancellationToken,
-        sink: &EventSink,
-    ) -> Result<()> {
-        check_cancel(cancel)?;
-        if let Some(task) = &self.task {
-            task.track(&self.cache, std::slice::from_ref(file)).await?;
-        }
-        let bytes = self.local_bytes(file).await?;
-        let result = self.file_with_progress(file, bytes, cancel, sink).await;
-        self.flush_verification(sink).await;
-        result.map_err(|error| {
-            if cancel.is_cancelled() {
-                return error;
+    // Shared by single-file and batch installation; keep the polling code shared.
+    #[inline(never)]
+    pub fn file<'a>(
+        &'a self,
+        file: &'a FileSpec,
+        cancel: &'a CancellationToken,
+        sink: &'a EventSink,
+    ) -> futures_util::future::BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            check_cancel(cancel)?;
+            if let Some(task) = &self.task {
+                task.track(&self.cache, std::slice::from_ref(file)).await?;
             }
-            DownloadFailures {
-                files: vec![RetryFile {
-                    downloader: self.clone(),
-                    file: file.clone(),
-                }],
-                message: crate::diagnostics::redact(&format!("{error:#}")),
-            }
-            .into()
+            let bytes = self.local_bytes(file).await?;
+            let result = self.file_with_progress(file, bytes, cancel, sink).await;
+            self.flush_verification(sink).await;
+            result.map_err(|error| {
+                if cancel.is_cancelled() {
+                    return error;
+                }
+                DownloadFailures {
+                    files: vec![RetryFile {
+                        downloader: self.clone(),
+                        file: file.clone(),
+                    }],
+                    message: crate::diagnostics::redact(&format!("{error:#}")),
+                }
+                .into()
+            })
         })
     }
     /// A successfully consumed installer is not a reusable game dependency.
@@ -815,223 +819,231 @@ impl Downloader {
         }
         Ok(false)
     }
-    async fn file_inner(
-        &self,
-        file: &FileSpec,
-        cancel: &CancellationToken,
-        sink: &EventSink,
-    ) -> Result<bool> {
-        if cancel.is_cancelled() {
-            bail!("操作已取消");
-        }
-        let cache = self.cache_path(file)?;
-        let key = format!("{}-{}", file.sha256, file.hash);
-        let lock = self
-            .locks
-            .lock()
-            .await
-            .entry(key)
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone();
-        let _guard =
-            tokio::select! { _=cancel.cancelled()=>bail!("操作已取消"), guard=lock.lock()=>guard };
-        if self.restore_cached(file, cancel, sink).await? {
-            return Ok(true);
-        }
-        let bytes = self.partial_bytes(file).await?;
-        file.emit(sink, "queued", bytes, file.size.max(bytes));
-        // Partial network objects survive cancellation and process restarts.
-        // They are never considered complete until the expected hash matches.
-        let part = cache.with_extension("part");
-        let cached = self.verify_visible(&part, file, cancel, sink).await?;
-        if !cached {
-            tokio::fs::create_dir_all(cache.parent().unwrap()).await?;
-            let mut errors = vec![];
-            let mut done = false;
-            let mut connection = self.clone();
-            let mut stalls = 0;
-            'sources: for url in self.ordered_urls(&file.url, cancel).await? {
-                for attempt in 0..=self.settings.retries {
-                    let download = async {
-                        let mut offset = partial_size(&part).await?;
-                        if file.size > 0 && offset >= file.size {
-                            tokio::fs::remove_file(&part).await?;
-                            offset = 0;
-                        }
-                        let mut response =
-                            connection.watched_response(&url, offset, stalls).await?;
-                        // A stale partial or a server without range support can
-                        // safely restart, never append a whole response to it.
-                        if response.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE
-                            && offset > 0
-                        {
-                            sink(Event::new(
-                                "warning",
-                                format!(
-                                    "下载源拒绝续传范围，重新下载此文件：{}",
-                                    file.path.file_name().unwrap_or_default().to_string_lossy()
-                                ),
-                            ));
-                            tokio::fs::remove_file(&part).await?;
-                            offset = 0;
-                            response = connection.watched_response(&url, offset, stalls).await?;
-                        }
-                        let response = response.error_for_status()?;
-                        let length = if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
-                            match range_total(&response, offset, file.size) {
-                                Ok(total) => total,
-                                Err(error) => {
-                                    let _ = tokio::fs::remove_file(&part).await;
-                                    return Err(error);
-                                }
+    // Shared by single-file and batch installation; keep the polling code shared.
+    #[inline(never)]
+    fn file_inner<'a>(
+        &'a self,
+        file: &'a FileSpec,
+        cancel: &'a CancellationToken,
+        sink: &'a EventSink,
+    ) -> futures_util::future::BoxFuture<'a, Result<bool>> {
+        Box::pin(async move {
+            if cancel.is_cancelled() {
+                bail!("操作已取消");
+            }
+            let cache = self.cache_path(file)?;
+            let key = format!("{}-{}", file.sha256, file.hash);
+            let lock = self
+                .locks
+                .lock()
+                .await
+                .entry(key)
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone();
+            let _guard = tokio::select! { _=cancel.cancelled()=>bail!("操作已取消"), guard=lock.lock()=>guard };
+            if self.restore_cached(file, cancel, sink).await? {
+                return Ok(true);
+            }
+            let bytes = self.partial_bytes(file).await?;
+            file.emit(sink, "queued", bytes, file.size.max(bytes));
+            // Partial network objects survive cancellation and process restarts.
+            // They are never considered complete until the expected hash matches.
+            let part = cache.with_extension("part");
+            let cached = self.verify_visible(&part, file, cancel, sink).await?;
+            if !cached {
+                tokio::fs::create_dir_all(cache.parent().unwrap()).await?;
+                let mut errors = vec![];
+                let mut done = false;
+                let mut connection = self.clone();
+                let mut stalls = 0;
+                'sources: for url in self.ordered_urls(&file.url, cancel).await? {
+                    for attempt in 0..=self.settings.retries {
+                        let download = async {
+                            let mut offset = partial_size(&part).await?;
+                            if file.size > 0 && offset >= file.size {
+                                tokio::fs::remove_file(&part).await?;
+                                offset = 0;
                             }
-                        } else {
-                            if offset > 0 {
+                            let mut response =
+                                connection.watched_response(&url, offset, stalls).await?;
+                            // A stale partial or a server without range support can
+                            // safely restart, never append a whole response to it.
+                            if response.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE
+                                && offset > 0
+                            {
                                 sink(Event::new(
                                     "warning",
                                     format!(
-                                        "下载源未支持续传，重新下载此文件：{}",
+                                        "下载源拒绝续传范围，重新下载此文件：{}",
                                         file.path.file_name().unwrap_or_default().to_string_lossy()
                                     ),
                                 ));
+                                tokio::fs::remove_file(&part).await?;
+                                offset = 0;
+                                response =
+                                    connection.watched_response(&url, offset, stalls).await?;
                             }
-                            offset = 0;
-                            response.content_length().unwrap_or(0)
+                            let response = response.error_for_status()?;
+                            let length =
+                                if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+                                    match range_total(&response, offset, file.size) {
+                                        Ok(total) => total,
+                                        Err(error) => {
+                                            let _ = tokio::fs::remove_file(&part).await;
+                                            return Err(error);
+                                        }
+                                    }
+                                } else {
+                                    if offset > 0 {
+                                        sink(Event::new(
+                                            "warning",
+                                            format!(
+                                                "下载源未支持续传，重新下载此文件：{}",
+                                                file.path
+                                                    .file_name()
+                                                    .unwrap_or_default()
+                                                    .to_string_lossy()
+                                            ),
+                                        ));
+                                    }
+                                    offset = 0;
+                                    response.content_length().unwrap_or(0)
+                                };
+                            let total = if file.size > 0 { file.size } else { length };
+                            file.emit(sink, "downloading", offset, total);
+                            let mut stream = response.bytes_stream();
+                            let mut out = tokio::fs::OpenOptions::new()
+                                .create(true)
+                                .write(true)
+                                .append(offset > 0)
+                                .truncate(offset == 0)
+                                .open(&part)
+                                .await?;
+                            let mut bytes = offset;
+                            let mut last = std::time::Instant::now();
+                            let mut cadence = Duration::ZERO;
+                            loop {
+                                let wait = self.stall_policy.wait(cadence, stalls, false);
+                                let started = tokio::time::Instant::now();
+                                let next = tokio::time::timeout(wait, stream.next())
+                                    .await
+                                    .map_err(|_| crate::download_stall::Stalled(wait))?;
+                                let Some(chunk) = next else { break };
+                                // Only network waiting counts; exclude local writes,
+                                // hashing and event delivery from the cadence estimate.
+                                let elapsed = started.elapsed();
+                                cadence = if cadence.is_zero() {
+                                    elapsed
+                                } else {
+                                    (cadence * 3 + elapsed) / 4
+                                };
+                                let chunk = chunk?;
+                                if self.settings.adaptive_concurrency {
+                                    self.metrics
+                                        .bytes
+                                        .fetch_add(chunk.len() as u64, Ordering::Relaxed);
+                                }
+                                bytes += chunk.len() as u64;
+                                if total > 0 && bytes > total {
+                                    drop(out);
+                                    let _ = tokio::fs::remove_file(&part).await;
+                                    bail!("文件大小超过元数据声明");
+                                }
+                                out.write_all(&chunk).await?;
+                                if bytes == offset + chunk.len() as u64
+                                    || last.elapsed() > Duration::from_millis(200)
+                                {
+                                    // Report bytes only after Tokio has finished its
+                                    // pending write, so cancellation can resume them.
+                                    out.flush().await?;
+                                    file.emit(sink, "downloading", bytes, total);
+                                    last = std::time::Instant::now();
+                                }
+                            }
+                            out.flush().await?;
+                            drop(out);
+                            file.emit(sink, "verifying", bytes, total);
+                            if !self.verify(&part, file, cancel).await? {
+                                tokio::fs::remove_file(&part).await?;
+                                bail!("下载文件校验失败");
+                            }
+                            Ok::<_, anyhow::Error>(())
                         };
-                        let total = if file.size > 0 { file.size } else { length };
-                        file.emit(sink, "downloading", offset, total);
-                        let mut stream = response.bytes_stream();
-                        let mut out = tokio::fs::OpenOptions::new()
-                            .create(true)
-                            .write(true)
-                            .append(offset > 0)
-                            .truncate(offset == 0)
-                            .open(&part)
-                            .await?;
-                        let mut bytes = offset;
-                        let mut last = std::time::Instant::now();
-                        let mut cadence = Duration::ZERO;
-                        loop {
-                            let wait = self.stall_policy.wait(cadence, stalls, false);
-                            let started = tokio::time::Instant::now();
-                            let next = tokio::time::timeout(wait, stream.next())
-                                .await
-                                .map_err(|_| crate::download_stall::Stalled(wait))?;
-                            let Some(chunk) = next else { break };
-                            // Only network waiting counts; exclude local writes,
-                            // hashing and event delivery from the cadence estimate.
-                            let elapsed = started.elapsed();
-                            cadence = if cadence.is_zero() {
-                                elapsed
-                            } else {
-                                (cadence * 3 + elapsed) / 4
-                            };
-                            let chunk = chunk?;
-                            if self.settings.adaptive_concurrency {
-                                self.metrics
-                                    .bytes
-                                    .fetch_add(chunk.len() as u64, Ordering::Relaxed);
+                        match tokio::select! { _=cancel.cancelled()=>bail!("操作已取消"), r=download=>r }
+                        {
+                            Ok(()) => {
+                                done = true;
+                                break 'sources;
                             }
-                            bytes += chunk.len() as u64;
-                            if total > 0 && bytes > total {
-                                drop(out);
-                                let _ = tokio::fs::remove_file(&part).await;
-                                bail!("文件大小超过元数据声明");
-                            }
-                            out.write_all(&chunk).await?;
-                            if bytes == offset + chunk.len() as u64
-                                || last.elapsed() > Duration::from_millis(200)
-                            {
-                                // Report bytes only after Tokio has finished its
-                                // pending write, so cancellation can resume them.
-                                out.flush().await?;
-                                file.emit(sink, "downloading", bytes, total);
-                                last = std::time::Instant::now();
-                            }
-                        }
-                        out.flush().await?;
-                        drop(out);
-                        file.emit(sink, "verifying", bytes, total);
-                        if !self.verify(&part, file, cancel).await? {
-                            tokio::fs::remove_file(&part).await?;
-                            bail!("下载文件校验失败");
-                        }
-                        Ok::<_, anyhow::Error>(())
-                    };
-                    match tokio::select! { _=cancel.cancelled()=>bail!("操作已取消"), r=download=>r }
-                    {
-                        Ok(()) => {
-                            done = true;
-                            break 'sources;
-                        }
-                        Err(e) => {
-                            let stalled =
-                                e.downcast_ref::<crate::download_stall::Stalled>().is_some();
-                            let certificate = crate::network::is_certificate_error(&e);
-                            let e = crate::network::explain_error(e);
-                            // Invalid responses/hash failures may have discarded
-                            // the partial. Reflect the actual retained bytes.
-                            let bytes = self.partial_bytes(file).await?;
-                            file.emit(sink, "queued", bytes, file.size.max(bytes));
-                            if self.settings.adaptive_concurrency && !stalled {
-                                self.metrics.retries.fetch_add(1, Ordering::Relaxed);
-                            }
-                            errors.push(format!("{e:#}"));
-                            // A new attempt cannot fix this certificate. Still
-                            // allow a separately verified mirror to succeed.
-                            if certificate || attempt == self.settings.retries {
-                                break;
-                            }
-                            if stalled {
-                                stalls += 1;
-                                let message = format!(
-                                    "{e}；保留 {bytes} 字节并重新连接：{}",
-                                    file.path.file_name().unwrap_or_default().to_string_lossy()
-                                );
-                                sink(Event::new("warning", &message));
-                                let root = self.network_root.clone();
-                                let worker = connection.clone();
-                                // Client/TLS setup and log I/O must not block all
-                                // other download futures on the runtime thread.
-                                connection = tokio::task::spawn_blocking(move || {
-                                    let _ = crate::diagnostics::record_download_recovery(
-                                        &root, &message,
+                            Err(e) => {
+                                let stalled =
+                                    e.downcast_ref::<crate::download_stall::Stalled>().is_some();
+                                let certificate = crate::network::is_certificate_error(&e);
+                                let e = crate::network::explain_error(e);
+                                // Invalid responses/hash failures may have discarded
+                                // the partial. Reflect the actual retained bytes.
+                                let bytes = self.partial_bytes(file).await?;
+                                file.emit(sink, "queued", bytes, file.size.max(bytes));
+                                if self.settings.adaptive_concurrency && !stalled {
+                                    self.metrics.retries.fetch_add(1, Ordering::Relaxed);
+                                }
+                                errors.push(format!("{e:#}"));
+                                // A new attempt cannot fix this certificate. Still
+                                // allow a separately verified mirror to succeed.
+                                if certificate || attempt == self.settings.retries {
+                                    break;
+                                }
+                                if stalled {
+                                    stalls += 1;
+                                    let message = format!(
+                                        "{e}；保留 {bytes} 字节并重新连接：{}",
+                                        file.path.file_name().unwrap_or_default().to_string_lossy()
                                     );
-                                    let mut worker = worker;
-                                    worker.reconnect()?;
-                                    Ok::<_, anyhow::Error>(worker)
-                                })
-                                .await??;
+                                    sink(Event::new("warning", &message));
+                                    let root = self.network_root.clone();
+                                    let worker = connection.clone();
+                                    // Client/TLS setup and log I/O must not block all
+                                    // other download futures on the runtime thread.
+                                    connection = tokio::task::spawn_blocking(move || {
+                                        let _ = crate::diagnostics::record_download_recovery(
+                                            &root, &message,
+                                        );
+                                        let mut worker = worker;
+                                        worker.reconnect()?;
+                                        Ok::<_, anyhow::Error>(worker)
+                                    })
+                                    .await??;
+                                }
+                                sink(Event::new(
+                                    "retry",
+                                    format!(
+                                        "重试 {}（{}/{}）",
+                                        file.path.file_name().unwrap_or_default().to_string_lossy(),
+                                        attempt + 1,
+                                        self.settings.retries + 1
+                                    ),
+                                ));
                             }
-                            sink(Event::new(
-                                "retry",
-                                format!(
-                                    "重试 {}（{}/{}）",
-                                    file.path.file_name().unwrap_or_default().to_string_lossy(),
-                                    attempt + 1,
-                                    self.settings.retries + 1
-                                ),
-                            ));
                         }
+                        tokio::select! { _=cancel.cancelled()=>bail!("操作已取消"), _=tokio::time::sleep(Duration::from_millis(300*(1<<attempt)))=>{} }
                     }
-                    tokio::select! { _=cancel.cancelled()=>bail!("操作已取消"), _=tokio::time::sleep(Duration::from_millis(300*(1<<attempt)))=>{} }
+                }
+                if !done {
+                    bail!("下载失败 {}：{}", file.path.display(), errors.join("；"));
                 }
             }
-            if !done {
-                bail!("下载失败 {}：{}", file.path.display(), errors.join("；"));
+            if cache.exists() {
+                tokio::fs::remove_file(&cache).await?;
             }
-        }
-        if cache.exists() {
-            tokio::fs::remove_file(&cache).await?;
-        }
-        tokio::fs::rename(&part, &cache).await?;
-        self.verification.forget(&part);
-        self.verification
-            .remember(&cache, &file.hash, file.sha256)
-            .await?;
-        file.emit(sink, "installing", file.size, file.size);
-        self.copy_cached(file, &cache, cancel).await?;
-        Ok(cached)
+            tokio::fs::rename(&part, &cache).await?;
+            self.verification.forget(&part);
+            self.verification
+                .remember(&cache, &file.hash, file.sha256)
+                .await?;
+            file.emit(sink, "installing", file.size, file.size);
+            self.copy_cached(file, &cache, cancel).await?;
+            Ok(cached)
+        })
     }
     pub async fn batch(
         &self,
@@ -1084,149 +1096,160 @@ impl Downloader {
             result = inventory => result,
         }
     }
-    async fn batch_inner(
-        &self,
+    // Fixed and streaming plans use the same scheduler. Type erasure avoids
+    // replicating its polling state machine in each enclosing installation.
+    #[inline(never)]
+    fn batch_inner<'a>(
+        &'a self,
         files: Vec<FileSpec>,
         mut batches: Option<tokio::sync::mpsc::Receiver<Vec<FileSpec>>>,
-        cancel: &CancellationToken,
-        sink: &EventSink,
-    ) -> Result<()> {
-        let aggregate = Arc::new(std::sync::Mutex::new(BatchProgress::new(&[])));
-        let _final_progress = FinalProgress {
-            sink: sink.clone(),
-            state: aggregate.clone(),
-        };
-        let state = aggregate.clone();
-        let forward = sink.clone();
-        let sink: EventSink = Arc::new(move |event| {
-            let progress = if event.kind == "file" {
-                state.lock().unwrap().update(&event)
-            } else {
-                None
+        cancel: &'a CancellationToken,
+        sink: &'a EventSink,
+    ) -> futures_util::future::BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let aggregate = Arc::new(std::sync::Mutex::new(BatchProgress::new(&[])));
+            let _final_progress = FinalProgress {
+                sink: sink.clone(),
+                state: aggregate.clone(),
             };
-            forward(event);
-            if let Some(progress) = progress {
-                forward(progress);
-            }
-        });
-        let mut incoming = Some(files);
-        let mut seen = std::collections::HashSet::new();
-        let mut queue = std::collections::VecDeque::new();
-        let mut completed = 0;
-        let mut failures = Vec::new();
-        let mut errors = Vec::new();
-        let mut active = FuturesUnordered::new();
-        let mut concurrency = crate::download_concurrency::Concurrency::new(
-            if self.settings.adaptive_concurrency {
-                crate::download_concurrency::MAX_CONCURRENCY
-            } else {
-                self.settings.concurrency
-            },
-            self.settings.adaptive_concurrency,
-            self.metrics.bytes.load(Ordering::Relaxed),
-            self.metrics.retries.load(Ordering::Relaxed),
-        );
-        let period = Duration::from_secs(1);
-        let mut sampled_at = tokio::time::Instant::now();
-        let mut sample = tokio::time::interval_at(sampled_at + period, period);
-        sample.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        loop {
-            check_cancel(cancel)?;
-            if let Some(files) = incoming.take() {
-                let mut unique = std::collections::BTreeMap::new();
-                for file in files {
-                    if !seen.contains(&file.path) {
-                        unique.insert(file.path.clone(), file);
+            let state = aggregate.clone();
+            let forward = sink.clone();
+            let sink: EventSink = Arc::new(move |event| {
+                let progress = if event.kind == "file" {
+                    state.lock().unwrap().update(&event)
+                } else {
+                    None
+                };
+                forward(event);
+                if let Some(progress) = progress {
+                    forward(progress);
+                }
+            });
+            let mut incoming = Some(files);
+            let mut seen = std::collections::HashSet::new();
+            let mut queue = std::collections::VecDeque::new();
+            let mut completed = 0;
+            let mut failures = Vec::new();
+            let mut errors = Vec::new();
+            let mut active = FuturesUnordered::new();
+            let mut concurrency = crate::download_concurrency::Concurrency::new(
+                if self.settings.adaptive_concurrency {
+                    crate::download_concurrency::MAX_CONCURRENCY
+                } else {
+                    self.settings.concurrency
+                },
+                self.settings.adaptive_concurrency,
+                self.metrics.bytes.load(Ordering::Relaxed),
+                self.metrics.retries.load(Ordering::Relaxed),
+            );
+            let period = Duration::from_secs(1);
+            let mut sampled_at = tokio::time::Instant::now();
+            let mut sample = tokio::time::interval_at(sampled_at + period, period);
+            sample.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                check_cancel(cancel)?;
+                if let Some(files) = incoming.take() {
+                    let mut unique = std::collections::BTreeMap::new();
+                    for file in files {
+                        if !seen.contains(&file.path) {
+                            unique.insert(file.path.clone(), file);
+                        }
+                    }
+                    seen.extend(unique.keys().cloned());
+                    let inventoried = self
+                        .inventory(unique.into_values().collect(), cancel)
+                        .await?;
+                    let planned: Vec<_> =
+                        inventoried.iter().map(|(_, file)| file.clone()).collect();
+                    let reset = aggregate.lock().unwrap().files.is_empty();
+                    aggregate.lock().unwrap().extend(&planned);
+                    queue.extend(inventoried);
+                    for chunk in planned.chunks(256) {
+                        sink(Event {
+                            files: chunk.to_vec(),
+                            ..Event::new("file_plan", "")
+                        });
+                    }
+                    sink(Event {
+                        reset_progress: reset,
+                        ..aggregate.lock().unwrap().event()
+                    });
+                    if !planned.is_empty() {
+                        sink(Event::new("stage", "复用缓存并下载缺失文件"));
                     }
                 }
-                seen.extend(unique.keys().cloned());
-                let inventoried = self
-                    .inventory(unique.into_values().collect(), cancel)
-                    .await?;
-                let planned: Vec<_> = inventoried.iter().map(|(_, file)| file.clone()).collect();
-                let reset = aggregate.lock().unwrap().files.is_empty();
-                aggregate.lock().unwrap().extend(&planned);
-                queue.extend(inventoried);
-                for chunk in planned.chunks(256) {
-                    sink(Event {
-                        files: chunk.to_vec(),
-                        ..Event::new("file_plan", "")
+                while active.len() < concurrency.limit {
+                    let Some((file, known)) = queue.pop_front() else {
+                        break;
+                    };
+                    let sink = sink.clone();
+                    active.push(async move {
+                        let mut result = self
+                            .file_with_progress(&file, known.downloaded, cancel, &sink)
+                            .await;
+                        if let Some(urls) = self.mirrors.get(&file.path) {
+                            for url in urls.iter().filter(|u| **u != file.url) {
+                                if result.is_ok() {
+                                    break;
+                                }
+                                check_cancel(cancel)?;
+                                let alternative = FileSpec {
+                                    url: url.clone(),
+                                    ..file.clone()
+                                };
+                                result = self
+                                    .file_with_progress(
+                                        &alternative,
+                                        known.downloaded,
+                                        cancel,
+                                        &sink,
+                                    )
+                                    .await;
+                            }
+                        }
+                        Ok::<_, anyhow::Error>((file, result))
                     });
                 }
-                sink(Event {
-                    reset_progress: reset,
-                    ..aggregate.lock().unwrap().event()
-                });
-                if !planned.is_empty() {
-                    sink(Event::new("stage", "复用缓存并下载缺失文件"));
-                }
-            }
-            while active.len() < concurrency.limit {
-                let Some((file, known)) = queue.pop_front() else {
+                if active.is_empty() && batches.is_none() {
                     break;
-                };
-                let sink = sink.clone();
-                active.push(async move {
-                    let mut result = self
-                        .file_with_progress(&file, known.downloaded, cancel, &sink)
-                        .await;
-                    if let Some(urls) = self.mirrors.get(&file.path) {
-                        for url in urls.iter().filter(|u| **u != file.url) {
-                            if result.is_ok() {
-                                break;
+                }
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => bail!("操作已取消"),
+                    chunk = async { batches.as_mut().unwrap().recv().await }, if batches.is_some() => {
+                        if let Some(files) = chunk { incoming = Some(files); }
+                        else { batches = None; }
+                    }
+                    result = active.next(), if !active.is_empty() => {
+                        let (file, result) = result.expect("active downloads exist")?;
+                        match result {
+                            Ok(()) => completed += 1,
+                            Err(error) => {
+                                errors.push(crate::diagnostics::redact(&format!("{error:#}")));
+                                failures.push(RetryFile {downloader:self.clone(),file});
                             }
-                            check_cancel(cancel)?;
-                            let alternative = FileSpec {
-                                url: url.clone(),
-                                ..file.clone()
-                            };
-                            result = self
-                                .file_with_progress(&alternative, known.downloaded, cancel, &sink)
-                                .await;
                         }
                     }
-                    Ok::<_, anyhow::Error>((file, result))
-                });
-            }
-            if active.is_empty() && batches.is_none() {
-                break;
-            }
-            tokio::select! {
-                biased;
-                _ = cancel.cancelled() => bail!("操作已取消"),
-                chunk = async { batches.as_mut().unwrap().recv().await }, if batches.is_some() => {
-                    if let Some(files) = chunk { incoming = Some(files); }
-                    else { batches = None; }
-                }
-                result = active.next(), if !active.is_empty() => {
-                    let (file, result) = result.expect("active downloads exist")?;
-                    match result {
-                        Ok(()) => completed += 1,
-                        Err(error) => {
-                            errors.push(crate::diagnostics::redact(&format!("{error:#}")));
-                            failures.push(RetryFile {downloader:self.clone(),file});
-                        }
+                    _ = sample.tick(), if self.settings.adaptive_concurrency && !queue.is_empty() => {
+                        let now = tokio::time::Instant::now();
+                        concurrency.observe(self.metrics.bytes.load(Ordering::Relaxed), self.metrics.retries.load(Ordering::Relaxed), completed, now - sampled_at, active.len());
+                        sampled_at = now;
                     }
                 }
-                _ = sample.tick(), if self.settings.adaptive_concurrency && !queue.is_empty() => {
-                    let now = tokio::time::Instant::now();
-                    concurrency.observe(self.metrics.bytes.load(Ordering::Relaxed), self.metrics.retries.load(Ordering::Relaxed), completed, now - sampled_at, active.len());
-                    sampled_at = now;
+            }
+            if !failures.is_empty() {
+                return Err(DownloadFailures {
+                    message: format!(
+                        "{} 个文件下载失败，其余文件已保留。{}",
+                        failures.len(),
+                        errors.first().map(String::as_str).unwrap_or("")
+                    ),
+                    files: failures,
                 }
+                .into());
             }
-        }
-        if !failures.is_empty() {
-            return Err(DownloadFailures {
-                message: format!(
-                    "{} 个文件下载失败，其余文件已保留。{}",
-                    failures.len(),
-                    errors.first().map(String::as_str).unwrap_or("")
-                ),
-                files: failures,
-            }
-            .into());
-        }
-        Ok(())
+            Ok(())
+        })
     }
 }
 

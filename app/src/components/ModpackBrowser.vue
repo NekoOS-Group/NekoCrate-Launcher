@@ -36,6 +36,7 @@ import type {
 
 type PackVersion = ResourceVersion & { games: string[]; loaders: string[] };
 const props = defineProps<{
+  initialProject?: { platform: ResourcePlatform; project: ResourceProject };
   searchTarget?: HTMLElement;
   filterTarget?: HTMLElement;
   busy: boolean;
@@ -61,7 +62,9 @@ const emit = defineEmits<{
   close: [];
   detail: [active: boolean];
 }>();
-const platform = ref<ResourcePlatform>("modrinth");
+const platform = ref<ResourcePlatform>(
+  props.initialProject?.platform || "modrinth",
+);
 const query = ref("");
 const sort = ref("relevance");
 const category = ref("");
@@ -342,7 +345,8 @@ watch([platform, sort, category], () => {
   void search();
 });
 onMounted(() => {
-  void search();
+  if (props.initialProject) choose(props.initialProject.project);
+  else void search();
   void loadCategories();
 });
 onBeforeUnmount(() => {

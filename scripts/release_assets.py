@@ -16,17 +16,16 @@ import portable_bundle
 ROOT = Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "artifacts" / "release"
 TARGETS = {
-    "aarch64-apple-darwin": ("mac-appsilicon", [".dmg", "-portable.app.tar.gz"]),
-    "x86_64-pc-windows-msvc": ("win-amd64", ["-setup.exe", "-portable.exe"]),
+    "aarch64-apple-darwin": ("mac-appsilicon", [".dmg", ".app.tar.gz"]),
+    "x86_64-pc-windows-msvc": ("win-amd64", ["-setup.exe", ".exe"]),
     "x86_64-unknown-linux-gnu": ("linux-amd64", [".deb", ".elf"]),
 }
 UPDATERS = {
-    "aarch64-apple-darwin": ("darwin-aarch64", ".app.tar.gz", "macos"),
+    "aarch64-apple-darwin": ("darwin-aarch64-unified", ".app.tar.gz", "standalone"),
     "x86_64-pc-windows-msvc": ("windows-x86_64", "-setup.exe", "nsis"),
-    "x86_64-unknown-linux-gnu": ("linux-x86_64-elf", ".elf", "portable"),
+    "x86_64-unknown-linux-gnu": ("linux-x86_64-elf", ".elf", "standalone"),
 }
 PORTABLE_UPDATERS = {
-    "aarch64-apple-darwin": "darwin-aarch64-portable",
     "x86_64-pc-windows-msvc": "windows-x86_64-portable-exe",
 }
 RELEASES_URL = "https://github.com/NekoOS-Group/NekoCrate-Launcher/releases/download"
@@ -146,7 +145,7 @@ def portable(tag, target):
     platform, _ = TARGETS[target]
     release = ROOT / "target" / target / "release"
     bundles = release / "bundle"
-    binary = release / ("nekocrate-portable.exe" if platform == "win-amd64" else "nekocrate-portable")
+    binary = release / ("nekocrate-launcher.exe" if platform == "win-amd64" else "nekocrate-launcher")
     verify_architecture(binary, target)
     app = only(bundles / "macos", "*.app") if platform == "mac-appsilicon" else None
     destination = portable_bundle.archive_path(release, tag, platform)
@@ -182,7 +181,8 @@ def collect(tag, target):
     portable_archive = portable_bundle.archive_path(release, tag, platform)
     copy(portable_archive, portable_bundle.SUFFIXES[platform])
     updater_target, updater_suffix, updater_directory = UPDATERS[target]
-    updater_source = only(bundles / updater_directory, "*" + updater_suffix.removeprefix("-setup"))
+    updater_source = (portable_archive if updater_directory == "standalone" else
+                      only(bundles / updater_directory, "*" + updater_suffix.removeprefix("-setup")))
     if updater_suffix not in TARGETS[target][1]:
         copy(updater_source, updater_suffix)
     # Tauri still generates a signature beside its bundle. Transport its content
@@ -212,6 +212,8 @@ def verify(tag):
         expected = {"tag": tag, "version": app_version, "commit": revision, "platform": platform, "target": target}
         if any(manifest.get(key) != value for key, value in expected.items()):
             raise ValueError(f"Build metadata does not match release: {platform}")
+        if target not in PORTABLE_UPDATERS and "portable_updater" in manifest:
+            raise ValueError(f"Unexpected separate portable updater: {platform}")
         expected_names = {f"NekoCrate-Launcher-{tag}-{platform}{suffix}" for suffix in suffixes}
         updater_target, updater_suffix, _ = UPDATERS[target]
         updater_file = f"NekoCrate-Launcher-{tag}-{platform}{updater_suffix}"

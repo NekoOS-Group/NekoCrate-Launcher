@@ -146,7 +146,7 @@ fn parse_categories(value: &serde_json::Value, platform: Platform) -> Result<Vec
             })
         })
         .collect();
-    categories.sort_by_cached_key(|c| c.name.to_lowercase());
+    crate::sorting::sort_by_cached_key(&mut categories, |c| c.name.to_lowercase());
     categories.dedup_by(|a, b| a.id == b.id);
     Ok(categories)
 }

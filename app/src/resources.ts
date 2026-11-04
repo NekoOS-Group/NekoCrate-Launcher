@@ -44,8 +44,18 @@ export interface DetectedResource {
   path: string;
   name: string;
   kinds: ResourceKind[];
-  format: "resource" | "modpack" | "directory" | "unknown";
+  format:
+    | "resource"
+    | "modpack"
+    | "directory"
+    | "unknown"
+    | "instance_archive"
+    | "version_directory"
+    | "versions_directory";
   issue: string | null;
+  game_directories?: { prefix: string; name: string }[];
+  game_directory?: string;
+  version?: string;
 }
 export interface ResourcePlan {
   id: string;
@@ -73,6 +83,8 @@ export interface ResourceSession {
   version: string;
   kind: ResourceKind;
   files?: DetectedResource[];
+  world?: string;
+  project?: ResourceProject;
 }
 export function resourceDropTarget(
   element: Element | null,
@@ -100,6 +112,9 @@ export const resourceKindLabel = (kind: string): string =>
         saves: "存档",
         modpack: "整合包",
         directory: "游戏目录",
+        instance_archive: "游戏目录压缩包",
+        version_directory: "版本目录",
+        versions_directory: "版本集合目录",
         version: "游戏资源",
         instance: "游戏资源 / 整合包",
       } as Record<string, string>
@@ -119,13 +134,20 @@ export function resourceDropIssue(
     return t("请拖到目标版本或对应的资源区域");
   const mismatch = files.find((file) =>
     kind === "version"
-      ? file.format !== "resource"
+      ? !["resource", "version_directory"].includes(file.format)
       : kind === "instance"
-        ? !["resource", "modpack"].includes(file.format)
-        : kind === "modpack" || kind === "directory"
-          ? file.format !== kind
-          : file.format !== "resource" ||
-            !file.kinds.includes(kind as ResourceKind),
+        ? !["resource", "modpack", "version_directory"].includes(file.format)
+        : kind === "directory"
+          ? ![
+              "directory",
+              "versions_directory",
+              "version_directory",
+              "instance_archive",
+            ].includes(file.format)
+          : kind === "modpack"
+            ? file.format !== kind
+            : file.format !== "resource" ||
+              !file.kinds.includes(kind as ResourceKind),
   );
   if (mismatch)
     return t("{name} 是{actual}，此处只接收{expected}", {
@@ -139,8 +161,20 @@ export function resourceDropIssue(
 }
 export function routeResourceDrop(
   files: readonly DetectedResource[],
-): "resources" | "modpack" | "folders" | "mixed" {
-  if (files.length && files.every((f) => f.format === "directory"))
+): "resources" | "modpack" | "folders" | "game" | "mixed" {
+  if (
+    files.length === 1 &&
+    ["instance_archive", "version_directory"].includes(files[0].format)
+  )
+    return "game";
+  if (
+    files.length &&
+    files.every(
+      (f) =>
+        ["directory", "versions_directory"].includes(f.format) ||
+        (f.format === "version_directory" && f.game_directory),
+    )
+  )
     return "folders";
   if (files.length === 1 && files[0].format === "modpack") return "modpack";
   if (files.length && files.every((f) => f.format === "resource"))

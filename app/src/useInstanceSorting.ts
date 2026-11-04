@@ -8,6 +8,9 @@ import {
   watch,
   type Ref,
 } from "vue";
+import { exportEdge } from "./gameTransfer.ts";
+import { showDropHint, clearDropHint } from "./dropSurface.ts";
+import { t } from "./i18n.ts";
 import type { Instance } from "./types";
 import {
   instanceGridDropTarget,
@@ -29,6 +32,7 @@ export function useInstanceSorting(
   removal?: {
     allowed: (id: string) => boolean;
     remove: (id: string) => Promise<boolean>;
+    export?: (id: string) => void;
   },
 ) {
   const strip = ref<HTMLElement>();
@@ -271,6 +275,15 @@ export function useInstanceSorting(
   }
   function animate() {
     updateTarget();
+    if (
+      pointer &&
+      draggedId.value &&
+      removal?.export &&
+      !trashHovered.value &&
+      exportEdge(pointer.x, pointer.y)
+    )
+      showDropHint(null, t("松开以导出实例 ZIP"));
+    else clearDropHint();
     frame = requestAnimationFrame(animate);
   }
   function start(event: PointerEvent, id: string) {
@@ -334,6 +347,12 @@ export function useInstanceSorting(
     const previous = pointer;
     const id = draggedId.value;
     const target = beforeId.value;
+    const shouldExport =
+      commit &&
+      id &&
+      removal?.export &&
+      !trashHovered.value &&
+      exportEdge(previous.x, previous.y);
     const shouldMove = commit && id && dropAllowed.value;
     const shouldRemove =
       commit && id && trashHovered.value && trashAllowed.value;
@@ -342,7 +361,13 @@ export function useInstanceSorting(
     frame = 0;
     if (previous.target.hasPointerCapture(previous.id))
       previous.target.releasePointerCapture(previous.id);
+    clearDropHint();
     if (!id) return;
+    if (shouldExport) {
+      clearPreview();
+      removal?.export?.(id);
+      return;
+    }
     settling.value = true;
     if (shouldRemove) {
       dropAllowed.value = false;

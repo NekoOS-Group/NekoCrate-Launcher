@@ -26,7 +26,11 @@ export function isResourceDragKind(kind: string): kind is ResourceDragKind {
 export function isResourceCopyKind(kind: string): kind is ResourceCopyKind {
   return kind === "mods" || kind === "resourcepacks" || kind === "shaderpacks";
 }
-export type ResourceDestination = { instance: string; version: string };
+export type ResourceDestination = {
+  instance: string;
+  version: string;
+  world?: string;
+};
 export const resourceTransferKey: InjectionKey<
   (
     event: PointerEvent,
@@ -56,7 +60,9 @@ function copyIssue(
     kind,
   );
   if (mismatch) return mismatch;
-  if (!isResourceCopyKind(source.kind)) return t("此资源可拖出到文件管理器");
+  const world =
+    element?.closest<HTMLElement>("[data-drop-world]")?.dataset.dropWorld;
+  if (source.kind === "datapacks" && !world) return t("请拖到目标存档");
   const target = resourceDropTarget(element, instances);
   if (!target) return t("请拖到目标版本");
   if (!target.instance.versions.find((v) => v.id === target.version)?.installed)
@@ -64,7 +70,8 @@ function copyIssue(
   if (running.includes(target.instance.id)) return t("请先结束目标实例的游戏");
   if (
     target.instance.id === source.instance &&
-    target.version === source.version
+    target.version === source.version &&
+    source.kind !== "datapacks"
   )
     return t("资源已在此版本中");
 }
@@ -76,7 +83,13 @@ export function resourceCopyDestination(
 ): ResourceDestination | undefined {
   if (copyIssue(element, source, instances, running)) return;
   const target = resourceDropTarget(element, instances)!;
-  return { instance: target.instance.id, version: target.version };
+  const world =
+    element?.closest<HTMLElement>("[data-drop-world]")?.dataset.dropWorld;
+  return {
+    instance: target.instance.id,
+    version: target.version,
+    ...(world ? { world } : {}),
+  };
 }
 
 export function useResourceTransfer(options: {
@@ -93,6 +106,10 @@ export function useResourceTransfer(options: {
   ) => Promise<void>;
   exportMany?: (sources: ResourceCopySource[]) => Promise<unknown>;
   export?: (source: ResourceCopySource) => Promise<unknown>;
+  preview?: (
+    sources: ResourceCopySource[],
+    target: ResourceDestination,
+  ) => Promise<string | undefined>;
   browse?: (element: Element | null) => void;
   finishBrowse?: () => void;
   error?: (error: unknown) => void;
@@ -116,12 +133,19 @@ export function useResourceTransfer(options: {
       }
     | undefined;
   let frame = 0;
+  let previewKey = "",
+    previewMessage: string | undefined;
+  let previewInvalid = false;
+  const previews = new Map<string, Promise<string | undefined>>();
   let clickTimer: ReturnType<typeof setTimeout> | undefined;
   const suppressClick = (event: MouseEvent) => {
     event.preventDefault();
     event.stopImmediatePropagation();
   };
   function clearClickGuard() {
+    previews.clear();
+    previewKey = "";
+    previewMessage = undefined;
     clearTimeout(clickTimer);
     document.removeEventListener("click", suppressClick, true);
   }
@@ -145,14 +169,46 @@ export function useResourceTransfer(options: {
           options.instances(),
           options.running(),
         );
+    const key = target ? JSON.stringify([pending.sources, target]) : "";
+    if (key !== previewKey) {
+      previewKey = key;
+      previewMessage = undefined;
+      previewInvalid = false;
+      if (target && options.preview) {
+        if (!previews.has(key))
+          previews.set(key, options.preview(pending.sources, target));
+        void previews
+          .get(key)!
+          .then((message) => {
+            if (previewKey === key) {
+              previewMessage = message;
+              if (drag.value) hit(drag.value.x, drag.value.y);
+            }
+          })
+          .catch((error) => {
+            if (previewKey === key) {
+              previewMessage = String(error);
+              previewInvalid = true;
+              if (drag.value) hit(drag.value.x, drag.value.y);
+            }
+          });
+      }
+    }
     if (surface)
       showDropHint(
         surface,
-        issue || t("复制到 {version}", { version: target!.version }),
-        !!issue,
+        issue ||
+          previewMessage ||
+          t("复制到 {name} · {version}", {
+            name:
+              options.instances().find((i) => i.id === target!.instance)
+                ?.name || "",
+            version: target!.world || target!.version,
+          }),
+        !!issue || previewInvalid,
       );
     else clearDropHint();
-    return target;
+    return previewInvalid ? undefined : target;
   }
   function scroll() {
     const state = drag.value;

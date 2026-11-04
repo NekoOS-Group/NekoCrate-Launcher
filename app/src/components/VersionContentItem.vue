@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { configDifference, type DroppedConfig } from "../configDrop";
+import { resourceArrival, arrivalFileKey } from "../resourceArrival";
 import {
   computed,
   defineAsyncComponent,
@@ -390,6 +392,88 @@ async function showConfig() {
     if (ticket === configRequest) configLoading.value = false;
   }
 }
+const incomingConfig = ref<DroppedConfig>();
+const configDiff = computed(() =>
+  configDifference(configText.value, incomingConfig.value?.text || ""),
+);
+async function receiveConfig(event: Event) {
+  const detail = (event as CustomEvent<{ paths: string[] }>).detail;
+  if (
+    !props.rpc ||
+    !configDocument.value ||
+    props.locked ||
+    configLoading.value ||
+    modSaving.value
+  )
+    return;
+  try {
+    if (detail.paths.length !== 1) throw new Error(t("请一次拖入一个配置文件"));
+    const input = await props.rpc<DroppedConfig>("read_dropped_config", {
+      path: detail.paths[0],
+    });
+    const extension = configDocument.value.path.split(".").pop()?.toLowerCase();
+    if (input.format !== extension) throw new Error(t("配置文件格式不匹配"));
+    incomingConfig.value = input;
+  } catch (e) {
+    emit("error", e);
+  }
+}
+async function applyConfigDrop() {
+  const doc = configDocument.value,
+    input = incomingConfig.value;
+  if (!input || !doc || !props.modActions || props.locked || modSaving.value)
+    return;
+  modSaving.value = true;
+  const ticket = configRequest;
+  try {
+    const saved = await props.modActions.save(
+      props.instanceId,
+      props.version,
+      props.file.file_name,
+      doc.path,
+      doc.revision,
+      input.text,
+    );
+    configDrafts.delete(configKey(props.instanceId, props.version, doc.path));
+    if (ticket === configRequest) {
+      configDocument.value = saved;
+      configText.value = saved.text;
+      incomingConfig.value = undefined;
+    }
+  } catch (e) {
+    emit("error", e);
+  } finally {
+    modSaving.value = false;
+  }
+}
+watch(
+  () => configDocument.value?.path,
+  () => {
+    incomingConfig.value = undefined;
+  },
+);
+watch(
+  resourceArrival,
+  async (arrival) => {
+    if (
+      !arrival ||
+      arrival.instance !== props.instanceId ||
+      arrival.version !== props.version ||
+      Date.now() - arrival.time > 3000 ||
+      !arrival.files.includes(arrivalFileKey(props.kind, props.file.file_name))
+    )
+      return;
+    highlighted.value = true;
+    clearTimeout(highlightTimer);
+    highlightTimer = setTimeout(() => {
+      highlighted.value = false;
+    }, 2200);
+    await nextTick();
+    if (arrival.files[0] === arrivalFileKey(props.kind, props.file.file_name))
+      row.value?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  },
+  { immediate: true },
+);
 async function saveConfig() {
   const doc = configDocument.value;
   if (
@@ -626,6 +710,10 @@ onBeforeUnmount(() => {
     ref="row"
     tabindex="-1"
     class="content-item"
+    :data-resource-instance="kind === 'saves' ? instanceId : undefined"
+    :data-resource-version="kind === 'saves' ? version : undefined"
+    :data-drop-kind="kind === 'saves' ? 'datapacks' : undefined"
+    :data-drop-world="kind === 'saves' ? file.file_name : undefined"
     :class="{
       'is-expanded': expanded,
       'is-selected': selected,
@@ -842,8 +930,46 @@ onBeforeUnmount(() => {
             <section
               v-if="configOpen && modActions"
               class="mod-config"
+              data-drop-kind="config"
+              :data-drop-disabled="
+                locked || configLoading || modSaving || !configDocument
+                  ? 'true'
+                  : undefined
+              "
+              @nekocrate-file-drop="receiveConfig"
               :aria-label="t('配置')"
             >
+              <div v-if="incomingConfig" class="config-drop-preview">
+                <header>
+                  <strong>{{ incomingConfig.name }}</strong
+                  ><button
+                    class="text-button"
+                    @click="incomingConfig = undefined"
+                  >
+                    {{ t("取消") }}
+                  </button>
+                </header>
+                <div class="config-diff">
+                  <section>
+                    <small>{{ t("当前内容") }}</small>
+                    <pre>{{ configDiff.before }}</pre>
+                  </section>
+                  <section>
+                    <small>{{ t("导入内容") }}</small>
+                    <pre>{{ configDiff.after }}</pre>
+                  </section>
+                </div>
+                <small v-if="configDiff.truncated">{{
+                  t("仅预览变化附近的前 100 行")
+                }}</small>
+                <button
+                  class="text-button"
+                  :disabled="modSaving || locked || configDiff.same"
+                  @click="applyConfigDrop"
+                >
+                  {{ t(configDiff.same ? "内容相同" : "备份并替换") }}
+                </button>
+              </div>
               <div class="mod-config-frame">
                 <div class="mod-config-toolbar">
                   <span :id="`${panelId}-config-label`" hidden>{{
@@ -1635,5 +1761,45 @@ span.content-item-toggle {
 }
 .content-state-button:disabled {
   cursor: default;
+}
+</style>
+
+<style scoped>
+.config-drop-preview {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px dashed var(--accent);
+  margin-bottom: 12px;
+  min-width: 0;
+}
+.config-drop-preview header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.config-diff {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  min-width: 0;
+}
+.config-diff section {
+  min-width: 0;
+}
+.config-diff pre {
+  overflow: auto;
+  max-height: 180px;
+  font: 11px/1.6 monospace;
+  margin: 6px 0;
+  background: rgba(0, 0, 0, 0.12);
+  padding: 8px;
+}
+.config-diff section:first-child pre {
+  border-inline-start: 2px solid #df8989;
+}
+.config-diff section:last-child pre {
+  border-inline-start: 2px solid #69dcb5;
 }
 </style>

@@ -71,7 +71,7 @@ const emit = defineEmits<{
   cancel: [];
   retry: [file: string];
   continue: [];
-  installed: [];
+  installed: [plan: ResourcePlan];
 }>();
 const categories = [
   { value: "mods", label: "Mods", icon: Package, color: "#69dcb5" },
@@ -87,7 +87,7 @@ const target = shallowRef<ResourceTarget>();
 const project = shallowRef<ResourceProject>();
 const versions = shallowRef<ResourceVersion[]>([]);
 const chosen = ref("");
-const world = ref("");
+const world = ref(props.session.world || "");
 const loadingVersions = ref(false);
 const preparing = ref(false);
 const installing = ref(false);
@@ -97,6 +97,20 @@ const pending = shallowRef<ResourcePlan[]>([]);
 const files = ref<DetectedResource[]>(props.session.files || []);
 const selectedKinds = ref<Record<string, ResourceKind>>({});
 const local = ref(!!props.session.files?.length);
+const fileGroups = computed(() =>
+  [
+    ...categories.map((category) => ({
+      label: category.label,
+      files: files.value.filter(
+        (file) => selectedKinds.value[file.path] === category.value,
+      ),
+    })),
+    {
+      label: "选择资源类型",
+      files: files.value.filter((file) => !selectedKinds.value[file.path]),
+    },
+  ].filter((group) => group.files.length),
+);
 const icon = (category: ResourceKind) =>
   categories.find((c) => c.value === category)?.icon || Package;
 const versionTitle = computed(() =>
@@ -276,7 +290,7 @@ async function install() {
     complete.value = await props.install(plan.value);
     if (complete.value) {
       pending.value = pending.value.filter((p) => p.id !== plan.value?.id);
-      emit("installed");
+      emit("installed", plan.value!);
     }
   } finally {
     installing.value = false;
@@ -295,7 +309,7 @@ watch(
       return;
     complete.value = true;
     pending.value = pending.value.filter((p) => p.id !== plan.value!.id);
-    emit("installed");
+    emit("installed", plan.value!);
   },
 );
 watch([kind, platform, local], () => {
@@ -309,6 +323,12 @@ watch(query, () => {
   feed.invalidate(true);
   timer = setTimeout(() => void search(), 250);
 });
+watch(
+  () => props.session.world,
+  (value) => {
+    if (value && !blocked.value) world.value = value;
+  },
+);
 watch(
   () => props.session.files,
   (value) => {
@@ -324,8 +344,10 @@ onMounted(async () => {
     });
     if (disposed) return;
     target.value = result;
-    if (result.worlds.length === 1) world.value = result.worlds[0];
-    void search();
+    if (!world.value && result.worlds.length === 1)
+      world.value = result.worlds[0];
+    if (props.session.project) void selectProject(props.session.project);
+    else void search();
     const plans = await props.rpc<ResourcePlan[]>("resource_plans", {
       id: scope.value.id,
       version: scope.value.version,
@@ -578,47 +600,61 @@ onBeforeUnmount(() => {
               data-catalog-viewport
             >
               <template v-if="local">
-                <div
-                  v-for="(file, index) in files"
-                  :key="file.path"
-                  class="resource-local-row list-reveal-item"
-                  :style="listRevealStyle(index)"
+                <section
+                  v-for="group in fileGroups"
+                  :key="group.label"
+                  class="resource-import-group"
                 >
-                  <component :is="icon(selectedKinds[file.path])" :size="22" />
-                  <div>
-                    <strong>{{ file.name }}</strong
-                    ><small :title="file.path">{{ file.path }}</small
-                    ><span
-                      v-if="file.issue || file.format !== 'resource'"
-                      class="resource-conflict"
-                      >{{
-                        file.issue
-                          ? translateMessage(file.issue)
-                          : t("未识别的资源文件")
-                      }}</span
-                    >
+                  <h3>
+                    {{ t(group.label) }} <small>{{ group.files.length }}</small>
+                  </h3>
+                  <div
+                    v-for="(file, index) in group.files"
+                    :key="file.path"
+                    class="resource-local-row list-reveal-item"
+                    :style="listRevealStyle(index)"
+                  >
+                    <component
+                      :is="icon(selectedKinds[file.path])"
+                      :size="22"
+                    />
+                    <div>
+                      <strong>{{ file.name }}</strong
+                      ><small :title="file.path">{{ file.path }}</small
+                      ><span
+                        v-if="file.issue || file.format !== 'resource'"
+                        class="resource-conflict"
+                        >{{
+                          file.issue
+                            ? translateMessage(file.issue)
+                            : t("未识别的资源文件")
+                        }}</span
+                      >
+                    </div>
+                    <GlassSelect
+                      v-if="file.kinds.length > 1"
+                      :id="`kind-${files.indexOf(file)}`"
+                      :model-value="selectedKinds[file.path] || ''"
+                      compact
+                      floating
+                      :options="[
+                        { value: '', label: '选择资源类型' },
+                        ...categories.filter((c) =>
+                          file.kinds.includes(c.value),
+                        ),
+                      ]"
+                      @update:model-value="
+                        selectedKinds[file.path] = $event as ResourceKind
+                      "
+                    />
+                    <small v-else>{{
+                      t(
+                        categories.find((c) => c.value === file.kinds[0])
+                          ?.label || "",
+                      )
+                    }}</small>
                   </div>
-                  <GlassSelect
-                    v-if="file.kinds.length > 1"
-                    :id="`kind-${files.indexOf(file)}`"
-                    :model-value="selectedKinds[file.path] || ''"
-                    compact
-                    floating
-                    :options="[
-                      { value: '', label: '选择资源类型' },
-                      ...categories.filter((c) => file.kinds.includes(c.value)),
-                    ]"
-                    @update:model-value="
-                      selectedKinds[file.path] = $event as ResourceKind
-                    "
-                  />
-                  <small v-else>{{
-                    t(
-                      categories.find((c) => c.value === file.kinds[0])
-                        ?.label || "",
-                    )
-                  }}</small>
-                </div>
+                </section>
               </template>
               <div v-else-if="project" class="resource-detail">
                 <div
@@ -1110,5 +1146,23 @@ onBeforeUnmount(() => {
     gap: 12px;
     padding: 20px;
   }
+}
+</style>
+
+<style scoped>
+.resource-import-group {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 16px;
+}
+.resource-import-group h3 {
+  font-size: 12px;
+  display: flex;
+  gap: 8px;
+  margin: 2px 0 6px;
+  color: var(--accent);
+}
+.resource-import-group h3 small {
+  opacity: 0.6;
 }
 </style>

@@ -13,6 +13,12 @@ pub struct DetectedResource {
     pub kinds: Vec<ResourceKind>,
     pub format: String,
     pub issue: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub game_directories: Vec<crate::game_import::ArchiveDirectory>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub game_directory: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
     #[serde(skip)]
     pub(super) prefix: Option<String>,
 }
@@ -54,10 +60,31 @@ pub(super) fn inspect(path: &Path) -> Result<DetectedResource> {
         kinds: Vec::new(),
         format: "unknown".into(),
         issue: None,
+        game_directories: Vec::new(),
+        game_directory: None,
+        version: None,
         prefix: None,
     };
     let mut names = HashSet::new();
     if meta.is_dir() {
+        result.version = crate::game_import::directory_version(path);
+        if let Some((game, _)) = crate::game_import::directory_owner(path) {
+            result.game_directory = Some(game);
+            result.format = if result.version.is_some() {
+                "version_directory"
+            } else {
+                "versions_directory"
+            }
+            .into();
+            return Ok(result);
+        }
+        if result.version.is_some() {
+            result.format = "version_directory".into();
+            return Ok(result);
+        }
+        if crate::game_import::has_version_profile(path) {
+            bail!("版本配置损坏或与目录名称不一致，请检查版本目录");
+        }
         for marker in [
             "level.dat",
             "level.dat_old",
@@ -90,6 +117,18 @@ pub(super) fn inspect(path: &Path) -> Result<DetectedResource> {
         }
         let archive = archive_support::open(path)?;
         names.extend(archive.file_names().map(str::to_owned));
+        if extension != "jar" {
+            result.game_directories = crate::game_import::archive_directories(
+                archive.file_names(),
+                path.file_stem()
+                    .and_then(|p| p.to_str())
+                    .unwrap_or("Minecraft"),
+            );
+            if !result.game_directories.is_empty() {
+                result.format = "instance_archive".into();
+                return Ok(result);
+            }
+        }
         if names.contains("modrinth.index.json") || names.contains("manifest.json") {
             // A generic manifest.json is not necessarily a CurseForge modpack.
             let mut archive = archive_support::open(path)?;
@@ -196,6 +235,17 @@ impl Launcher {
         version: &str,
         cancel: &CancellationToken,
     ) -> Result<Option<ResourcePlan>> {
+        self.prepare_resource_copies_to(sources, id, version, None, cancel)
+    }
+
+    pub fn prepare_resource_copies_to(
+        &self,
+        sources: &[ResourceCopySource],
+        id: &str,
+        version: &str,
+        world: Option<&str>,
+        cancel: &CancellationToken,
+    ) -> Result<Option<ResourcePlan>> {
         let _directory_guard = self.idle(id)?;
         anyhow::ensure!(
             !sources.is_empty() && sources.len() <= 256,
@@ -209,13 +259,19 @@ impl Launcher {
             anyhow::ensure!(
                 matches!(
                     source.kind,
-                    ResourceKind::Mods | ResourceKind::Resourcepacks | ResourceKind::Shaderpacks
+                    ResourceKind::Mods
+                        | ResourceKind::Resourcepacks
+                        | ResourceKind::Shaderpacks
+                        | ResourceKind::Datapacks
+                        | ResourceKind::Saves
                 ),
                 "此资源类型不支持跨版本复制"
             );
             let path = self.resource_export_path(source)?;
             let origin = self.resource_target(&source.instance, &source.version)?;
-            if origin.directory != target.directory && paths.insert(path.clone()) {
+            if (origin.directory != target.directory || source.kind == ResourceKind::Datapacks)
+                && paths.insert(path.clone())
+            {
                 inputs.push(LocalImport {
                     path,
                     kind: Some(source.kind),
@@ -227,7 +283,7 @@ impl Launcher {
         }
         // Validate the whole batch before publishing any file. The normal
         // installer retains provenance, disabled states and conflict handling.
-        let plan = self.prepare_local_resources_inner(id, version, &inputs, None, cancel, true)?;
+        let plan = self.prepare_local_resources_inner(id, version, &inputs, world, cancel, true)?;
         if !plan.conflicts.is_empty() || plan.entries.iter().all(|entry| entry.reuse) {
             // This new plan has no staged data. Failed/idempotent drags must not
             // accumulate unfinished tasks in the target version.
@@ -257,6 +313,9 @@ impl Launcher {
                     kinds: Vec::new(),
                     format: "unknown".into(),
                     issue: Some(error.to_string()),
+                    game_directories: Vec::new(),
+                    game_directory: None,
+                    version: None,
                     prefix: None,
                 })
             })
@@ -421,7 +480,7 @@ pub(super) fn tree(path: &Path) -> Result<Vec<(String, PathBuf, u64)>> {
         }
         files.push((relative, entry.path().to_owned(), size));
     }
-    files.sort_by(|a, b| a.0.cmp(&b.0));
+    crate::sorting::sort_by(&mut files, |a, b| a.0.cmp(&b.0));
     Ok(files)
 }
 pub(super) fn fingerprint(path: &Path, cancel: &CancellationToken) -> Result<(String, u64)> {

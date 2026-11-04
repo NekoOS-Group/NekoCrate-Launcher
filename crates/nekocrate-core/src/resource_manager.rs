@@ -253,7 +253,7 @@ impl Launcher {
                 java: info,
             });
         }
-        runtimes.sort_by(|a, b| {
+        crate::sorting::sort_by(&mut runtimes, |a, b| {
             b.java
                 .major
                 .cmp(&a.java.major)
@@ -554,7 +554,7 @@ impl Launcher {
             ensure!(skin.id == id, "皮肤记录与目录不匹配");
             skins.push(skin);
         }
-        skins.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
+        crate::sorting::sort_by(&mut skins, |a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
         Ok(skins)
     }
     pub fn import_saved_skin(&self, path: &Path) -> Result<SavedSkin> {

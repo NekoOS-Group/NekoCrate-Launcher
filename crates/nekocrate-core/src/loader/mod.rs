@@ -2,12 +2,10 @@
 use crate::{Launcher, download::Downloader, model::*, storage, version};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use std::{
-    path::{Path, PathBuf},
-    sync::{Arc, Mutex},
-};
+use std::path::{Path, PathBuf};
 use tokio_util::sync::CancellationToken;
 mod catalog;
+mod install_plan;
 pub(crate) mod installer;
 pub use catalog::LoaderVersion;
 
@@ -215,84 +213,21 @@ impl Launcher {
         } else {
             downloader
         };
-        sink(Event::workflow("metadata", "解析游戏版本"));
-        let state = Arc::new(Mutex::new((record.clone(), std::time::Instant::now())));
-        let captured = state.clone();
-        let forward = sink.clone();
-        let launcher = self.clone();
-        let instance_id = id.to_owned();
-        let version_id = selected.to_owned();
-        let game_copy = game.clone();
-        let progress: EventSink = Arc::new(move |mut event| {
-            let mut state = captured.lock().unwrap();
-            let step = event.step.as_deref().unwrap_or("metadata");
-            let start = match step {
-                "loader" => 5.0,
-                "files" => 45.0,
-                "natives" => 90.0,
-                "java" => 95.0,
-                _ => 0.0,
-            };
-            let span = match step {
-                "loader" => 40.0,
-                "files" => 45.0,
-                _ => 0.0,
-            };
-            let fraction = if event.total_bytes > 0 {
-                event.bytes as f64 / event.total_bytes as f64
-            } else if event.total > 0 {
-                event.completed as f64 / event.total as f64
-            } else {
-                0.0
-            };
-            state.0.progress = state
-                .0
-                .progress
-                .max(start + span * fraction.clamp(0.0, 1.0))
-                .min(99.0);
-            event.overall_progress = Some(state.0.progress);
-            if state.1.elapsed().as_secs_f32() >= 1.0 || event.kind == "workflow" {
-                let saved = record_path(&game_copy, &version_id)
-                    .and_then(|p| storage::write_json(&p, &state.0))
-                    .and_then(|_| {
-                        launcher.save_download_progress(&instance_id, &version_id, state.0.progress)
-                    });
-                if let Err(error) = saved {
-                    forward(Event::new("warning", format!("保存下载进度失败：{error}")));
-                }
-                state.1 = std::time::Instant::now();
-            }
-            drop(state);
-            forward(event);
-        });
-        let result = installer::Install {
-            root: self.root(),
-            game: &game,
-            working_directory: &version::instance_working_directory(&game, &instance, selected)?,
-            minecraft: &record.minecraft,
-            loader: Some(&record.loader),
-            id: selected,
-            explicit_java: instance.java_path.as_deref(),
-            downloader: &downloader,
-            cancel,
-            sink: &progress,
+        install_plan::LoaderInstall {
+            launcher: self,
+            id,
+            selected,
+            game,
+            record,
+            instance,
+            downloader,
             auto_java: settings.auto_java,
+            cancel,
+            sink: &sink,
+            profile: None,
         }
         .run()
-        .await;
-        record.progress = state.lock().unwrap().0.progress;
-        storage::write_json(&record_path(&game, selected)?, &record)?;
-        self.save_download_progress(id, selected, record.progress)?;
-        let profile = result?;
-        crate::download::check_cancel(cancel)?;
-        sink(Event::workflow("finalize", "完成安装"));
-        storage::write_json(&version::metadata_path(&game, selected)?, &profile)?;
-        record.completed = true;
-        record.progress = 100.0;
-        storage::write_json(&record_path(&game, selected)?, &record)?;
-        self.set_installed(id, selected, true)?;
-        downloader.finish_installation(&sink).await;
-        sink(Event::new("complete", "游戏与加载器已安装"));
+        .await?;
         Ok(())
     }
 }

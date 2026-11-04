@@ -124,6 +124,11 @@
       "asset": "slime_block.png",
       "archive_entry": "assets/minecraft/textures/block/slime_block.png",
       "sha256": "9175dd2ac2a6e93c0e5c3b46e5006fd9f230ee005b7da3ea109f6d872e30209d"
+    },
+    {
+      "asset": "mossy_cobblestone.png",
+      "archive_entry": "assets/minecraft/textures/block/mossy_cobblestone.png",
+      "sha256": "1c069f0513d01272d5e9951e96ca3d9279c34400a88c3c47d52d79b9ac21ef2f"
     }
   ]
 }

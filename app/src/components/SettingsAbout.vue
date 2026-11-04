@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ExternalLink } from "lucide-vue-next";
 import { t } from "../i18n";
-import launcherIcon from "../assets/neko-cat.png";
+import launcherIcon from "../assets/neko-cat-ui.webp";
 import { listRevealStyle } from "../listMotion";
 
 defineProps<{ version: string }>();

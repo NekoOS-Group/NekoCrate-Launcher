@@ -1,5 +1,52 @@
 /** Launcher-owned messages only. Game output and user-supplied values are never translated. */
 export const backendEnglish: Readonly<Record<string, string>> = {
+  "有任务正在运行，请稍后导出": "Wait for the current task before exporting",
+  "导出目录包含符号链接：{path}": "The export contains a symbolic link: {path}",
+  导出文件数量过多: "Too many files to export",
+  "导出内容超过 ZIP 导入大小限制": "The export exceeds the ZIP import limits",
+  导出文件存在大小写冲突: "Export filenames conflict when ignoring case",
+  "导出文件过大：{path}": "The export file is too large: {path}",
+  "导出期间文件发生变化，请重试":
+    "Files changed during export; please try again",
+  导出文件已不存在: "The exported file no longer exists",
+  导出文件信息无效: "Invalid export record",
+  导出文件名无效: "Invalid export filename",
+  来源版本不存在: "The source version no longer exists",
+  "来源版本使用独立目录，请先将目标实例的版本隔离设为独立":
+    "The source uses an isolated directory; enable version isolation in the target first",
+  "版本独立目录与共享游戏文件冲突，请先检查版本隔离设置":
+    "Isolated and shared game files conflict; check version isolation settings",
+  不支持的便携版平台: "Unsupported portable platform",
+  此平台暂无便携版: "No portable build is available for this platform",
+  该版本没有便携版更新索引: "This release has no portable update index",
+  便携版索引过大: "The portable update index is too large",
+  便携版索引版本不匹配: "The portable update index has a different version",
+  便携版下载地址无效: "Invalid portable download URL",
+  便携版缺少签名: "The portable build has no signature",
+  便携版文件过大: "The portable build is too large",
+  未配置启动器公钥: "The launcher public key is not configured",
+  便携版签名与版本不匹配: "The portable signature does not match its version",
+  "便携版不是 Windows 可执行文件":
+    "The portable build is not a Windows executable",
+  "便携版不是 Linux 可执行文件": "The portable build is not a Linux executable",
+  "便携版 App 路径无效": "Invalid portable app path",
+  "便携版 App 含不支持的链接": "The portable app contains unsupported links",
+  "便携版 App 过大": "The portable app is too large",
+  请选择普通配置文件: "Choose a regular configuration file",
+  此处只接收配置文件: "This area accepts configuration files only",
+  "配置文件必须是 UTF-8 文本": "Configuration files must use UTF-8 text",
+  配置文件含有二进制内容: "The configuration file contains binary data",
+  项目链接过长: "The project link is too long",
+  "请选择 HTTPS 项目链接": "Use an HTTPS project link",
+  "只支持 Modrinth / CurseForge 的 Minecraft 项目链接":
+    "Only Minecraft project links from Modrinth / CurseForge are supported",
+  不支持的项目分类: "Unsupported project category",
+  链接分类与项目内容不符: "The link category does not match the project",
+  "目标实例已有同名版本：{id}":
+    "The target already contains a version named {id}",
+  "此版本使用外部游戏目录，请先关联对应游戏目录":
+    "This version uses an external working directory; link that directory first",
+
   "环境变量名称重复：{name}": "Duplicate environment variable: {name}",
   "Java 版玩家名称须为 3–16 位英文字母、数字或下划线":
     "Use 3–16 letters, numbers or underscores for your Java Edition name",

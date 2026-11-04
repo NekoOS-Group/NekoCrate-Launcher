@@ -78,8 +78,7 @@ class ReleaseUpdateTests(unittest.TestCase):
         portable = release.portable_bundle.archive_path(bundles.parent, "dev9.9.9", "mac-appsilicon")
         portable.parent.mkdir()
         portable.write_bytes(b"portable fixture")
-        Path(str(portable) + ".sig").write_text(self.signature())
-        signature = bundles / "macos/Test.app.tar.gz.sig"
+        signature = Path(str(portable) + ".sig")
         signature.write_text(self.signature())
         with patch.object(release, "verify_architecture"), patch.object(release.subprocess, "run") as command:
             release.collect("dev9.9.9", target)
@@ -87,7 +86,6 @@ class ReleaseUpdateTests(unittest.TestCase):
         self.assertEqual({p.name for p in self.output.iterdir()}, {
             "build-mac-appsilicon.json", "NekoCrate-Launcher-dev9.9.9-mac-appsilicon.dmg",
             "NekoCrate-Launcher-dev9.9.9-mac-appsilicon.app.tar.gz",
-            "NekoCrate-Launcher-dev9.9.9-mac-appsilicon-portable.app.tar.gz",
         })
         manifest = release.read_json(self.output / "build-mac-appsilicon.json")
         self.assertEqual(manifest["updater"]["signature"], self.signature())
@@ -97,7 +95,7 @@ class ReleaseUpdateTests(unittest.TestCase):
         self.make_platform_manifests()
         release.verify("dev9.9.9")
         manifest = release.read_json(self.output / "latest.json")
-        self.assertEqual(set(manifest["platforms"]), {"darwin-aarch64", "darwin-aarch64-portable", "windows-x86_64", "linux-x86_64-elf", "windows-x86_64-portable-exe"})
+        self.assertEqual(set(manifest["platforms"]), {"darwin-aarch64-unified", "windows-x86_64", "linux-x86_64-elf", "windows-x86_64-portable-exe"})
         self.assertEqual(manifest["version"], "9.9.9")
         for platform in manifest["platforms"].values():
             self.assertTrue(platform["url"].startswith(release.RELEASES_URL + "/dev9.9.9/"))
@@ -105,7 +103,7 @@ class ReleaseUpdateTests(unittest.TestCase):
         info = release.read_json(self.output / "BUILDINFO.json")
         self.assertEqual(info["schema_version"], 2)
         self.assertEqual(info["commit"], "fixture")
-        self.assertEqual(len(info["files"]), 8)  # Seven packages plus latest.json.
+        self.assertEqual(len(info["files"]), 7)  # Six packages plus latest.json.
         self.assertEqual({item["name"] for item in info["files"]}, {
             p.name for p in self.output.iterdir() if p.name.startswith("NekoCrate-")
         } | {"latest.json"})
@@ -117,6 +115,10 @@ class ReleaseUpdateTests(unittest.TestCase):
         self.assertFalse(list(self.output.glob("*.sig")))
         self.assertFalse(list(self.output.glob("*.zip")))
         self.assertFalse(list(self.output.glob("*.AppImage")))
+        self.assertFalse(list(self.output.glob("*-portable*")))
+        self.assertEqual(len(list(self.output.glob("*.app.tar.gz"))), 1)
+        self.assertNotIn("darwin-aarch64", manifest["platforms"])
+        self.assertNotIn("darwin-aarch64-portable", manifest["platforms"])
         self.assertNotIn("linux-x86_64", manifest["platforms"])
         self.assertNotIn("windows-x86_64-portable", manifest["platforms"])
 
@@ -142,7 +144,9 @@ class ReleaseUpdateTests(unittest.TestCase):
         for name in ("SHA256SUMS", "NekoCrate-Launcher-dev9.9.9-mac-appsilicon.app.zip",
                      "NekoCrate-Launcher-dev9.9.9-mac-appsilicon.app.tar.gz.sig",
                      "NekoCrate-Launcher-dev9.9.9-linux-amd64.AppImage",
-                     "NekoCrate-Launcher-dev9.9.9-win-amd64-portable.zip"):
+                     "NekoCrate-Launcher-dev9.9.9-win-amd64-portable.zip",
+                     "NekoCrate-Launcher-dev9.9.9-win-amd64-portable.exe",
+                     "NekoCrate-Launcher-dev9.9.9-mac-appsilicon-portable.app.tar.gz"):
             with self.subTest(name=name):
                 stale = self.output / name
                 stale.write_text("old attachment")

@@ -221,7 +221,7 @@ impl Launcher {
     ) -> Result<()> {
         let _operation = self.0.operation.lock().await;
         let _directory_guard = self.idle(id)?;
-        let (mut plan, directory) = {
+        let (plan, directory) = {
             // Serialize the target snapshot/checkpoint with isolation edits. No network work
             // or await holds this short lock, and unrelated settings remain editable.
             let _layout = self.0.layout.lock().unwrap();
@@ -247,22 +247,92 @@ impl Launcher {
             (plan, directory)
         };
         let game = self.available_game_dir(id)?;
-        let mut downloader = Downloader::new(self.root(), self.settings())?.for_installation(
+        let downloader = Downloader::new(self.root(), self.settings())?.for_installation(
             self.root(),
             id,
             &game,
             version,
             &format!("resource:{task}"),
         )?;
-        if plan.complete {
-            index_plan(&downloader, &plan).await?;
-            downloader.finish_installation(sink).await;
-            return Ok(());
-        }
         let sink = Event::scoped(sink, id, None);
-        sink(Event::workflow("resource_check", "检查资源与目标目录"));
+        use crate::installation::{Plan, Step};
+        let steps = [
+            Step::new("resource_check", "检查资源与目标目录"),
+            Step::new("resource_files", "下载与暂存资源"),
+            Step::new("resource_commit", "校验并安装资源"),
+        ]
+        .map(|step| {
+            if plan.complete {
+                Step::silent(step.id)
+            } else {
+                step
+            }
+        });
+        let execution = Plan(&steps);
+        let mut install = ResourceInstall {
+            launcher: self,
+            id,
+            directory,
+            plan: Some(plan),
+            downloader,
+            cancel,
+            sink: &sink,
+        };
+        execution.run(&mut install, cancel, &sink).await?;
+        let plan = install.plan.as_ref().context("资源安装计划缺失")?;
+        index_plan(&install.downloader, plan).await?;
+        let _ = remove_staged(&safe_join(&install.directory, "stage")?);
+        install.downloader.finish_installation(&sink).await;
+        sink(Event::workflow("finalize", "资源安装完成"));
+        Ok(())
+    }
+}
+
+struct ResourceInstall<'a> {
+    launcher: &'a Launcher,
+    id: &'a str,
+    directory: PathBuf,
+    plan: Option<ResourcePlan>,
+    downloader: Downloader,
+    cancel: &'a CancellationToken,
+    sink: &'a EventSink,
+}
+impl crate::installation::Handler for ResourceInstall<'_> {
+    fn restore<'a>(
+        &'a mut self,
+        _step: crate::installation::Step,
+    ) -> futures_util::future::BoxFuture<'a, Result<bool>> {
+        Box::pin(async move { Ok(self.plan.as_ref().context("资源安装计划缺失")?.complete) })
+    }
+    fn checkpoint(&mut self, step: crate::installation::Step) -> Result<()> {
+        if step.id == "resource_commit" {
+            let plan = self.plan.as_mut().context("资源安装计划缺失")?;
+            plan.complete = true;
+            save_plan(plan)?;
+        }
+        Ok(())
+    }
+    fn execute<'a>(
+        &'a mut self,
+        step: crate::installation::Step,
+    ) -> crate::installation::StepFuture<'a> {
+        Box::pin(async move {
+            match step.id {
+                "resource_check" => self.check().await?,
+                "resource_files" => self.stage().await?,
+                "resource_commit" => self.publish().await?,
+                _ => bail!("未知资源安装步骤"),
+            }
+            Ok(crate::installation::Outcome::Complete)
+        })
+    }
+}
+impl ResourceInstall<'_> {
+    async fn check(&mut self) -> Result<()> {
+        let cancel = self.cancel;
         let token = cancel.clone();
-        plan = tokio::task::spawn_blocking(move || {
+        let mut plan = self.plan.take().context("资源安装计划缺失")?;
+        let plan = tokio::task::spawn_blocking(move || {
             preflight(&mut plan, &token)?;
             Ok::<_, anyhow::Error>(plan)
         })
@@ -276,17 +346,31 @@ impl Launcher {
             .any(|e| e.origin.platform == Platform::Curseforge)
         {
             let key = crate::curseforge::key()?;
-            downloader = downloader.with_curseforge_key(self.root(), &self.settings(), key)?;
+            self.downloader = self.downloader.clone().with_curseforge_key(
+                self.launcher.root(),
+                &self.launcher.settings(),
+                key,
+            )?;
         }
-        sink(Event::workflow("resource_files", "下载与暂存资源"));
-        let stage = safe_join(&directory, "stage")?;
+        self.plan = Some(plan);
+        Ok(())
+    }
+    async fn stage(&mut self) -> Result<()> {
+        let cancel = self.cancel;
+        let directory = &self.directory;
+        let downloader = &self.downloader;
+        let sink = self.sink;
+        let id = self.id;
+        let plan = self.plan.as_mut().context("资源安装计划缺失")?;
+        let stage = safe_join(directory, "stage")?;
         fs::create_dir_all(&stage)?;
         let mut remote = Vec::new();
-        for (index, entry) in plan.entries.iter().enumerate() {
+        for index in 0..plan.entries.len() {
+            let entry = &plan.entries[index];
             if entry.reuse {
                 continue;
             }
-            let output = staged_path(&directory, index, entry)?;
+            let output = staged_path(directory, index, entry)?;
             match &entry.input {
                 Input::Remote { file } => {
                     let url = reqwest::Url::parse(&file.url)?;
@@ -309,10 +393,10 @@ impl Launcher {
                 Input::Local { .. } => {
                     let entry = entry.clone();
                     let token = cancel.clone();
-                    let files = Event::scoped(&sink, id, Some("resource_files"));
+                    let files = Event::scoped(sink, id, Some("resource_files"));
                     let file_id = entry.destination.clone();
                     let name = entry.origin.name.clone();
-                    let emit_file = move |status: &str, bytes: u64, total: u64| {
+                    let emit_file = move |status: &str, bytes: u64, total: u64, cached: bool| {
                         files(Event {
                             files: vec![crate::model::FileProgress {
                                 error: None,
@@ -322,29 +406,54 @@ impl Launcher {
                                 downloaded: bytes,
                                 total,
                                 status: status.into(),
-                                cached: false,
+                                cached,
                             }],
                             ..Event::new("file", "")
                         })
                     };
-                    emit_file("queued", 0, entry.size);
-                    tokio::task::spawn_blocking(move || {
+                    let digest = tokio::task::spawn_blocking(move || {
+                        // Reuse a verified staged payload even if the original
+                        // dragged-in archive has since moved or disappeared.
+                        if let Some(expected) = &entry.content_sha256
+                            && output.exists()
+                        {
+                            emit_file("verifying", 0, entry.size, false);
+                            let (actual, size) = imports::fingerprint(&output, &token)?;
+                            if actual == *expected {
+                                emit_file("done", size, size, true);
+                                return Ok(actual);
+                            }
+                        }
+                        emit_file("queued", 0, entry.size, false);
                         remove_staged(&output)?;
                         let result = imports::stage(&entry, &output, &token, &|bytes, total| {
-                            emit_file("installing", bytes, total)
+                            emit_file("installing", bytes, total, false)
                         });
                         match result {
                             Ok(total) => {
-                                emit_file("done", total, total);
-                                Ok(())
+                                // Plain copies already have the preview digest;
+                                // commit verifies them before publication. Only
+                                // extraction needs a new output-tree digest.
+                                let actual = match &entry.content_sha256 {
+                                    Some(expected) => expected.clone(),
+                                    None => imports::fingerprint(&output, &token)?.0,
+                                };
+                                emit_file("done", total, total, false);
+                                Ok(actual)
                             }
                             Err(error) => {
-                                emit_file("error", 0, entry.size);
+                                emit_file("error", 0, entry.size, false);
                                 Err(error)
                             }
                         }
                     })
                     .await??;
+                    // Archives and extracted trees have different hashes. Save
+                    // the verified output before moving to the next entry.
+                    if plan.entries[index].content_sha256.as_ref() != Some(&digest) {
+                        plan.entries[index].content_sha256 = Some(digest);
+                        save_plan(plan)?;
+                    }
                 }
             }
         }
@@ -352,25 +461,19 @@ impl Launcher {
             .batch(
                 remote,
                 cancel,
-                &Event::scoped(&sink, id, Some("resource_files")),
+                &Event::scoped(sink, id, Some("resource_files")),
             )
             .await?;
-        if cancel.is_cancelled() {
-            bail!("操作已取消");
-        }
-        sink(Event::workflow("resource_commit", "校验并安装资源"));
-        // Once publication begins, finish this short transaction even if cancellation arrives.
-        // Staging and plans remain on failure so a restart can reuse verified downloads.
-        let token = cancel.clone();
-        let plan = tokio::task::spawn_blocking(move || {
-            let working = plan.target.directory.clone();
-            commit(plan, &directory, token)?;
-            read_plan(&safe_join(&directory, "plan.json")?, &working)
-        })
-        .await??;
-        index_plan(&downloader, &plan).await?;
-        downloader.finish_installation(&sink).await;
-        sink(Event::workflow("finalize", "资源安装完成"));
+        Ok(())
+    }
+    async fn publish(&mut self) -> Result<()> {
+        let plan = self.plan.take().context("资源安装计划缺失")?;
+        let directory = self.directory.clone();
+        // Publication finishes cooperatively; the executor persists completion
+        // before indexing/cleanup. Hash checkpoints recover a partial commit.
+        let token = self.cancel.clone();
+        self.plan =
+            Some(tokio::task::spawn_blocking(move || commit(plan, &directory, token)).await??);
         Ok(())
     }
 }
@@ -402,7 +505,11 @@ async fn index_plan(downloader: &Downloader, plan: &ResourcePlan) -> Result<()> 
         .await;
     Ok(())
 }
-fn commit(mut plan: ResourcePlan, directory: &Path, cancel: CancellationToken) -> Result<()> {
+fn commit(
+    mut plan: ResourcePlan,
+    directory: &Path,
+    cancel: CancellationToken,
+) -> Result<ResourcePlan> {
     check_mods(&plan, Some(directory))?;
     for (index, entry) in plan.entries.iter_mut().enumerate() {
         let path = if entry.reuse {
@@ -496,8 +603,5 @@ fn commit(mut plan: ResourcePlan, directory: &Path, cancel: CancellationToken) -
         }
         return Err(error);
     }
-    plan.complete = true;
-    save_plan(&plan)?;
-    let _ = remove_staged(&safe_join(directory, "stage")?);
-    Ok(())
+    Ok(plan)
 }
