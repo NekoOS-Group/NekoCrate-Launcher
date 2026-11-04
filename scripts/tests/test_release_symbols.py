@@ -8,10 +8,27 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from release_symbols import digest, prepare
+from release_symbols import desktop_binary_name, digest, prepare
 
 
 class ReleaseSymbolsTests(unittest.TestCase):
+    def test_renamed_windows_executable_uses_cargo_target_pdb(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / "nekocrate-launcher.exe"
+            binary.write_bytes(b"PE fixture")
+            (root / "nekocrate_desktop.pdb").write_bytes(b"matching PDB")
+            (root / "nekocrate_launcher.pdb").write_bytes(b"stale PDB")
+            report = prepare(binary, "x86_64-pc-windows-msvc", root / "symbols", "revision",
+                             cargo_binary_name="nekocrate-desktop")
+            self.assertEqual(report["original_sha256"], report["shipped_sha256"])
+            self.assertEqual(report["symbols"][0]["name"], "nekocrate_desktop.pdb")
+            self.assertEqual((root / "symbols/nekocrate_desktop.pdb").read_bytes(), b"matching PDB")
+
+    def test_desktop_binary_target_comes_from_cargo_metadata(self):
+        root = Path(__file__).resolve().parents[2]
+        self.assertEqual(desktop_binary_name(root), "nekocrate-desktop")
+
     def test_windows_keeps_executable_bytes_and_saves_pdb(self):
         for name in ("nekocrate-launcher.pdb", "nekocrate_launcher.pdb"):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:

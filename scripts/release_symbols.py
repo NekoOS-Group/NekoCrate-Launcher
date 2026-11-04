@@ -29,7 +29,7 @@ def run(*command):
     subprocess.run([str(part) for part in command], check=True)
 
 
-def prepare(binary, target, output, revision):
+def prepare(binary, target, output, revision, cargo_binary_name=None):
     platform = TARGETS[target]
     binary = binary.resolve(strict=True)
     output = output.resolve()
@@ -72,13 +72,17 @@ def prepare(binary, target, output, revision):
         else:
             # MSVC already puts symbols in a separate PDB. Never strip the PE's
             # exception tables or resources; they are needed at runtime.
-            # rustc normalizes crate names to underscores; accept the literal
-            # binary stem too for toolchains that retain it.
-            candidates = {binary.with_suffix(".pdb"),
-                          binary.with_name(binary.stem.replace("-", "_") + ".pdb")}
+            # Tauri's mainBinaryName renames the EXE, but leaves Cargo's PDB
+            # under its original target name. Ignore similarly named stale
+            # symbols when Cargo supplies the actual target.
+            stem = cargo_binary_name or binary.stem
+            candidates = {binary.with_name(stem + ".pdb"),
+                          binary.with_name(stem.replace("-", "_") + ".pdb")}
             matches = [path for path in candidates if path.is_file() and path.stat().st_size]
             if len(matches) != 1:
-                raise ValueError("Missing release PDB; build Windows with CARGO_PROFILE_RELEASE_DEBUG=1")
+                expected = ", ".join(sorted(path.name for path in candidates))
+                raise ValueError(f"Missing release PDB or ambiguous matches for {expected}; "
+                                 "build Windows with CARGO_PROFILE_RELEASE_DEBUG=1")
             pdb = matches[0]
             saved = output / pdb.name
             shutil.copy2(pdb, saved)
@@ -104,6 +108,19 @@ def prepare(binary, target, output, revision):
     return report
 
 
+def desktop_binary_name(root):
+    metadata = json.loads(subprocess.check_output(
+        ["cargo", "metadata", "--no-deps", "--locked", "--format-version", "1"],
+        cwd=root, text=True,
+    ))
+    names = [target["name"] for package in metadata["packages"]
+             if package["name"] == "nekocrate-desktop"
+             for target in package["targets"] if "bin" in target["kind"]]
+    if len(names) != 1:
+        raise ValueError("Expected exactly one desktop Cargo binary target")
+    return names[0]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", required=True, choices=TARGETS)
@@ -112,7 +129,9 @@ def main():
     suffix = ".exe" if TARGETS[args.target] == "windows" else ""
     binary = root / "target" / args.target / "release" / f"nekocrate-launcher{suffix}"
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
-    report = prepare(binary, args.target, root / "artifacts/symbols" / args.target, revision)
+    cargo_name = desktop_binary_name(root) if TARGETS[args.target] == "windows" else None
+    report = prepare(binary, args.target, root / "artifacts/symbols" / args.target, revision,
+                     cargo_binary_name=cargo_name)
     print(f"{args.target}: {report['original_size']:,} -> {report['shipped_size']:,} bytes")
 
 
