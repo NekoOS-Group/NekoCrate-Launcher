@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { nextTick, onBeforeUnmount, onMounted, ref, watch, useId } from "vue";
 import { ChevronDown, Plus } from "lucide-vue-next";
 import InstanceIcon from "./InstanceIcon.vue";
 import { resolveInstanceIcon } from "../instanceIcons";
@@ -14,6 +14,7 @@ const props = defineProps<{
   iconOnly?: boolean;
 }>();
 const emit = defineEmits<{ select: [id: string | null] }>();
+const menuId = `instance-target-menu-${useId()}`;
 const root = ref<HTMLElement>();
 const trigger = ref<HTMLButtonElement>();
 const menu = ref<HTMLElement>();
@@ -115,7 +116,7 @@ onBeforeUnmount(() =>
         )
       "
       aria-haspopup="menu"
-      aria-controls="instance-target-menu"
+      :aria-controls="menuId"
       :aria-expanded="expanded"
       @click="expanded ? close() : open()"
       @keydown.down.prevent="open"
@@ -163,7 +164,7 @@ onBeforeUnmount(() =>
     <Transition name="source-menu">
       <div
         v-if="expanded"
-        id="instance-target-menu"
+        :id="menuId"
         ref="menu"
         class="instance-target-menu glass-surface"
         role="menu"

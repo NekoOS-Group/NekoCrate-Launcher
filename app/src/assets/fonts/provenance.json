@@ -1,0 +1,14 @@
+{
+  "version": "Minecraft Java Edition 1.21.1",
+  "client_sha1": "30c73b1c5da787909b2f73340419fdf13b9def88",
+  "bitmap_sources": [
+    "minecraft:font/nonlatin_european.png",
+    "minecraft:font/accented.png",
+    "minecraft:font/ascii.png"
+  ],
+  "unicode_source": "https://resources.download.minecraft.net/66/666999116c467f10622db1527a06ddc0a6efad2a",
+  "unicode_sha1": "666999116c467f10622db1527a06ddc0a6efad2a",
+  "unicode_version": "GNU Unifont 15.1.05",
+  "render_reference": "SplashRenderer (official mapping: fjq), render lines 24–35; UnihexProvider.Glyph (fls$d); BitmapProvider (flm)",
+  "notes": "Pixel coverage extracted unchanged. Bitmap glyphs: Mojang/Microsoft, not covered by repository code license. Unifont sample: see UNIFONT-LICENSE.txt. Full Unifont is loaded from installed assets or the official asset server at runtime; not bundled."
+}

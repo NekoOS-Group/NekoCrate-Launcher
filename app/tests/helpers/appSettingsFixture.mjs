@@ -1,3 +1,4 @@
+import { createVersionManagerActions } from "../../src/versionManagerActions.ts";
 import { readFileSync } from "node:fs";
 import { parse, compileScript } from "@vue/compiler-sfc";
 import ts from "typescript";
@@ -143,6 +144,16 @@ export async function settingsFixture() {
       }
       if (request.op === "snapshot") return this.snapshot();
       if (request.op === "crash_report") return null;
+      if (request.op === "sync_account") return null;
+      if (request.op === "update") {
+        const { op, id, ...preferences } = structuredClone(request);
+        const instance = this.state.database.instances.find(
+          (item) => item.id === id,
+        );
+        if (!instance) throw new Error("instance not found");
+        Object.assign(instance, preferences);
+        return true;
+      }
       if (request.op === "inspect_resources")
         return request.paths.map((path) => ({
           path,
@@ -221,4 +232,13 @@ export async function settingsFixture() {
       Object.assign(globalThis, previous);
     },
   };
+}
+
+export function managerActions(ui, entry = ui.managedWindows.value[0]) {
+  return createVersionManagerActions(
+    () => entry?.instanceId || "instance-a",
+    ui.rpc,
+    ui.loadVersionContent,
+    ui.syncManagedWindows,
+  );
 }

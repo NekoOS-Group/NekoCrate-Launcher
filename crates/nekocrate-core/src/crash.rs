@@ -12,6 +12,7 @@ use std::{
     path::{Component, Path, PathBuf},
     time::SystemTime,
 };
+mod audit;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Finding {
@@ -45,6 +46,15 @@ struct Rule {
     patterns: &'static [&'static str],
 }
 const RULES: &[Rule] = &[
+    Rule {
+        code: "registry",
+        title: "配置引用了未注册的游戏内容",
+        advice: "核对异常中的物品或方块所属 Mod 是否缺失、被禁用或版本不符；报错的读取方不一定是缺失组件。",
+        patterns: &[
+            "expected name to be an item, was unknown string",
+            "jsonsyntaxexception: unknown item '",
+        ],
+    },
     Rule {
         code: "launch_java",
         title: "Java 无法用于本次启动",
@@ -122,6 +132,9 @@ const RULES: &[Rule] = &[
         patterns: &[
             "missing or unsupported mandatory dependencies",
             "incompatible mod set!",
+            "incompatible mods found!",
+            "有不兼容的模组",
+            "但没有安装它",
             "requires version",
             "which is missing!",
         ],
@@ -179,6 +192,40 @@ const RULES: &[Rule] = &[
         ],
     },
 ];
+pub(crate) fn missing_dependencies(text: &str) -> Vec<String> {
+    let mut result = std::collections::BTreeSet::new();
+    for line in text.lines() {
+        let dependency = if line.contains("，但没有安装它") {
+            line.split_once(" 需要 ")
+                .and_then(|(_, tail)| tail.split_once(" 的 "))
+                .map(|(name, _)| name)
+        } else if line.contains(", which is missing!") {
+            line.split_once(" requires ")
+                .and_then(|(_, tail)| tail.split_once(", which is missing!"))
+                .and_then(|(requirement, _)| requirement.rsplit_once(" of "))
+                .map(|(_, name)| name)
+        } else {
+            None
+        };
+        if let Some(name) = dependency {
+            let id = name
+                .rsplit_once('(')
+                .map_or(name, |(_, id)| id)
+                .trim()
+                .trim_end_matches(')');
+            if id.len() <= 64
+                && !id.is_empty()
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"_-".contains(&b))
+                && !["minecraft", "java", "fabricloader", "fabric-loader"].contains(&id)
+            {
+                result.insert(id.to_owned());
+            }
+        }
+    }
+    result.into_iter().take(32).collect()
+}
 pub fn analyze(text: &str) -> Vec<Finding> {
     let lines: Vec<_> = text.lines().collect();
     let mut findings: Vec<_> = RULES.iter().filter_map(|rule| {
@@ -190,6 +237,25 @@ pub fn analyze(text: &str) -> Vec<Finding> {
         }).take(3).map(|line| diagnostics::redact(line).chars().take(600).collect()).collect();
         (!evidence.is_empty()).then(|| Finding { code:rule.code.into(), title:rule.title.into(), advice:rule.advice.into(), evidence })
     }).take(5).collect();
+    let missing = missing_dependencies(text);
+    if !missing.is_empty() {
+        findings.retain(|finding| finding.code != "dependencies");
+        findings.insert(
+            0,
+            Finding {
+                code: "missing_dependencies".into(),
+                title: format!("缺少必要 Mod：{}", missing.join(", ")),
+                advice: "可点击“修复缺失前置”，按当前游戏、加载器和 Mod 声明的版本约束查找并安装。"
+                    .into(),
+                evidence: lines
+                    .iter()
+                    .filter(|line| !missing_dependencies(line).is_empty())
+                    .take(32)
+                    .map(|line| diagnostics::redact(line).chars().take(600).collect())
+                    .collect(),
+            },
+        );
+    }
     // Preserve the actual exception even when it has no dedicated rule. This is
     // evidence for investigation, not an invented attribution to a mod.
     if findings.is_empty() {
@@ -241,13 +307,21 @@ pub(crate) fn write_to_log(
         ));
     }
     for finding in &report.findings {
-        events.push(line("ERROR", &finding.title));
-        events.push(line("WARN", &finding.advice));
+        let level = match finding.code.as_str() {
+            "pack_extra" => "INFO",
+            "audit_incomplete" | "pack_changed" => "WARN",
+            _ => "ERROR",
+        };
+        events.push(line(level, &finding.title));
+        events.push(line(
+            if level == "ERROR" { "WARN" } else { level },
+            &finding.advice,
+        ));
         for evidence in &finding.evidence {
             events.push(Event {
                 instance_id: Some(id.into()),
                 // Evidence is game output; do not translate it as launcher UI.
-                ..Event::new("log", format!("[ERROR] [Diagnosis] {evidence}"))
+                ..Event::new("log", format!("[{level}] [Diagnosis] {evidence}"))
             });
         }
     }
@@ -356,6 +430,73 @@ pub(crate) fn collect(
     }
 }
 impl Launcher {
+    pub(crate) fn audit_crash_components(&self, id: &str, report: &mut CrashReport) {
+        let run = || -> Result<Vec<Finding>> {
+            let instance = self.instance(id)?;
+            let game = self.available_game_dir(id)?;
+            let working =
+                crate::version::instance_working_directory(&game, &instance, &report.version)?;
+            let text = report
+                .file
+                .as_ref()
+                .and_then(|file| {
+                    let base = if file.launcher_log {
+                        self.instance_dir(id).ok()?.join("launcher-logs")
+                    } else {
+                        working.clone()
+                    };
+                    report_path(&base, &file.path)
+                        .ok()
+                        .and_then(|path| tail(&path).ok())
+                })
+                .unwrap_or_default();
+            Ok(audit::inspect(
+                self.root(),
+                &game,
+                &report.version,
+                &working,
+                &text,
+            ))
+        };
+        match run() {
+            Ok(findings) => {
+                for finding in findings {
+                    if let Some(existing) =
+                        report.findings.iter_mut().find(|f| f.code == finding.code)
+                    {
+                        for evidence in finding.evidence {
+                            if !existing.evidence.contains(&evidence)
+                                && existing.evidence.len() < 32
+                            {
+                                existing.evidence.push(evidence);
+                            }
+                        }
+                    } else {
+                        report.findings.push(finding);
+                    }
+                }
+                if report.findings.iter().any(|f| {
+                    !matches!(
+                        f.code.as_str(),
+                        "unclassified_exception"
+                            | "pack_extra"
+                            | "audit_incomplete"
+                            | "pack_changed"
+                    )
+                }) {
+                    report
+                        .findings
+                        .retain(|f| f.code != "unclassified_exception");
+                }
+            }
+            Err(error) => report.findings.push(Finding {
+                code: "audit_incomplete".into(),
+                title: "本地组件核对未完成".into(),
+                advice: "原始启动异常仍保留在日志中。".into(),
+                evidence: vec![diagnostics::redact(&format!("{error:#}"))],
+            }),
+        }
+    }
     pub(crate) fn can_repair_version(&self, id: &str, version: &str) -> bool {
         let Ok(instance) = self.instance(id) else {
             return false;
@@ -386,7 +527,7 @@ impl Launcher {
         let log = directory.join(&name);
         let message = diagnostics::redact(error);
         fs::write(&log, format!("[ERROR] {message}\n"))?;
-        let report = CrashReport {
+        let mut report = CrashReport {
             repairable: self.can_repair_version(id, &version),
             version,
             time: storage::now(),
@@ -398,6 +539,7 @@ impl Launcher {
                 launcher_log: true,
             }),
         };
+        self.audit_crash_components(id, &mut report);
         // A failed disk write must not prevent the live recovery controls.
         let saved = storage::write_json(&directory.join("last-crash.json"), &report);
         let logged = write_to_log(&report, &log, id, sink);
@@ -460,6 +602,32 @@ fn report_path(base: &Path, relative: &str) -> Result<PathBuf> {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fabric_missing_mod_diagnosis_handles_localized_required_dependencies_only() {
+        let chinese =
+            "模组 'AdvancedLootInfo' (ali) 2.5.0 需要 aci 的 1.5 及以上版本，但没有安装它！";
+        let english = "Mod 'AdvancedLootInfo' (ali) 2.5.0 requires version 1.5 or later of mod 'Advanced Container Info' (aci), which is missing!";
+        for text in [chinese, english] {
+            assert_eq!(super::missing_dependencies(text), vec!["aci"]);
+            let findings = super::analyze(text);
+            assert_eq!(findings[0].code, "missing_dependencies");
+            assert!(findings[0].title.contains("aci"));
+            assert_eq!(findings[0].evidence, vec![text]);
+        }
+        assert_eq!(
+            super::missing_dependencies(&format!("{chinese}\n{english}")),
+            vec!["aci"]
+        );
+        for text in [
+            "Mod 'A' (a) recommends any version of aci, which is missing!",
+            "模组 'A' (a) 1 建议安装 aci 的任意版本，但没有安装它。",
+            "Mod 'A' (a) requires version 1.5 of aci, but only the wrong version is present: 1.4!",
+            "Mod 'A' (a) requires any version of java, which is missing!",
+            "模组 'A' (a) 需要 ../unsafe 的 1.5，但没有安装它！",
+        ] {
+            assert!(super::missing_dependencies(text).is_empty(), "{text}");
+        }
+    }
     use super::*;
     #[tokio::test]
     async fn failed_launch_has_scoped_recovery_and_saved_log_but_cancellation_does_not() {

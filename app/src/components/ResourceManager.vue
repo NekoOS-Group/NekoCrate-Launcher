@@ -1,5 +1,11 @@
 <script setup lang="ts">
+import WindowControls from "./WindowControls.vue";
 import { resourceArrival, arrivalFileKey } from "../resourceArrival";
+import {
+  cacheResourceParts,
+  createResourceLibraryRpc,
+  type CacheResourceKind,
+} from "../resourceLibrary";
 import {
   computed,
   inject,
@@ -27,11 +33,19 @@ import {
   ChevronRight,
   LoaderCircle,
 } from "lucide-vue-next";
+import AnimatedCount from "./AnimatedCount.vue";
+import { prepareDialogLeave, finishDialogLeave } from "../dialogMotion";
+import ToolWindow from "./ToolWindow.vue";
+import { focusToolWindow } from "../toolWindows";
+import ResourceLibraryBrowser from "./ResourceLibraryBrowser.vue";
+import type { ResourceKind } from "../resources";
 import GlassSelect from "./GlassSelect.vue";
 import ContentSwitch from "./ContentSwitch.vue";
 import SkinStage from "./SkinStage.vue";
 import SkinLibraryItem from "./SkinLibraryItem.vue";
 import ResourceSelectionBar from "./ResourceSelectionBar.vue";
+import ResourceTransferOverlay from "./ResourceTransferOverlay.vue";
+import { useTrashDrag } from "../useTrashDrag";
 import {
   useResourceSelection,
   changeSelectedMods,
@@ -49,7 +63,9 @@ import { createVersionContentLoader } from "../versionContentLoader";
 import { modFileName } from "../contentIdentity";
 import {
   resourceTransferKey,
+  resourceRemovalKey,
   isResourceDragKind,
+  type ResourceCopySource,
 } from "../useResourceTransfer";
 import { createSkinThumbnails } from "../skinThumbnails";
 import { builtinSkins } from "../builtinSkins";
@@ -65,6 +81,7 @@ import type {
   ContentMetadata,
   LocalContentFile,
   VersionContent,
+  VersionManifest,
 } from "../types";
 import type { ModActions } from "../modManagement";
 
@@ -75,20 +92,21 @@ type Runtime = {
   version: string;
   arch: string;
   jdk: boolean;
+  vendor: string;
   source: string;
   size: number;
-  used_by: string[];
 };
 type Owner = { id: string; version: string; label: string };
-type Group = { directory: string; owners: Owner[] };
+type Group = { directory: string; owners: Owner[]; global: boolean };
 type ResourceRow = {
   group: string;
   key: string;
   file: LocalContentFile;
   directory: string;
   owners: Owner[];
+  global: boolean;
 };
-type CachePart = { kind: "java" | "skins"; size: number; files: number };
+type CachePart = { kind: CacheResourceKind; size: number; files: number };
 type CacheEntry = {
   kind: "metadata" | "resources" | "partials";
   size: number;
@@ -135,6 +153,7 @@ watch(resourceArrival, (arrival) => {
 onBeforeUnmount(() => clearTimeout(arrivalTimer));
 const props = defineProps<{
   rpc: Rpc;
+  manifest: VersionManifest | null;
   busy: boolean;
   running: string[];
   modActions: ModActions;
@@ -151,28 +170,38 @@ const emit = defineEmits<{
   close: [];
   error: [error: unknown];
   busy: [value: boolean];
-  "skin-preview": [value: boolean];
   "skin-changed": [];
+  "java-changed": [];
   manage: [id: string, version: string, kind: ContentKind];
 }>();
 const transferResource = inject(resourceTransferKey, undefined);
+const removeResources = inject(resourceRemovalKey, undefined);
+async function removeSelectedResources() {
+  if (!removeResources || !canRemoveSelected.value || selectionLocked.value)
+    return;
+  try {
+    await removeResources(selectedResources.value.map(resourceSource));
+  } catch (error) {
+    emit("error", error);
+  }
+}
 function beginResourceDrag(event: PointerEvent, row: ResourceRow) {
-  const owner = row.owners[0];
-  if (!owner || !isResourceDragKind(resourceKind.value) || locked(row)) return;
+  if (!isResourceDragKind(resourceKind.value) || locked(row)) return;
   if (event.shiftKey || event.metaKey || event.ctrlKey) return;
   const rows = selection.drag(row);
   if (rows.some(locked)) return;
-  const kind = resourceKind.value;
-  transferResource?.(
-    event,
-    rows.map((item) => ({
-      kind,
-      instance: item.owners[0]!.id,
-      version: item.owners[0]!.version,
-      file: item.file.file_name,
-      name: resourceName(item),
-    })),
-  );
+  transferResource?.(event, rows.map(resourceSource));
+}
+function resourceSource(row: ResourceRow): ResourceCopySource {
+  return {
+    global: row.global,
+    removable: row.global,
+    kind: resourceKind.value as ResourceCopySource["kind"],
+    instance: row.owners[0]?.id || "",
+    version: row.owners[0]?.version || "",
+    file: row.file.file_name,
+    name: resourceName(row),
+  };
 }
 const tabs = [
   { id: "java", label: "Java", icon: Coffee, color: "#e7bc76" },
@@ -198,7 +227,7 @@ const javaVersion = (runtime: Runtime) =>
 const javaSource = (runtime: Runtime) =>
   t(
     {
-      managed: "启动器托管",
+      managed: "已缓存",
       registered: "手动登记",
       system: "系统安装",
       configured: "实例指定",
@@ -216,11 +245,6 @@ const applyingSkin = ref("");
 const skinId = ref("");
 let skinPicked = false;
 const skin = computed(() => skins.value.find((s) => s.id === skinId.value));
-watch(
-  () => tab.value === "skins",
-  (value) => emit("skin-preview", value),
-  { immediate: true },
-);
 const skinName = ref("");
 const texture = ref<string | null>(null);
 const textureLoading = ref(false);
@@ -258,18 +282,40 @@ const cacheLabels = {
   resources: "资源缓存",
   partials: "未完成下载",
 };
-const cachePartLabels = { java: "Java", skins: "皮肤" };
-const cachePartColors = { java: "#e7bc76", skins: "#b49aef" };
 const cacheUsageLabel = (entry: CacheEntry) =>
   (entry.parts || [])
-    .map((part) => `${t(cachePartLabels[part.kind])} ${formatBytes(part.size)}`)
+    .map(
+      (part) =>
+        `${t(cacheResourceParts[part.kind].label)} ${formatBytes(part.size)}`,
+    )
     .join(" · ");
+function showCachePart(kind: CacheResourceKind) {
+  browsing.value = false;
+  query.value = "";
+  if (cacheResourceParts[kind].tab === "resources") {
+    resourceKind.value = kind as ContentKind;
+    cachedOnly.value = true;
+  }
+  tab.value = cacheResourceParts[kind].tab;
+}
 const confirm = shallowRef<{
   title: string;
   detail: string;
   run: () => Promise<void>;
 }>();
 const resourceKind = ref<ContentKind>("mods");
+const cachedOnly = ref(false);
+const browsing = ref(false);
+const libraryDownloading = ref(false);
+function downloadBusy(value: boolean) {
+  libraryDownloading.value = value;
+  emit("busy", value);
+}
+function downloadedResource(kind: ResourceKind) {
+  resourceKind.value = kind as ContentKind;
+  cachedOnly.value = true;
+  void nextTick(refresh);
+}
 // Keep a dense grid's total entrance close to the small Java list.
 const resourceRowStagger = 3;
 const kinds = [
@@ -288,8 +334,10 @@ const scanIssues = ref<string[]>([]);
 const scanned = ref(0);
 const totalGroups = ref(0);
 const loader = createVersionContentLoader(props.rpc);
+const resourceRpc = createResourceLibraryRpc(props.rpc);
 let controller: AbortController | undefined;
 let generation = 0;
+let indexedAllResources = false;
 let skinGeneration = 0;
 const library = <T = unknown,>(
   kind: string,
@@ -299,12 +347,13 @@ const filtered = computed(() => {
   const needle = query.value.trim().toLocaleLowerCase();
   return resources.value.filter(
     (row) =>
-      !needle ||
-      [
-        row.file.name,
-        row.file.file_name,
-        ...row.owners.map((o) => o.label),
-      ].some((s) => s.toLocaleLowerCase().includes(needle)),
+      (!cachedOnly.value || row.global) &&
+      (!needle ||
+        [
+          row.file.name,
+          row.file.file_name,
+          ...row.owners.map((o) => o.label),
+        ].some((s) => s.toLocaleLowerCase().includes(needle))),
   );
 });
 const selection = useResourceSelection(
@@ -312,6 +361,11 @@ const selection = useResourceSelection(
   (row) => row.key,
 );
 const selectedResources = selection.selected;
+const canRemoveSelected = computed(
+  () =>
+    selectedResources.value.length > 0 &&
+    selectedResources.value.every((row) => row.global),
+);
 const selectedHasEnabled = computed(() =>
   selectedResources.value.some((row) => row.file.enabled),
 );
@@ -321,14 +375,19 @@ const selectedHasDisabled = computed(() =>
 const selectionLocked = computed(
   () => props.busy || mutating.value || selectedResources.value.some(locked),
 );
-watch([tab, resourceKind, query], () => selection.clear());
+watch([tab, resourceKind, query, cachedOnly], () => selection.clear());
 function selectResource(event: MouseEvent, row: ResourceRow) {
   if (mutating.value) return;
   if (selection.click(event, row)) return;
   resourceKey.value = resourceKey.value === row.key ? "" : row.key;
 }
 async function setSelectedEnabled(enabled: boolean) {
-  if (selectionLocked.value || resourceKind.value !== "mods") return;
+  if (
+    selectionLocked.value ||
+    resourceKind.value !== "mods" ||
+    selectedResources.value.some((r) => r.global)
+  )
+    return;
   const rows = [...selectedResources.value];
   const scope = generation;
   await run(async () => {
@@ -419,7 +478,7 @@ const loadMetadata = (
   kind: ContentKind,
   file: string,
 ) =>
-  props.rpc<ContentMetadata>("version_content_metadata", {
+  resourceRpc<ContentMetadata>("version_content_metadata", {
     id,
     version,
     kind,
@@ -432,7 +491,7 @@ const openFolder = async (
   file: string,
   source?: string,
 ) => {
-  await props.rpc("open_content_folder", { id, version, kind, file, source });
+  await resourceRpc("open_content_folder", { id, version, kind, file, source });
 };
 const loadSource = (
   id: string,
@@ -441,7 +500,7 @@ const loadSource = (
   file: string,
   source: string,
 ) =>
-  props.rpc<string>("version_content_source", {
+  resourceRpc<string>("version_content_source", {
     id,
     version,
     kind,
@@ -486,6 +545,8 @@ async function refresh() {
       }
     }
     if (active === "resources") {
+      const onlyCached = cachedOnly.value;
+      indexedAllResources = false;
       const kind = resourceKind.value;
       const index = await library<{ groups: Group[]; issues: string[] }>(
         "groups",
@@ -494,7 +555,10 @@ async function refresh() {
       if (request !== generation) return;
       scanIssues.value = index.issues;
       scanned.value = 0;
-      totalGroups.value = index.groups.length;
+      const groups = index.groups.filter(
+        (group) => !onlyCached || group.global,
+      );
+      totalGroups.value = groups.length;
       const results = (resourceGroups = new Map<string, ResourceRow[]>());
       readyGroups.value = new Set();
       const publish = (group: Group, content: VersionContent) => {
@@ -512,33 +576,41 @@ async function refresh() {
               file,
               directory: content.directory,
               owners: group.owners,
+              global: group.global,
             })),
         );
         resources.value = [...results.values()].flat();
       };
       resources.value = [];
       // Scan one shared working directory once; metadata batches paint progressively.
-      for (const group of index.groups) {
+      for (const group of groups) {
         if (signal.aborted) return;
-        const owner = group.owners[0]!;
+        const owner = group.owners[0];
         try {
           publish(
             group,
-            await loader(owner.id, owner.version, kind, {
-              signal,
-              fresh: true,
-              onProgress: (c) => publish(group, c),
-            }),
+            group.global
+              ? await library<VersionContent>("cached_resources", {
+                  content: kind,
+                })
+              : await loader(owner.id, owner.version, kind, {
+                  signal,
+                  fresh: true,
+                  onProgress: (c) => publish(group, c),
+                }),
           );
         } catch (error) {
           if (signal.aborted) return;
-          scanIssues.value.push(`${owner.label}: ${String(error)}`);
+          scanIssues.value.push(
+            `${owner?.label || t("全局缓存")}: ${String(error)}`,
+          );
         }
         if (request === generation) {
           readyGroups.value = new Set([...readyGroups.value, group.directory]);
           scanned.value++;
         }
       }
+      if (request === generation) indexedAllResources = !onlyCached;
     }
   } catch (error) {
     if (request === generation && !signal.aborted) emit("error", error);
@@ -549,6 +621,15 @@ async function refresh() {
     }
   }
 }
+const resourceCount = ref<number>();
+watch([filtered, loading], () => {
+  if (!loading.value) resourceCount.value = filtered.value.length;
+});
+watch(cachedOnly, (only) => {
+  resourceKey.value = "";
+  if (!only && tab.value === "resources" && !indexedAllResources)
+    void refresh();
+});
 watch(filtered, () => void highlightArrivals());
 watch(
   [tab, resourceKind],
@@ -712,17 +793,48 @@ async function install() {
     }
   });
 }
+const javaRemovalLocked = computed(
+  () =>
+    props.busy ||
+    mutating.value ||
+    libraryDownloading.value ||
+    props.running.length > 0,
+);
+const javaDrag = useTrashDrag<Runtime>({
+  canRemove: (runtime) =>
+    tab.value === "java" &&
+    !javaRemovalLocked.value &&
+    runtimes.value.some(
+      (current) =>
+        current.path === runtime.path && current.source === "managed",
+    ),
+  describe: (runtime) => ({
+    kind: "java",
+    name: `Java ${javaVersion(runtime)} · ${runtime.vendor}`,
+  }),
+  remove: (runtime) => run(() => deleteJava(runtime)),
+});
+async function deleteJava(runtime: Runtime) {
+  // Recheck ownership at confirmation/drop time as the inventory may change.
+  if (
+    runtime.source !== "managed" ||
+    props.running.length ||
+    !runtimes.value.some(
+      (current) =>
+        current.path === runtime.path && current.source === "managed",
+    )
+  )
+    return;
+  await library("remove_java", { path: runtime.path });
+  emit("java-changed");
+  await refresh();
+}
 function removeJava(runtime: Runtime) {
+  if (runtime.source !== "managed" || javaRemovalLocked.value) return;
   confirm.value = {
-    title: runtime.source === "managed" ? t("移入回收站") : t("取消登记"),
-    detail:
-      runtime.source === "managed"
-        ? runtime.path
-        : t("只取消登记，保留原文件。"),
-    run: async () => {
-      await library("remove_java", { path: runtime.path });
-      await refresh();
-    },
+    title: t("移入回收站"),
+    detail: runtime.path,
+    run: () => deleteJava(runtime),
   };
 }
 async function importPaths(paths: string[]) {
@@ -813,6 +925,10 @@ async function openJava(path: string) {
   }
 }
 async function changed(row: ResourceRow) {
+  if (row.global) {
+    await refresh();
+    return;
+  }
   const owner = row.owners[0]!;
   const request = generation,
     kind = resourceKind.value;
@@ -836,11 +952,56 @@ async function changed(row: ResourceRow) {
     emit("error", error);
   }
 }
-function showMod(id: string, version: string) {
+function showMod(id: string, version: string, file?: string) {
+  if (!id) {
+    const row = resources.value.find(
+      (row) => row.global && row.file.file_name === file,
+    );
+    if (row) resourceKey.value = row.key;
+    return;
+  }
   emit("manage", id, version, "mods");
 }
+async function importResources(paths: string[], kind = resourceKind.value) {
+  await run(async () => {
+    await library("cache_resources", {
+      inputs: paths.map((path) => ({ path, kind })),
+    });
+    tab.value = "resources";
+    resourceKind.value = kind;
+    cachedOnly.value = true;
+    await refresh();
+  });
+}
+function browseResources() {
+  if (props.busy || mutating.value) return;
+  browsing.value = true;
+  void nextTick(() => focusToolWindow("library-browser"));
+}
+async function closeBrowser() {
+  if (libraryDownloading.value) return;
+  browsing.value = false;
+  await refresh();
+}
+async function cacheResources(rows: ResourceRow[]) {
+  await run(async () => {
+    await library("cache_resources", { sources: rows.map(resourceSource) });
+    cachedOnly.value = true;
+    await refresh();
+  });
+}
 async function drop(paths: string[], destination = tab.value) {
-  if (destination === "skins") {
+  if (
+    destination === "resources" ||
+    kinds.some((k) => k.value === destination)
+  ) {
+    await importResources(
+      paths,
+      destination === "resources"
+        ? resourceKind.value
+        : (destination as ContentKind),
+    );
+  } else if (destination === "skins") {
     const images = paths.filter((p) => /\.png$/i.test(p));
     if (!images.length) emit("error", t("请选择 PNG 皮肤文件"));
     else await importPaths(images);
@@ -856,11 +1017,27 @@ async function drop(paths: string[], destination = tab.value) {
   else
     emit("error", t("请在皮肤页拖入 PNG，或在 Java 页拖入 Java 可执行文件。"));
 }
-defineExpose({ drop, refresh });
+async function resourceUpdated(id: string, version: string) {
+  const seen = new Set<string>();
+  for (const row of resources.value) {
+    if (
+      !seen.has(row.group) &&
+      row.owners.some((owner) => owner.id === id && owner.version === version)
+    ) {
+      seen.add(row.group);
+      await changed(row);
+    }
+  }
+}
+defineExpose({ drop, refresh, resourceUpdated });
 </script>
 
 <template>
-  <section class="modal glass-surface resource-manager" :data-drop-kind="tab">
+  <section
+    class="modal glass-surface resource-manager"
+    :data-drop-kind="tab === 'resources' ? resourceKind : tab"
+    :data-resource-library="tab === 'resources' ? '' : undefined"
+  >
     <header class="modal-header">
       <nav
         class="rm-tabs dialog-heading"
@@ -870,10 +1047,11 @@ defineExpose({ drop, refresh });
         <button
           v-for="item in tabs"
           :key="item.id"
-          :data-drop-kind="item.id"
+          :data-drop-kind="item.id === 'resources' ? resourceKind : item.id"
+          :data-resource-library="item.id === 'resources' ? '' : undefined"
           :style="{ '--tab-color': item.color }"
           :class="{ active: tab === item.id }"
-          :disabled="mutating"
+          :disabled="mutating || libraryDownloading"
           :aria-pressed="tab === item.id"
           @click="tab = item.id"
         >
@@ -882,19 +1060,18 @@ defineExpose({ drop, refresh });
           }}</span>
         </button>
       </nav>
+      <WindowControls />
       <button
         class="icon-button"
         :title="t('关闭')"
         :aria-label="t('关闭')"
-        :disabled="mutating"
+        :disabled="mutating || libraryDownloading"
         @click="emit('close')"
       >
         <X :size="20" />
       </button>
     </header>
-    <ContentSwitch
-      :content-key="tab === 'resources' ? `${tab}-${resourceKind}` : tab"
-    >
+    <ContentSwitch :content-key="tab">
       <div v-if="tab === 'java'" class="rm-page">
         <div class="rm-tile-grid rm-scroll" data-list-viewport>
           <button
@@ -902,21 +1079,35 @@ defineExpose({ drop, refresh });
             :key="runtime.path"
             class="rm-tile rm-java-tile list-reveal-item"
             :style="listRevealStyle(index)"
-            :class="{ active: !addingJava && javaPath === runtime.path }"
+            :class="{
+              active: !addingJava && javaPath === runtime.path,
+              'resource-drag-handle':
+                runtime.source === 'managed' && !javaRemovalLocked,
+            }"
             :aria-pressed="!addingJava && javaPath === runtime.path"
-            :aria-label="`Java ${runtime.major} · ${javaVersion(runtime)} · ${runtime.arch} · ${javaSource(runtime)}`"
-            :title="`${javaVersion(runtime)} · ${runtime.arch} · ${javaSource(runtime)}\n${runtime.path}`"
-            :disabled="mutating"
+            :aria-label="`Java ${runtime.major} · ${runtime.vendor} · ${javaVersion(runtime)} · ${runtime.arch} · ${javaSource(runtime)}`"
+            :title="`${runtime.vendor} · ${javaVersion(runtime)} · ${runtime.jdk ? 'JDK' : 'JRE'} · ${runtime.arch} · ${javaSource(runtime)}\n${runtime.path}`"
+            :disabled="mutating || libraryDownloading"
+            @pointerdown="javaDrag.start($event, runtime)"
+            @dragstart.prevent
             @click="
               javaPath = runtime.path;
               addingJava = false;
             "
           >
             <Coffee :size="34" :stroke-width="1.3" class="rm-tile-icon" />
+            <span
+              v-if="runtime.source === 'managed'"
+              class="rm-java-cached"
+              :title="t('已缓存')"
+              :aria-label="t('已缓存')"
+              ><HardDrive :size="12"
+            /></span>
             <span class="rm-tile-name">Java {{ runtime.major }}</span>
-            <span class="rm-tile-caption"
-              >{{ runtime.jdk ? "JDK" : "JRE" }} · {{ runtime.arch }}</span
-            >
+            <span class="rm-tile-caption">{{
+              runtime.vendor ||
+              `${runtime.jdk ? "JDK" : "JRE"} · ${runtime.arch}`
+            }}</span>
           </button>
           <button
             class="rm-tile rm-add-tile rm-java-add list-reveal-item"
@@ -977,6 +1168,8 @@ defineExpose({ drop, refresh });
                 <div class="rm-title">
                   <strong>Java {{ javaVersion(selectedJava) }}</strong>
                   <span
+                    ><template v-if="selectedJava.vendor"
+                      >{{ selectedJava.vendor }} · </template
                     >{{ selectedJava.arch }} ·
                     {{ selectedJava.jdk ? "JDK" : "JRE" }}</span
                   >
@@ -985,31 +1178,15 @@ defineExpose({ drop, refresh });
                 <button class="rm-path" @click="openJava(selectedJava.path)">
                   <FolderOpen :size="13" /><span>{{ selectedJava.path }}</span>
                 </button>
-                <div v-if="selectedJava.used_by.length" class="rm-used">
-                  {{ selectedJava.used_by.join(" · ") }}
-                </div>
               </div>
               <span v-if="selectedJava.size" class="rm-muted rm-size">{{
                 formatBytes(selectedJava.size)
               }}</span>
               <button
-                v-if="['managed', 'registered'].includes(selectedJava.source)"
+                v-if="selectedJava.source === 'managed'"
                 class="icon-button"
-                :disabled="
-                  busy ||
-                  mutating ||
-                  running.length > 0 ||
-                  selectedJava.used_by.length > 0
-                "
-                :title="
-                  selectedJava.used_by.length
-                    ? t('正在被实例使用')
-                    : t(
-                        selectedJava.source === 'managed'
-                          ? '移入回收站'
-                          : '取消登记',
-                      )
-                "
+                :disabled="javaRemovalLocked"
+                :title="t('移入回收站')"
                 :aria-label="t('移除')"
                 @click="removeJava(selectedJava)"
               >
@@ -1040,6 +1217,7 @@ defineExpose({ drop, refresh });
         <div
           class="rm-toolbar list-reveal-item"
           :style="listRevealStyle(0)"
+          data-list-exit-y="-10"
           data-list-footer
         >
           <div class="rm-actions">
@@ -1047,6 +1225,7 @@ defineExpose({ drop, refresh });
               v-for="kind in kinds"
               :key="kind.value"
               class="rm-kind"
+              :data-drop-kind="kind.value"
               :class="{ active: resourceKind === kind.value }"
               @click="resourceKind = kind.value as ContentKind"
             >
@@ -1054,6 +1233,16 @@ defineExpose({ drop, refresh });
             </button>
           </div>
           <div class="rm-resource-tools">
+            <button
+              class="icon-button rm-cache-filter"
+              :class="{ active: cachedOnly }"
+              :aria-pressed="cachedOnly"
+              :title="t('仅显示全局缓存')"
+              :aria-label="t('仅显示全局缓存')"
+              @click="cachedOnly = !cachedOnly"
+            >
+              <HardDrive :size="15" />
+            </button>
             <label class="rm-search">
               <Search :size="14" /><input
                 v-model="query"
@@ -1061,81 +1250,120 @@ defineExpose({ drop, refresh });
                 :aria-label="t('搜索')"
               />
             </label>
-            <span class="rm-muted rm-resource-count">{{
-              filtered.length
-            }}</span>
+            <span class="rm-muted rm-resource-count"
+              ><AnimatedCount :value="resourceCount" bare
+            /></span>
           </div>
         </div>
         <ResourceSelectionBar
           class="rm-selection"
           :count="selectedResources.length"
-          :mods="resourceKind === 'mods'"
+          :mods="
+            resourceKind === 'mods' &&
+            !selectedResources.some((row) => row.global)
+          "
           :busy="selectionLocked"
           :enable="selectedHasDisabled"
           :disable="selectedHasEnabled"
+          :removable="!!removeResources && canRemoveSelected"
+          @remove="removeSelectedResources"
           @clear="selection.clear"
           @enabled="setSelectedEnabled"
-        />
-        <div
-          class="rm-tile-grid rm-scroll rm-resources"
-          data-list-viewport
-          :data-list-stagger="resourceRowStagger"
         >
           <button
-            v-for="(row, index) in filtered"
-            :key="row.key"
-            class="rm-tile rm-resource-tile list-reveal-item"
-            :style="listRevealStyle(index, 20, resourceRowStagger)"
-            :class="{
-              active: resourceKey === row.key,
-              'is-arriving': arrivalKeys.includes(row.key),
-              'is-selected': selection.contains(row),
-              'resource-drag-handle':
-                isResourceDragKind(resourceKind) &&
-                !!transferResource &&
-                !locked(row),
-              'is-disabled': resourceKind === 'mods' && !row.file.enabled,
-            }"
-            :aria-pressed="selection.contains(row) || resourceKey === row.key"
-            :aria-label="resourceName(row)"
-            :title="`${resourceName(row)}${row.file.version ? ' · ' + row.file.version : ''}\n${row.owners.map((owner) => owner.label).join(' · ')}${resourceKind === 'mods' && !row.file.enabled ? '\n' + t('已禁用') : ''}`"
-            @click="selectResource($event, row)"
-            @pointerdown="beginResourceDrag($event, row)"
-            @dragstart.prevent
+            v-if="selectedResources.some((row) => !row.global)"
+            class="icon-button"
+            :disabled="selectionLocked"
+            :title="t('缓存到启动器')"
+            :aria-label="t('缓存到启动器')"
+            @click="
+              cacheResources(selectedResources.filter((row) => !row.global))
+            "
           >
-            <LocalContentImage
-              v-if="
-                ['mods', 'resourcepacks', 'shaderpacks'].includes(
-                  resourceKind,
-                ) && row.owners[0]
-              "
-              :rpc="rpc"
-              :instance-id="row.owners[0].id"
-              :version="row.owners[0].version"
-              :kind="resourceKind"
-              :file="row.file"
-              :size="40"
-              class="rm-tile-icon"
-              ><component :is="resourceIcon" :size="32" :stroke-width="1.3"
-            /></LocalContentImage>
-            <component
-              v-else
-              :is="resourceIcon"
-              :size="32"
-              :stroke-width="1.3"
-              class="rm-tile-icon"
-            />
-            <span class="rm-tile-name">{{ resourceName(row) }}</span>
-            <span
-              v-if="resourceKind === 'mods' && !row.file.enabled"
-              class="rm-tile-status"
-              :aria-label="t('已禁用')"
-            />
+            <HardDrive :size="15" />
           </button>
-          <p v-if="loaded && !filtered.length" class="rm-empty rm-grid-empty">
-            {{ t(query ? "没有匹配的资源" : "暂无本地资源") }}
-          </p>
-        </div>
+        </ResourceSelectionBar>
+        <ContentSwitch
+          class="rm-resource-list"
+          :content-key="`${resourceKind}:${cachedOnly}`"
+        >
+          <div
+            class="rm-tile-grid rm-scroll rm-resources"
+            data-list-viewport
+            :data-list-stagger="resourceRowStagger"
+          >
+            <button
+              class="rm-tile rm-add-tile list-reveal-item"
+              :style="listRevealStyle(0, 20, resourceRowStagger)"
+              :disabled="busy || mutating"
+              :aria-label="t('添加资源')"
+              :title="t('添加资源')"
+              @click="browseResources"
+            >
+              <Plus :size="24" :stroke-width="1.4" />
+            </button>
+            <button
+              v-for="(row, index) in filtered"
+              :key="row.key"
+              class="rm-tile rm-resource-tile list-reveal-item"
+              :style="listRevealStyle(index + 1, 20, resourceRowStagger)"
+              :class="{
+                active: resourceKey === row.key,
+                'is-arriving': arrivalKeys.includes(row.key),
+                'is-selected': selection.contains(row),
+                'resource-drag-handle':
+                  isResourceDragKind(resourceKind) &&
+                  !!transferResource &&
+                  !locked(row),
+                'is-disabled': resourceKind === 'mods' && !row.file.enabled,
+              }"
+              :aria-pressed="selection.contains(row) || resourceKey === row.key"
+              :aria-label="resourceName(row)"
+              :title="`${resourceName(row)}${row.file.version ? ' · ' + row.file.version : ''}\n${row.global ? t('全局缓存') : row.owners.map((owner) => owner.label).join(' · ')}${resourceKind === 'mods' && !row.file.enabled ? '\n' + t('已禁用') : ''}`"
+              @click="selectResource($event, row)"
+              @pointerdown="beginResourceDrag($event, row)"
+              @dragstart.prevent
+            >
+              <LocalContentImage
+                v-if="
+                  ['mods', 'resourcepacks', 'shaderpacks'].includes(
+                    resourceKind,
+                  )
+                "
+                :rpc="resourceRpc"
+                :instance-id="row.owners[0]?.id || ''"
+                :version="row.owners[0]?.version || ''"
+                :kind="resourceKind"
+                :file="row.file"
+                :size="40"
+                class="rm-tile-icon"
+                ><component :is="resourceIcon" :size="32" :stroke-width="1.3"
+              /></LocalContentImage>
+              <component
+                v-else
+                :is="resourceIcon"
+                :size="32"
+                :stroke-width="1.3"
+                class="rm-tile-icon"
+              />
+              <span class="rm-tile-name">{{ resourceName(row) }}</span>
+              <span
+                v-if="row.global"
+                class="rm-resource-cached"
+                :aria-label="t('全局缓存')"
+                ><HardDrive :size="12"
+              /></span>
+              <span
+                v-if="resourceKind === 'mods' && !row.file.enabled"
+                class="rm-tile-status"
+                :aria-label="t('已禁用')"
+              />
+            </button>
+            <p v-if="loaded && !filtered.length" class="rm-empty rm-grid-empty">
+              {{ t(query ? "没有匹配的资源" : "暂无本地资源") }}
+            </p>
+          </div>
+        </ContentSwitch>
         <div v-if="selectedResource" class="rm-resource-details">
           <ContentSwitch :content-key="selectedResource.key">
             <div
@@ -1151,16 +1379,18 @@ defineExpose({ drop, refresh });
                 <X :size="16" />
               </button>
               <VersionContentItem
-                :rpc="rpc"
+                :rpc="resourceRpc"
                 @link="emit('link', $event)"
                 ref="resourceDetail"
                 :file="selectedResource.file"
-                :instance-id="selectedResource.owners[0]!.id"
-                :version="selectedResource.owners[0]!.version"
+                :instance-id="selectedResource.owners[0]?.id || ''"
+                :version="selectedResource.owners[0]?.version || ''"
+                :global="selectedResource.global"
+                :can-remove="selectedResource.global"
                 :kind="resourceKind"
                 :icon="resourceIcon"
                 :locked="locked(selectedResource)"
-                :mod-actions="modActions"
+                :mod-actions="selectedResource.global ? undefined : modActions"
                 :load-metadata="loadMetadata"
                 :open-folder="openFolder"
                 :load-source="loadSource"
@@ -1173,6 +1403,18 @@ defineExpose({ drop, refresh });
                 @error="emit('error', $event)"
               />
               <div class="rm-owners">
+                <button
+                  v-if="!selectedResource.global"
+                  :disabled="locked(selectedResource)"
+                  @click="cacheResources([selectedResource])"
+                >
+                  <HardDrive :size="13" />{{ t("缓存到启动器") }}
+                </button>
+                <template v-else>
+                  <span class="rm-muted"
+                    ><HardDrive :size="13" /> {{ t("全局缓存") }}</span
+                  >
+                </template>
                 <button
                   v-for="owner in selectedResource.owners"
                   :key="owner.id + owner.version"
@@ -1301,7 +1543,7 @@ defineExpose({ drop, refresh });
             <button
               v-if="!skin.account || skin.textureKey"
               class="text-action"
-              :disabled="mutating"
+              :disabled="mutating || libraryDownloading"
               @click="exportSkin"
             >
               <Download :size="15" />{{ t("导出") }}
@@ -1349,37 +1591,72 @@ defineExpose({ drop, refresh });
             <div v-if="entry.kind === 'resources'" class="rm-usage">
               <div
                 class="rm-usage-bar"
-                role="img"
+                role="group"
                 :aria-label="cacheUsageLabel(entry) || t('资源缓存')"
               >
-                <span
+                <button
                   v-for="part in (entry.parts || []).filter((p) => p.size > 0)"
                   :key="part.kind"
                   class="rm-usage-segment"
                   :style="{
                     width: `${(part.size / entry.size) * 100}%`,
-                    '--resource-color': cachePartColors[part.kind],
+                    '--resource-color': cacheResourceParts[part.kind].color,
                   }"
-                  :title="`${t(cachePartLabels[part.kind])} · ${formatBytes(part.size)}`"
+                  :title="`${t(cacheResourceParts[part.kind].label)} · ${formatBytes(part.size)}`"
+                  :aria-label="`${t(cacheResourceParts[part.kind].label)} · ${formatBytes(part.size)}`"
+                  @click="showCachePart(part.kind)"
                 />
               </div>
               <div class="rm-usage-legend">
-                <span
+                <button
                   v-for="part in entry.parts || []"
                   :key="part.kind"
                   class="rm-usage-key"
-                  :style="{ '--resource-color': cachePartColors[part.kind] }"
+                  :style="{
+                    '--resource-color': cacheResourceParts[part.kind].color,
+                  }"
+                  @click="showCachePart(part.kind)"
                 >
                   <i aria-hidden="true" />
-                  <span>{{ t(cachePartLabels[part.kind]) }}</span>
+                  <span>{{ t(cacheResourceParts[part.kind].label) }}</span>
                   <span class="rm-size">{{ formatBytes(part.size) }}</span>
-                </span>
+                </button>
               </div>
             </div>
           </article>
         </div>
       </div>
     </ContentSwitch>
+    <!-- Keep the nested dialog in the theme scope while outside the parent panel. -->
+    <Teleport to=".shell">
+      <Transition
+        name="dialog"
+        appear
+        @before-leave="prepareDialogLeave"
+        @after-leave="finishDialogLeave"
+      >
+        <ToolWindow
+          v-if="browsing"
+          window-id="library-browser"
+          :initial-size="{ width: 820, height: 580 }"
+          :label="t('添加资源')"
+          :locked="libraryDownloading"
+          @close="closeBrowser"
+        >
+          <ResourceLibraryBrowser
+            :rpc="rpc"
+            :manifest="manifest"
+            :kind="resourceKind as ResourceKind"
+            :busy="busy && !libraryDownloading"
+            @back="closeBrowser"
+            @busy="downloadBusy"
+            @downloaded="downloadedResource"
+            @error="emit('error', $event)"
+            @link="emit('link', $event)"
+          />
+        </ToolWindow>
+      </Transition>
+    </Teleport>
     <Transition name="toast"
       ><div v-if="confirm" class="rm-confirm" role="alert">
         <div>
@@ -1399,6 +1676,7 @@ defineExpose({ drop, refresh });
     >
       <LoaderCircle class="spinning" :size="15" />
     </div>
+    <ResourceTransferOverlay :drag="javaDrag.drag.value" trash-only />
   </section>
 </template>
 
@@ -1475,6 +1753,30 @@ defineExpose({ drop, refresh });
   flex-direction: column;
   min-height: 0;
   flex: 1;
+}
+.rm-toolbar.list-reveal-item {
+  animation-name: resource-toolbar-enter, list-row-fade;
+}
+:global(.dialog-leave-active)
+  :is(.rm-toolbar, .rm-tile, .rm-skin-card, .rm-skin-import) {
+  animation: none;
+  transition:
+    opacity var(--motion-fade) var(--motion-ease),
+    transform var(--motion-panel) var(--motion-ease);
+}
+:global(.dialog-leave-to)
+  :is(.rm-toolbar, .rm-tile, .rm-skin-card, .rm-skin-import) {
+  opacity: 0;
+  /* Offset the dialog's 8px descent, matching the list's upward exit. */
+  transform: translateY(-16px);
+}
+@keyframes resource-toolbar-enter {
+  from {
+    transform: translateY(-12px);
+  }
+  to {
+    transform: none;
+  }
 }
 .rm-toolbar {
   display: flex;
@@ -1579,6 +1881,9 @@ defineExpose({ drop, refresh });
   border-radius: 2px;
 }
 .rm-usage-segment {
+  border: 0;
+  padding: 0;
+  cursor: pointer;
   display: block;
   flex: none;
   height: 100%;
@@ -1593,6 +1898,11 @@ defineExpose({ drop, refresh });
   margin-top: 10px;
 }
 .rm-usage-key {
+  border: 0;
+  padding: 3px 0;
+  background: none;
+  font: inherit;
+  cursor: pointer;
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -1604,6 +1914,45 @@ defineExpose({ drop, refresh });
   height: 6px;
   background: var(--resource-color);
   box-shadow: 0 0 7px color-mix(in srgb, var(--resource-color) 40%, transparent);
+}
+.rm-usage-key:hover,
+.rm-usage-key:focus-visible {
+  color: var(--resource-color);
+}
+.rm-usage-segment:hover,
+.rm-usage-segment:focus-visible {
+  filter: brightness(1.3);
+}
+.rm-usage-segment:focus-visible {
+  outline: 1px solid var(--ink);
+  outline-offset: -1px;
+}
+.rm-resource-cached {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  display: flex;
+  color: var(--tile-color);
+}
+.rm-cache-filter,
+.rm-cache-filter.active,
+.rm-cache-filter:hover:not(:disabled) {
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+  filter: none;
+}
+.rm-cache-filter.active,
+.rm-cache-filter:focus-visible {
+  color: var(--blue);
+  outline: none;
+}
+.rm-cache-filter > svg {
+  transition: filter 180ms;
+}
+.rm-cache-filter.active > svg,
+.rm-cache-filter:focus-visible > svg {
+  filter: drop-shadow(0 0 5px var(--blue));
 }
 .rm-usage-key .rm-size {
   color: var(--ink);
@@ -1701,12 +2050,22 @@ button:disabled {
   flex-shrink: 0;
 }
 .rm-resource-count {
+  display: flex;
+  justify-content: flex-end;
+  width: 5ch;
   font-variant-numeric: tabular-nums;
+}
+.rm-resource-count :deep(.animated-count) {
+  top: 0;
+}
+.rm-resources {
+  position: relative;
 }
 .rm-search input {
   font-size: 11px;
   background: none;
   border: 0;
+  box-shadow: none;
   outline: none;
   width: 145px;
   min-width: 0;
@@ -1746,6 +2105,19 @@ button:disabled {
 .rm-java-tile,
 .rm-java-add {
   --tile-color: #e7bc76;
+}
+.rm-java-cached {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  display: flex;
+  color: var(--tile-color);
+}
+.rm-java-tile .rm-tile-caption {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .rm-tile:hover:not(:disabled),
 .rm-tile.active,
@@ -1795,8 +2167,11 @@ button:disabled {
   filter: drop-shadow(0 0 6px var(--tile-color));
 }
 .rm-grid-empty {
-  grid-column: 1 / -1;
-  min-height: 100px;
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  min-height: 0;
+  pointer-events: none;
 }
 .rm-java-details {
   display: flex;

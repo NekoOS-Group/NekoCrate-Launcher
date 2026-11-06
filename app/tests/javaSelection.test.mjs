@@ -42,13 +42,7 @@ test("Java 列表合并探测结果与已有路径，迟到的探测不覆盖用
     assert.equal(ui.form.java_path, "/chosen/jdk/bin/java");
     assert.deepEqual(
       ui.javaChoices.value.map((choice) => choice.value),
-      [
-        "",
-        "/jdk21/bin/java",
-        "/jdk8/bin/java",
-        "/chosen/jdk/bin/java",
-        "/custom/jdk/bin/java",
-      ],
+      ["", "/jdk21/bin/java", "/jdk8/bin/java", "/chosen/jdk/bin/java"],
     );
     fixture.handlers.update = (request) => {
       instance.java_path = request.java_path;

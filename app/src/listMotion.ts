@@ -140,11 +140,25 @@ export function leaveList(element: Element, done: () => void) {
     for (const footer of root.querySelectorAll<HTMLElement>(
       "[data-list-footer]",
     )) {
+      const style = getComputedStyle(footer);
+      const exitY = Number(footer.dataset.listExitY);
+      if (Number.isFinite(exitY)) {
+        animations.push(
+          footer.animate(
+            [
+              { transform: style.transform },
+              { transform: `translateY(${exitY}px)` },
+            ],
+            { duration: 180, easing: ROW_EASE, fill: "both" },
+          ),
+        );
+      }
       animations.push(
-        footer.animate(
-          [{ opacity: getComputedStyle(footer).opacity }, { opacity: 0 }],
-          { duration: ROW_FADE_MS, easing: ROW_EASE, fill: "both" },
-        ),
+        footer.animate([{ opacity: style.opacity }, { opacity: 0 }], {
+          duration: ROW_FADE_MS,
+          easing: ROW_EASE,
+          fill: "both",
+        }),
       );
     }
   }

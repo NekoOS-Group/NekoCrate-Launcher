@@ -121,6 +121,8 @@ pub struct JavaInfo {
     pub version: String,
     pub arch: String,
     pub jdk: bool,
+    #[serde(default)]
+    pub vendor: String,
 }
 pub struct JavaRequirement {
     pub major: u32,
@@ -312,14 +314,14 @@ fn parse_probe(path: &Path, output: &str) -> Result<JavaInfo> {
     let version = property("java.version")
         .or_else(|| captures.as_ref().and_then(|c| c.get(1)).map(|m| m.as_str()))
         .context("无法识别 Java 版本")?;
-    let number =
-        crate::java_compatibility::java_version_number(version).context("Java 版本格式无效")?;
+    let number = crate::java_compatibility::java_version_number(version)
+        .with_context(|| format!("Java 版本格式无效：{version} · {}", path.display()))?;
     anyhow::ensure!((5..=64).contains(&number[0]), "Java 版本超出支持范围");
     let version = property("java.runtime.version")
         .filter(|runtime| {
             !version.contains("-ea")
                 && !version.contains("-internal")
-                && crate::java_compatibility::java_version_number(runtime) == Some(number)
+                && crate::java_compatibility::java_version_number(runtime).as_ref() == Some(&number)
         })
         .unwrap_or(version);
     let arch = match property("os.arch").context("Java 未报告运行时架构")? {
@@ -341,6 +343,7 @@ fn parse_probe(path: &Path, output: &str) -> Result<JavaInfo> {
         version: version.into(),
         arch: arch.into(),
         jdk: runtime_is_jdk(&executable),
+        vendor: property("java.vendor").unwrap_or_default().into(),
     })
 }
 fn runtime_is_jdk(path: &Path) -> bool {
@@ -506,7 +509,7 @@ pub fn ensure<'a>(
             .filter_map(|n| n.as_u64().and_then(|n| u32::try_from(n).ok()))
             .filter(|major| requirement.allowed_majors().contains(major))
             .collect();
-        majors.sort_by_key(|major| {
+        crate::sorting::sort_by_cached_key(&mut majors, |major| {
             (
                 *major != requirement.major,
                 !lts.iter().any(|v| v.as_u64() == Some((*major).into())),
@@ -531,6 +534,7 @@ pub fn ensure<'a>(
                     version: version.into(),
                     arch: requirement.arch.into(),
                     jdk: image_type == "jdk",
+                    vendor: "Eclipse Adoptium".into(),
                 };
                 if let Some(reason) = requirement.rejection(&candidate) {
                     sink(Event::new(
@@ -627,23 +631,22 @@ fn download_image_type(major: u32, needs_jdk: bool) -> &'static str {
     }
 }
 
-fn version_numbers(version: &str) -> Vec<u32> {
-    let mut number = crate::java_compatibility::java_version_number(version)
-        .unwrap_or_default()
-        .to_vec();
+fn version_numbers(version: &str) -> (Vec<u32>, Vec<u32>) {
+    let number = crate::java_compatibility::java_version_number(version).unwrap_or_default();
     let value = version.split('"').nth(1).unwrap_or(version);
     let build = value
         .split_once('+')
         .or_else(|| value.split_once("-b"))
         .map(|(_, tail)| tail);
-    if let Some(build) = build {
-        number.extend(
+    let build = build
+        .map(|build| {
             build
                 .split(|c: char| !c.is_ascii_digit())
-                .filter_map(|s| s.parse::<u32>().ok()),
-        );
-    }
-    number
+                .filter_map(|s| s.parse::<u32>().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    (number, build)
 }
 fn extract_runtime(archive: &Path, dest: &Path, cancel: &CancellationToken) -> Result<()> {
     let file = std::fs::File::open(archive)?;
@@ -740,7 +743,8 @@ mod tests {
                 major,
                 version: format!("{major}.0.1"),
                 arch: "aarch64".into(),
-                jdk: false
+                jdk: false,
+                vendor: String::new(),
             }));
         }
         assert_eq!(super::download_image_type(8, false), "jre");
@@ -859,6 +863,7 @@ mod tests {
                 version: format!("{major}.0.1"),
                 arch: auto.arch.into(),
                 jdk: false,
+                vendor: String::new(),
             };
             assert_eq!(auto.rejection(&java), manual.rejection(&java));
             assert_eq!(auto.matches(&java), major >= 17);
@@ -881,6 +886,7 @@ mod tests {
                 version: format!("{major}.0.8"),
                 arch: requirement.arch.into(),
                 jdk: false,
+                vendor: String::new(),
             })
             .collect();
         assert_eq!(requirement.select(&available, None).unwrap().major, 17);
@@ -929,6 +935,44 @@ mod tests {
             parse_probe(path, "java.version = 21.0.7").is_err(),
             "Do not guess the host architecture when probing an emulated JVM"
         );
+    }
+
+    #[test]
+    fn probe_reads_reported_vendor_without_guessing_from_the_path() {
+        for vendor in [
+            "Eclipse Adoptium",
+            "Azul Systems, Inc.",
+            "Oracle Corporation",
+            "Custom JVM",
+        ] {
+            let info = parse_probe(
+                Path::new("/Temurin/bin/java"),
+                &format!("java.version = 21.0.7\nos.arch = amd64\njava.vendor = {vendor}\n"),
+            )
+            .unwrap();
+            assert_eq!(info.vendor, vendor);
+        }
+        let old: JavaInfo = serde_json::from_value(serde_json::json!({
+            "path": "/java", "major": 17, "version": "17.0.1", "arch": "aarch64", "jdk": true
+        }))
+        .unwrap();
+        assert!(old.vendor.is_empty());
+    }
+
+    #[test]
+    fn probe_and_ordering_preserve_extended_release_before_build_number() {
+        let java = parse_probe(Path::new("/nonexistent/java"),
+            "java.version = 27.0.1.0.2\njava.runtime.version = 27.0.1.0.2+1\nos.arch = aarch64\njava.vendor = Eclipse Adoptium\n").unwrap();
+        assert_eq!(java.major, 27);
+        assert_eq!(java.version, "27.0.1.0.2+1");
+        assert!(version_numbers("27.0.1.0.2+1") > version_numbers("27.0.1+99"));
+        assert!(version_numbers("27.0.1.0.3+1") > version_numbers("27.0.1.0.2+99"));
+        assert!(version_numbers("27.0.1.0.2+9") > version_numbers("27.0.1.0.2+1"));
+        assert_eq!(
+            version_numbers("27.0.1.0.2.0+9"),
+            version_numbers("27.0.1.0.2+9")
+        );
+        assert!(version_numbers("1.8.0_504-b02") > version_numbers("1.8.0_504-b01"));
     }
 
     #[cfg(unix)]

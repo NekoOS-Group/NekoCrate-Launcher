@@ -9,6 +9,13 @@ struct Credentials {
     session: Option<MinecraftSession>,
 }
 
+fn session_is_valid(session: &MinecraftSession) -> bool {
+    session.account.owned
+        // Wall time notices sleep; monotonic time resists clock rollback.
+        && crate::storage::now() < session.account.expires_at.saturating_sub(60)
+        && Instant::now() < session.valid_until
+}
+
 #[derive(Default)]
 pub(crate) struct SessionCache(Mutex<HashMap<String, Credentials>>);
 
@@ -17,13 +24,7 @@ impl SessionCache {
         let entries = self.0.lock().unwrap();
         let credentials = entries.get(&account.id)?;
         let session = credentials.session.as_ref()?;
-        (credentials.client_id == account.client_id
-            && session.account.owned
-            // Some monotonic clocks stop during sleep. The wall-clock guard
-            // also expires those sessions after wake; the monotonic guard
-            // prevents a wall-clock rollback from extending their lifetime.
-            && crate::storage::now() < session.account.expires_at.saturating_sub(60)
-            && Instant::now() < session.valid_until)
+        (credentials.client_id == account.client_id && session_is_valid(session))
             .then(|| session.clone())
     }
 
@@ -31,6 +32,21 @@ impl SessionCache {
         let entries = self.0.lock().unwrap();
         let credentials = entries.get(&account.id)?;
         (credentials.client_id == account.client_id).then(|| credentials.refresh_token.clone())
+    }
+
+    /// Restarting loses access tokens, but must not cause background Keychain
+    /// reads while the persisted login is still fresh. Launch can obtain a
+    /// session on demand; a known in-memory expiry remains authoritative.
+    pub fn background_refresh_due(&self, account: &Account) -> bool {
+        let entries = self.0.lock().unwrap();
+        match entries
+            .get(&account.id)
+            .filter(|credentials| credentials.client_id == account.client_id)
+            .and_then(|credentials| credentials.session.as_ref())
+        {
+            Some(session) => !session_is_valid(session),
+            None => crate::storage::now() >= account.expires_at.saturating_sub(60),
+        }
     }
 
     pub fn remember_refresh(&self, account: &Account, token: String) {
@@ -96,6 +112,7 @@ mod tests {
         };
         cache.remember(session.clone());
         assert!(cache.session(&account).is_some());
+        assert!(!cache.background_refresh_due(&account));
         let mut other = account.clone();
         other.id = "account-b".into();
         assert!(cache.session(&other).is_none());
@@ -112,11 +129,13 @@ mod tests {
             cache.session(&account).is_none(),
             "sleep cannot keep an expired token alive"
         );
+        assert!(cache.background_refresh_due(&account));
         cache.remember(MinecraftSession {
             valid_until: Instant::now(),
             ..session.clone()
         });
         assert!(cache.session(&account).is_none());
+        assert!(cache.background_refresh_due(&account));
         assert_eq!(
             cache.refresh_token(&account).as_deref(),
             Some("refresh-fixture")
@@ -131,7 +150,38 @@ mod tests {
         cache.invalidate_session(&account.id);
         assert!(cache.session(&account).is_none());
         assert!(cache.refresh_token(&account).is_some());
+        assert!(!cache.background_refresh_due(&account));
         cache.remove(&account.id);
         assert!(cache.refresh_token(&account).is_none());
+    }
+
+    #[test]
+    fn persisted_login_only_refreshes_near_expiry_without_a_cached_session() {
+        let cache = SessionCache::default();
+        let mut account = Account {
+            id: "account-a".into(),
+            username: "A".into(),
+            client_id: "app-a".into(),
+            expires_at: crate::storage::now() + 3600,
+            owned: true,
+            skin: None,
+        };
+        assert!(!cache.background_refresh_due(&account));
+        account.expires_at = crate::storage::now() + 60;
+        assert!(cache.background_refresh_due(&account));
+        account.expires_at = 0;
+        assert!(cache.background_refresh_due(&account));
+
+        cache.remember(MinecraftSession {
+            account: account.clone(),
+            access_token: "access-fixture".into(),
+            refresh_token: "refresh-fixture".into(),
+            xuid: "xuid-fixture".into(),
+            valid_until: Instant::now(),
+        });
+        account.expires_at = crate::storage::now() + 3600;
+        assert!(cache.background_refresh_due(&account));
+        account.client_id = "app-b".into();
+        assert!(!cache.background_refresh_due(&account));
     }
 }

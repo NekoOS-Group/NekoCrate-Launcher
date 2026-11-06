@@ -1,3 +1,4 @@
+import { managerActions } from "./helpers/appSettingsFixture.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
@@ -521,21 +522,25 @@ test("manager IPC addresses the displayed directory and keeps the dialog open af
       return instance;
     };
     ui.manageVersions(instance);
-    assert.equal(ui.modal.value, "manage");
-    assert.equal((await ui.readVersionContentCounts("1.21.1")).datapacks, 3);
+    assert.equal(ui.managedWindows.value.length, 1);
     assert.equal(
-      (await ui.readVersionContent("1.21.1", "saves")).directory,
+      (await managerActions(ui).readVersionContentCounts("1.21.1")).datapacks,
+      3,
+    );
+    assert.equal(
+      (await managerActions(ui).readVersionContent("1.21.1", "saves"))
+        .directory,
       "/linked/saves",
     );
-    await ui.renameVersion("1.21.1", "My Fabric");
+    await managerActions(ui).renameVersion("1.21.1", "My Fabric");
     assert.equal(
-      versionName(ui.managedInstance.value.versions[0]),
+      versionName(ui.versionWindows.value[0].instance.versions[0]),
       "My Fabric",
     );
-    assert.equal(ui.modal.value, "manage");
-    await ui.deleteVersion("1.21.1");
-    assert.equal(ui.managedInstance.value.versions.length, 0);
-    assert.equal(ui.modal.value, "manage");
+    assert.equal(ui.managedWindows.value.length, 1);
+    await managerActions(ui).deleteVersion("1.21.1");
+    assert.equal(ui.versionWindows.value[0].instance.versions.length, 0);
+    assert.equal(ui.managedWindows.value.length, 1);
     assert.equal(
       fixture.calls.some((c) => ["install", "launch"].includes(c.op)),
       false,
@@ -743,21 +748,21 @@ test("management target switches without changing the main launch selection and 
     await ui.sync();
     ui.manageVersions(first);
     const main = ui.selectedInstance.value?.id;
-    ui.switchManagedInstance(second.id);
-    assert.equal(ui.managedInstance.value.id, second.id);
+    ui.switchManagedInstance(ui.managedWindows.value[0].id, second.id);
+    assert.equal(ui.versionWindows.value[0].instance.id, second.id);
     assert.equal(ui.selectedInstance.value?.id, main);
     for (const op of ["version_metadata"])
       fixture.handlers[op] = (request) => {
         assert.equal(request.id, second.id);
         return {};
       };
-    await ui.readVersionMetadata("1.21.1");
-    ui.managing.value = true;
-    ui.switchManagedInstance(first.id);
-    assert.equal(ui.managedInstance.value.id, second.id);
-    ui.managing.value = false;
-    ui.switchManagedInstance("missing");
-    assert.equal(ui.managedInstance.value.id, second.id);
+    await managerActions(ui).readVersionMetadata("1.21.1");
+    ui.setManagedBusy(ui.managedWindows.value[0].id, true);
+    ui.switchManagedInstance(ui.managedWindows.value[0].id, first.id);
+    assert.equal(ui.versionWindows.value[0].instance.id, second.id);
+    ui.setManagedBusy(ui.managedWindows.value[0].id, false);
+    ui.switchManagedInstance(ui.managedWindows.value[0].id, "missing");
+    assert.equal(ui.versionWindows.value[0].instance.id, second.id);
   } finally {
     dispose();
   }
@@ -779,7 +784,7 @@ test("metadata Mod links open the selected version's Mods tab without changing t
     h.ui.selected.value = "second";
     h.ui.tabBar.value = {
       querySelector: (selector) => {
-        assert.equal(selector, "#version-content-tab-mods");
+        assert.equal(selector, `#${h.ui.panelId}-tab-mods`);
         return {
           focus: () => {
             focused = true;
@@ -818,7 +823,7 @@ test("content detail IPC uses the row's captured instance, version, type and rel
       };
     };
     ui.editing.value = { id: "different-current-instance" };
-    const result = await ui.readContentMetadata(
+    const result = await managerActions(ui).readContentMetadata(
       "row-instance",
       "row-version",
       "datapacks",
@@ -843,7 +848,7 @@ test("opening a content folder preserves the row context when another instance i
       return true;
     };
     ui.editing.value = { id: "different-current-instance" };
-    await ui.openContentFolder(
+    await managerActions(ui).openContentFolder(
       "row-instance",
       "row-version",
       "mods",

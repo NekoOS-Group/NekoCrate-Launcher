@@ -42,7 +42,7 @@ fn valid_destination(entry: &PlanEntry, target: &ResourceTarget) -> Result<PathB
     }
     safe_join(&target.directory, &entry.destination)
 }
-fn staged_path(directory: &Path, index: usize, entry: &PlanEntry) -> Result<PathBuf> {
+pub(super) fn staged_path(directory: &Path, index: usize, entry: &PlanEntry) -> Result<PathBuf> {
     let name = entry
         .destination
         .rsplit('/')
@@ -511,6 +511,7 @@ fn commit(
     cancel: CancellationToken,
 ) -> Result<ResourcePlan> {
     check_mods(&plan, Some(directory))?;
+    super::repair::validate(&plan, directory, &cancel)?;
     for (index, entry) in plan.entries.iter_mut().enumerate() {
         let path = if entry.reuse {
             valid_destination(entry, &plan.target)?

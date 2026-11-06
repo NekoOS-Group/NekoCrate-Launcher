@@ -28,7 +28,7 @@ fn size(path: &Path) -> Result<(u64, usize)> {
     Ok((bytes, files))
 }
 /// Reject symlinked managed roots, including intermediate directories.
-fn owned(root: &Path, relative: &Path) -> Result<PathBuf> {
+pub(crate) fn owned(root: &Path, relative: &Path) -> Result<PathBuf> {
     ensure!(
         !relative.as_os_str().is_empty()
             && relative
@@ -58,7 +58,6 @@ pub struct Runtime {
     pub java: java::JavaInfo,
     pub source: &'static str,
     pub size: u64,
-    pub used_by: Vec<String>,
 }
 #[derive(Clone, Serialize)]
 pub struct Owner {
@@ -70,6 +69,7 @@ pub struct Owner {
 pub struct ResourceGroup {
     pub directory: PathBuf,
     pub owners: Vec<Owner>,
+    pub global: bool,
 }
 #[derive(Serialize)]
 pub struct ResourceIndex {
@@ -87,8 +87,16 @@ impl CacheKind {
     fn directories(self) -> &'static [&'static str] {
         match self {
             Self::Metadata => &["metadata"],
-            Self::Resources => &["runtimes", "cache/skins", "skin-library"],
-            Self::Partials => &["cache/objects", "cache/java"],
+            Self::Resources => &[
+                "runtimes",
+                "cache/skins",
+                "skin-library",
+                "resource-library/mods",
+                "resource-library/resourcepacks",
+                "resource-library/shaderpacks",
+                "resource-library/datapacks",
+            ],
+            Self::Partials => &["cache/objects", "cache/java", "resource-library/.imports"],
         }
     }
 }
@@ -149,43 +157,6 @@ impl Launcher {
         Ok(_directory_guard)
     }
 
-    fn runtime_users(&self, java_path: &Path) -> Vec<String> {
-        let home = self.runtime_home(java_path);
-        let java_path = identity(java_path);
-        let matches = |path: &str| {
-            identity(Path::new(path)) == java_path
-                || home
-                    .as_ref()
-                    .is_some_and(|home| self.runtime_home(Path::new(path)).as_ref() == Some(home))
-        };
-        let mut users = vec![];
-        for instance in self.snapshot().database.instances {
-            if instance.java_path.as_ref().is_some_and(|p| matches(p)) {
-                users.push(instance.name.clone());
-            }
-            for version in &instance.versions {
-                let file = instance
-                    .game_dir(self.root())
-                    .join("versions")
-                    .join(&version.id)
-                    .join("runtime.json");
-                let value: serde_json::Value = fs::read(file)
-                    .ok()
-                    .and_then(|b| serde_json::from_slice(&b).ok())
-                    .unwrap_or_default();
-                if value["path"].as_str().is_some_and(&matches) {
-                    users.push(format!(
-                        "{} · {}",
-                        instance.name,
-                        version.name.as_deref().unwrap_or(&version.id)
-                    ));
-                }
-            }
-        }
-        users.sort();
-        users.dedup();
-        users
-    }
     fn runtime_home(&self, path: &Path) -> Option<PathBuf> {
         let root = owned(self.root(), Path::new("runtimes")).ok()?;
         let canonical_root = root.canonicalize().ok()?;
@@ -242,14 +213,12 @@ impl Launcher {
             } else {
                 "system"
             };
-            let used_by = self.runtime_users(Path::new(&info.path));
             runtimes.push(Runtime {
                 size: home
                     .map(|p| size(&p).map(|s| s.0))
                     .transpose()?
                     .unwrap_or(0),
                 source,
-                used_by,
                 java: info,
             });
         }
@@ -282,6 +251,13 @@ impl Launcher {
         Ok(info)
     }
     pub fn remove_resource_java(&self, path: &Path) -> Result<()> {
+        self.remove_resource_java_with_recycle(path, crate::recycle::move_to_trash)
+    }
+    fn remove_resource_java_with_recycle(
+        &self,
+        path: &Path,
+        recycle: fn(&Path) -> Result<()>,
+    ) -> Result<()> {
         let _guard = self
             .0
             .operation
@@ -291,18 +267,30 @@ impl Launcher {
             self.0.games.lock().unwrap().is_empty(),
             "请先关闭正在运行的游戏"
         );
-        ensure!(
-            self.runtime_users(path).is_empty(),
-            "该 Java 仍被实例引用，请先切换实例的 Java 并重新启动游戏"
-        );
         let mut registered = registered_java(self.root());
-        let was_registered = registered.iter().any(|p| identity(p) == identity(path));
-        registered.retain(|p| identity(p) != identity(path));
-        if let Some(home) = self.runtime_home(path) {
-            crate::recycle::move_to_trash(&home)?;
-        } else {
-            ensure!(was_registered, "系统 Java 只能在系统中卸载");
-        }
+        let home = self
+            .runtime_home(path)
+            .context("仅可删除启动器缓存的 Java")?;
+        // All executables in a managed JDK (including its nested JRE and
+        // aliases) disappear together. Configured users return to Auto;
+        // historical launch receipts already reject missing runtime images.
+        registered.retain(|p| self.runtime_home(p).as_ref() != Some(&home));
+        self.mutate_recycling(
+            &home,
+            |db| {
+                for instance in &mut db.instances {
+                    if instance
+                        .java_path
+                        .as_ref()
+                        .is_some_and(|p| self.runtime_home(Path::new(p)).as_ref() == Some(&home))
+                    {
+                        instance.java_path = None;
+                    }
+                }
+                Ok(())
+            },
+            recycle,
+        )?;
         storage::atomic_write(
             &self.root().join("java-paths.json"),
             &crate::portable::to_vec(self.root(), &registered)?,
@@ -372,13 +360,26 @@ impl Launcher {
                 }
             }
         }
-        ResourceIndex {
-            groups: groups
-                .into_iter()
-                .map(|(directory, owners)| ResourceGroup { directory, owners })
-                .collect(),
-            issues,
+        let mut groups: Vec<_> = groups
+            .into_iter()
+            .map(|(directory, owners)| ResourceGroup {
+                directory,
+                owners,
+                global: false,
+            })
+            .collect();
+        match self.resource_library_root() {
+            Ok(directory) => groups.insert(
+                0,
+                ResourceGroup {
+                    directory,
+                    owners: vec![],
+                    global: true,
+                },
+            ),
+            Err(error) => issues.push(format!("全局资源库：{error:#}")),
         }
+        ResourceIndex { groups, issues }
     }
     pub fn resource_cache(&self) -> Result<Vec<CacheEntry>> {
         let mut entries = Vec::new();
@@ -404,6 +405,20 @@ impl Launcher {
                 if matches!(kind, CacheKind::Resources) {
                     let key = if path.starts_with(self.root().join("runtimes")) {
                         "java"
+                    } else if let Ok(relative) =
+                        path.strip_prefix(self.root().join("resource-library"))
+                    {
+                        match relative
+                            .components()
+                            .next()
+                            .and_then(|c| c.as_os_str().to_str())
+                        {
+                            Some("mods") => "mods",
+                            Some("resourcepacks") => "resourcepacks",
+                            Some("shaderpacks") => "shaderpacks",
+                            Some("datapacks") => "datapacks",
+                            _ => continue,
+                        }
                     } else {
                         "skins"
                     };
@@ -941,8 +956,10 @@ mod tests {
             .unwrap();
         let index = launcher.resource_groups(ContentKind::Mods);
         assert!(index.issues.is_empty());
-        assert_eq!(index.groups.len(), 1);
-        assert_eq!(index.groups[0].owners.len(), 2);
+        assert_eq!(index.groups.iter().filter(|g| g.global).count(), 1);
+        let linked: Vec<_> = index.groups.iter().filter(|g| !g.global).collect();
+        assert_eq!(linked.len(), 1);
+        assert_eq!(linked[0].owners.len(), 2);
         launcher
             .0
             .games
@@ -952,7 +969,7 @@ mod tests {
         assert!(launcher.resource_directory_idle(&a.id, "1.20.1").is_err());
     }
     #[test]
-    fn external_java_cannot_be_deleted_and_registration_removal_keeps_file() {
+    fn external_java_cannot_be_deleted_or_unregistered() {
         let (temp, launcher) = fixture();
         put(temp.path(), "external/bin/java", b"java");
         let path = temp.path().join("external/bin/java");
@@ -962,12 +979,12 @@ mod tests {
             &serde_json::to_vec(&vec![path.clone()]).unwrap(),
         )
         .unwrap();
-        launcher.remove_resource_java(&path).unwrap();
+        assert!(launcher.remove_resource_java(&path).is_err());
         assert!(path.is_file());
-        assert!(registered_java(launcher.root()).is_empty());
+        assert_eq!(registered_java(launcher.root()), vec![path]);
     }
     #[test]
-    fn managed_java_removal_protects_all_executables_in_the_same_runtime() {
+    fn managed_java_removal_resets_references_to_auto_and_preserves_other_runtimes() {
         let (_temp, launcher) = fixture();
         put(launcher.root(), "runtimes/jdk-17/bin/java", b"java");
         put(launcher.root(), "runtimes/jdk-17/jre/bin/java", b"java");
@@ -984,10 +1001,66 @@ mod tests {
             })
             .unwrap();
         let primary = launcher.root().join("runtimes/jdk-17/bin/java");
-        assert_eq!(launcher.runtime_users(&primary), vec!["Configured"]);
-        assert!(launcher.remove_resource_java(&primary).is_err());
+        let other = launcher.root().join("runtimes/jdk-21/bin/java");
+        put(launcher.root(), "runtimes/jdk-21/bin/java", b"keep");
+        storage::write_json(
+            &launcher.root().join("java-paths.json"),
+            &vec![primary.clone(), nested.clone(), other.clone()],
+        )
+        .unwrap();
+        let history = instance
+            .game_dir(launcher.root())
+            .join("versions/1.20.1/runtime.json");
+        storage::write_json(&history, &serde_json::json!({"path": nested})).unwrap();
+        let inventory = launcher
+            .runtime_inventory(vec![java::JavaInfo {
+                path: primary.to_string_lossy().into_owned(),
+                major: 17,
+                version: "17.0.1".into(),
+                arch: "aarch64".into(),
+                jdk: true,
+                vendor: "Eclipse Adoptium".into(),
+            }])
+            .unwrap();
+        assert_eq!(inventory[0].source, "managed");
+        assert_eq!(inventory[0].java.vendor, "Eclipse Adoptium");
+        assert!(
+            serde_json::to_value(&inventory[0])
+                .unwrap()
+                .get("used_by")
+                .is_none()
+        );
+
+        let fail = |_: &Path| anyhow::bail!("recycle unavailable");
+        assert!(
+            launcher
+                .remove_resource_java_with_recycle(&primary, fail)
+                .is_err()
+        );
+        assert!(launcher.instance(&instance.id).unwrap().java_path.is_some());
         assert!(primary.is_file());
-        assert!(nested.is_file());
+        assert_eq!(registered_java(launcher.root()).len(), 3);
+
+        launcher
+            .remove_resource_java_with_recycle(&primary, crate::recycle::discard_test_fixture)
+            .unwrap();
+        assert!(!primary.exists());
+        assert!(!nested.exists());
+        assert!(launcher.instance(&instance.id).unwrap().java_path.is_none());
+        assert_eq!(registered_java(launcher.root()), vec![other.clone()]);
+        assert!(other.is_file());
+        let persisted: crate::model::Database =
+            crate::portable::read_json(launcher.root(), &launcher.root().join("database.json"))
+                .unwrap();
+        assert!(
+            persisted
+                .instances
+                .iter()
+                .find(|i| i.id == instance.id)
+                .unwrap()
+                .java_path
+                .is_none()
+        );
     }
     #[cfg(unix)]
     #[tokio::test]

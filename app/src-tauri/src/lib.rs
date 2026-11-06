@@ -12,6 +12,7 @@ mod download_retry;
 mod file_drag;
 mod folder_scan;
 mod game_export;
+mod home_widgets;
 mod import_picker;
 mod jobs;
 mod pausable;
@@ -21,6 +22,8 @@ mod resource_manager;
 mod startup;
 mod tagged_json;
 mod updater;
+#[cfg(not(target_os = "windows"))]
+mod window_icon;
 
 struct AppState {
     launcher: Launcher,
@@ -40,6 +43,16 @@ impl AppState {
 // below supplies the unchanged, internally tagged JSON wire representation.
 #[serde(remote = "Self", rename_all = "snake_case")]
 enum Request {
+    HomeWidgetFeed {
+        url: String,
+    },
+    HomeWidgetGlyphs {
+        text: String,
+    },
+    HomeWidgetLocal,
+    HomeServerStatus {
+        address: String,
+    },
     ExportGame {
         id: String,
         version: Option<String>,
@@ -123,6 +136,8 @@ enum Request {
     ResourceProject {
         platform: nekocrate_core::resources::Platform,
         project: String,
+        #[serde(default)]
+        refresh: bool,
     },
     ResourceProjectSummary {
         platform: nekocrate_core::resources::Platform,
@@ -175,6 +190,8 @@ enum Request {
         minecraft: String,
         loader: Option<nekocrate_core::model::ModLoader>,
         resources: Vec<nekocrate_core::resources::ResourceSelection>,
+        #[serde(default)]
+        local: Vec<nekocrate_core::resources::ResourceCopySource>,
     },
     SearchResources {
         scope: nekocrate_core::resources::ResourceScope,
@@ -190,6 +207,11 @@ enum Request {
         project: String,
         version: String,
         world: Option<String>,
+    },
+    PrepareMissingDependencies {
+        id: String,
+        version: String,
+        time: u64,
     },
     InspectResources {
         paths: Vec<PathBuf>,
@@ -214,6 +236,11 @@ enum Request {
     },
     ExportResources {
         sources: Vec<nekocrate_core::resources::ResourceCopySource>,
+    },
+    RemoveResources {
+        sources: Vec<nekocrate_core::resources::ResourceCopySource>,
+        #[serde(default)]
+        confirmed: bool,
     },
     ExportResource {
         source: nekocrate_core::resources::ResourceCopySource,
@@ -431,6 +458,7 @@ enum Request {
     },
     Launch {
         id: String,
+        server: Option<String>,
     },
     Stop {
         id: String,
@@ -447,7 +475,9 @@ enum Request {
     CancelLogin {
         session_id: String,
     },
-    RefreshAccount,
+    SyncAccount {
+        id: String,
+    },
     AccountSkin {
         id: String,
     },
@@ -529,14 +559,17 @@ fn dispatch<'a>(
             Request::CheckUpdate => Some("check_update"),
             Request::DownloadLauncherUpdate { .. } => Some("download_launcher_update"),
             Request::InstallLauncherUpdate => Some("install_launcher_update"),
-            Request::BeginLogin { .. } | Request::WaitLogin { .. } | Request::RefreshAccount => {
-                Some("login")
-            }
+            Request::BeginLogin { .. } | Request::WaitLogin { .. } => Some("login"),
+            Request::SyncAccount { .. } => Some("sync_account"),
             Request::RenameAccount { .. } => Some("rename_account"),
             _ => None,
         };
         let result: Result<Value, anyhow::Error> = async {
         Ok(match request{
+            Request::HomeWidgetFeed{url}=>home_widgets::fetch(launcher,&url).await?,
+            Request::HomeWidgetGlyphs{text}=>json!(nekocrate_core::widget_font::glyphs(launcher,text).await?),
+            Request::HomeWidgetLocal=>{let launcher=launcher.clone(); blocking::json(move || Ok::<_,anyhow::Error>(launcher.home_widget_local())).await??},
+            Request::HomeServerStatus{address}=>json!(nekocrate_core::home_dashboard::server_status(&address).await?),
             Request::ResourceManager{action}=>resource_manager::handle(action,&state,&app,&sink).await?,
             Request::DownloadDeclaredMod{id,version,key}=>{
                 let (cancel,guard)=state.job().await?;
@@ -581,7 +614,7 @@ fn dispatch<'a>(
                 let launcher=launcher.clone();
                 blocking::json(move || launcher.resource_target(&id,&version)).await??
             },
-            Request::ResourceProject{platform,project}=>json!(launcher.resource_project(platform,&project,&CancellationToken::new()).await?),
+            Request::ResourceProject{platform,project,refresh}=>json!(launcher.resource_project_with_refresh(platform,&project,refresh,&CancellationToken::new()).await?),
             Request::ResourceProjectSummary{platform,project}=>json!(launcher.resource_project_summary(platform,&project,&CancellationToken::new()).await?),
             Request::ResourceImage{url}=>{
                 use base64::Engine;
@@ -600,9 +633,9 @@ fn dispatch<'a>(
             },
             Request::SearchResourceCatalog{scope,query,offset}=>json!(launcher.search_resource_catalog(&scope,&query,offset,&CancellationToken::new()).await?),
             Request::CatalogResourceVersions{scope,project}=>json!(launcher.catalog_resource_versions(&scope,&project,&CancellationToken::new()).await?),
-            Request::QueueVersionResources{id,version,minecraft,loader,resources}=>{
+            Request::QueueVersionResources{id,version,minecraft,loader,resources,local}=>{
                 let launcher=launcher.clone();
-                blocking::json(move || launcher.queue_version_resources(&id,&version,&minecraft,loader,resources)).await??;
+                blocking::json(move || launcher.queue_version_resources(&id,&version,&minecraft,loader,resources,local)).await??;
                 json!(true)
             },
             Request::SearchResources{scope,query,offset}=>json!(launcher.search_resources(&scope,&query,offset,&CancellationToken::new()).await?),
@@ -610,6 +643,10 @@ fn dispatch<'a>(
             Request::PrepareResource{scope,project,version,world}=>{
                 let (cancel,_guard)=state.job().await?;
                 json!(launcher.prepare_resource(&scope,&project,&version,world.as_deref(),&cancel).await?)
+            },
+            Request::PrepareMissingDependencies{id,version,time}=>{
+                let (cancel,_guard)=state.job().await?;
+                json!(launcher.prepare_missing_dependencies(&id,&version,time,&cancel,&sink).await?)
             },
             Request::ExportGame{id,version,platform}=>{
                 let (cancel,_guard)=state.job().await?;
@@ -665,6 +702,10 @@ fn dispatch<'a>(
                 let worker=launcher.clone(); let token=cancel.clone();
                 let plan=blocking::run(move || worker.prepare_resource_copies_to(&sources,&id,&version,world.as_deref(),&token)).await??;
                 if let Some(plan)=plan { launcher.install_resources(&plan.target.instance,&plan.target.version,&plan.id,&cancel,&sink).await?;json!(true) } else {json!(false)}
+            },
+            Request::RemoveResources{sources,confirmed}=>{
+                let launcher=launcher.clone();
+                blocking::json(move || launcher.remove_game_resources_confirmed(&sources,confirmed)).await??
             },
             Request::ExportResources{sources}=>{
                 anyhow::ensure!(!sources.is_empty() && sources.len() <= 256,"每次最多拖动 256 项资源");
@@ -850,7 +891,7 @@ fn dispatch<'a>(
                 let operation = nekocrate_core::loader::with_pause(receiver.clone(), operation);
                 json!(pausable::run(operation,&cancel,receiver).await?)
             },
-            Request::Launch{id}=>{let (cancel,_guard)=state.job().await?;json!(launcher.launch(&id,&cancel,sink).await?)},
+            Request::Launch{id,server}=>{let (cancel,_guard)=state.job().await?;json!(launcher.launch_to_server(&id,server.as_deref(),&cancel,sink).await?)},
             Request::Stop{id}=>{launcher.stop_game(&id)?;json!(true)},
             Request::Cancel=>{state.jobs.cancel_task();json!(true)},
             Request::Pause | Request::Resume=>{
@@ -870,7 +911,7 @@ fn dispatch<'a>(
                 json!(guard.login(launcher.finish_login(challenge,&guard.cancel)).await?)
             },
             Request::CancelLogin{session_id}=>{state.jobs.cancel_login(&session_id).await;json!(true)},
-            Request::RefreshAccount=>{let (_cancel,_guard)=state.job().await?;json!(launcher.refresh_account().await?)},
+            Request::SyncAccount{id}=>json!(launcher.sync_account(&id).await?),
             Request::AccountSkin{id}=>json!(launcher.account_skin(&id).await?),
             Request::SelectAccount{id}=>{let (_cancel,_guard)=state.job().await?;if let Some(id)=id {launcher.select_account(&id)?;} else {launcher.select_guest()?;}json!(true)},
             Request::SetGuestName{name}=>json!(launcher.set_guest_name(&name)?),
@@ -1050,7 +1091,7 @@ pub fn run() {
 }
 
 fn application_context() -> tauri::Context {
-    tauri::generate_context!()
+    tauri::tauri_build_context!()
 }
 
 // Check the resolved release ACL, not just the source JSON. The JS integration

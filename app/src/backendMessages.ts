@@ -50,8 +50,8 @@ export const backendEnglish: Readonly<Record<string, string>> = {
   "环境变量名称重复：{name}": "Duplicate environment variable: {name}",
   "Java 版玩家名称须为 3–16 位英文字母、数字或下划线":
     "Use 3–16 letters, numbers or underscores for your Java Edition name",
-  "改名请求未完成，请刷新账户确认结果后再试":
-    "The name change request did not complete; refresh the account to confirm the result before retrying",
+  "改名请求未完成，请稍后确认账户名称再试":
+    "The name change request did not complete; check the account name again shortly before retrying",
   "无法检查玩家名称，请检查网络后重试":
     "Could not check the player name; check your connection and retry",
   "Minecraft 未接受此名称，请检查名称是否可用及账户改名限制":
@@ -81,8 +81,8 @@ export const backendEnglish: Readonly<Record<string, string>> = {
     "The player name service returned a different account",
   玩家改名服务未返回新名称:
     "The player name service did not return the new name",
-  "玩家改名服务返回的名称不匹配，请刷新账户确认结果":
-    "The player name service returned a different name; refresh the account to confirm the result",
+  "玩家改名服务返回的名称不匹配，请稍后确认账户名称":
+    "The player name service returned a different name; check the account name again shortly",
   "登录凭据已失效，请重新登录后修改玩家名称":
     "Your session is no longer valid; sign in again to change your player name",
   "正版账户皮肤须为 64×64 或 64×32 的 PNG":
@@ -497,8 +497,6 @@ export const backendEnglish: Readonly<Record<string, string>> = {
     "A parent or guardian must allow Xbox gaming in Microsoft Family settings.",
   "登录授权已被拒绝，请重新开始并在微软页面确认授权。":
     "Sign-in was denied. Start again and approve access on the Microsoft page.",
-  "登录验证码已过期，请重新获取验证码。":
-    "The sign-in code has expired. Request a new code.",
   "登录凭据已过期或被撤销，请移除账户并重新登录。":
     "Sign-in credentials have expired or been revoked. Remove the account and sign in again.",
   "Client ID 无效或应用未启用公共客户端流程，请检查微软应用注册配置。":
@@ -519,14 +517,23 @@ export const backendEnglish: Readonly<Record<string, string>> = {
     "{stage} failed (HTTP {status}): {detail}",
   "微软登录应用 ID 配置无效，请联系启动器维护者。":
     "The Microsoft sign-in app ID is invalid. Please contact the launcher maintainer.",
-  无法连接微软身份服务: "Could not connect to Microsoft sign-in",
-  获取验证码: "Request sign-in code",
-  微软返回了无效登录地址: "Microsoft returned an invalid sign-in URL",
   登录已取消: "Sign-in cancelled",
-  微软登录轮询失败: "Microsoft sign-in polling failed",
   "无法刷新微软登录，请检查网络":
     "Could not refresh Microsoft sign-in. Check your connection",
   刷新登录: "Refresh sign-in",
+  "无法同步账户资料，请检查网络":
+    "Could not sync the account profile. Check your connection",
+  "账户资料同步失败（HTTP {status}）":
+    "Account profile sync failed (HTTP {status})",
+  账户资料响应过大: "The account profile response is too large",
+  账户资料返回了无法解析的响应:
+    "The account service returned an unreadable profile",
+  "账户资料缺少 UUID": "The account profile is missing its UUID",
+  账户资料返回的账户不匹配:
+    "The returned account profile does not match this account",
+  账户资料缺少玩家名称: "The account profile is missing its player name",
+  账户资料中的玩家名称无效:
+    "The account profile contains an invalid player name",
   "Xbox 登录": "Xbox sign-in",
   "Xbox 未返回登录令牌": "Xbox did not return a sign-in token",
   "Xbox 游戏授权": "Xbox game authorization",
@@ -619,7 +626,7 @@ export const backendEnglish: Readonly<Record<string, string>> = {
     "This version uses an unsupported launch argument placeholder",
   "有任务正在运行，请等待或取消当前任务":
     "A task is running. Wait for it to finish or cancel it",
-  请先获取登录验证码: "Request a sign-in code first",
+  请先开始微软登录: "Start Microsoft sign-in first",
   无法确定数据目录: "Could not determine the data folder",
   "该数据目录已被另一个 NekoCrate 进程占用，请先关闭它":
     "Another NekoCrate process is using this data folder. Close it first",

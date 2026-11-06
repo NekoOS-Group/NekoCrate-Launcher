@@ -1,5 +1,5 @@
 use anyhow::{Result, bail};
-use nekocrate_core::auth::DeviceChallenge;
+use nekocrate_core::auth::BrowserChallenge;
 use std::{
     future::Future,
     sync::{Arc, Mutex},
@@ -14,7 +14,7 @@ pub struct Jobs(Arc<Mutex<State>>);
 struct State {
     next_id: u64,
     active: Option<ActiveJob>,
-    challenge: Option<(String, DeviceChallenge)>,
+    challenge: Option<(String, BrowserChallenge)>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -98,7 +98,7 @@ impl Jobs {
         }
     }
 
-    pub fn wait_login(&self, session_id: &str) -> Result<(DeviceChallenge, JobGuard)> {
+    pub fn wait_login(&self, session_id: &str) -> Result<(BrowserChallenge, JobGuard)> {
         let mut state = self.0.lock().unwrap();
         if state.active.is_some()
             || state
@@ -179,10 +179,10 @@ impl JobGuard {
         }
     }
 
-    pub fn store_challenge(&self, challenge: DeviceChallenge) -> Result<()> {
+    pub fn store_challenge(&self, challenge: BrowserChallenge) -> Result<()> {
         let mut state = self.jobs.0.lock().unwrap();
         let Kind::Login(session_id) = &self.kind else {
-            bail!("请先获取登录验证码");
+            bail!("请先开始微软登录");
         };
         if self.cancel.is_cancelled() || state.active.as_ref().is_none_or(|job| job.id != self.id) {
             bail!("登录已取消");
@@ -218,21 +218,40 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    fn challenge() -> DeviceChallenge {
-        DeviceChallenge {
-            device_code: "private-test-code".into(),
-            user_code: "TEST-CODE".into(),
-            verification_uri: "https://www.microsoft.com/link".into(),
-            expires_in: 900,
-            interval: 5,
-            started_at: 0,
-            client_id: String::new(),
-        }
+    #[tokio::test]
+    async fn restarting_login_releases_a_pending_browser_callback() {
+        let jobs = Jobs::default();
+        let browser = nekocrate_core::auth::BrowserChallenge::begin("")
+            .await
+            .unwrap();
+        let url = reqwest::Url::parse(&browser.verification_uri).unwrap();
+        let redirect = url
+            .query_pairs()
+            .find(|(key, _)| key == "redirect_uri")
+            .unwrap()
+            .1
+            .into_owned();
+        let port = reqwest::Url::parse(&redirect).unwrap().port().unwrap();
+        let address = (std::net::Ipv4Addr::LOCALHOST, port);
+        let begin = jobs.begin_login("browser".into()).await.unwrap();
+        begin.store_challenge(browser).unwrap();
+        drop(begin);
+        assert!(tokio::net::TcpStream::connect(address).await.is_ok());
+        let next = jobs.begin_login("new".into()).await.unwrap();
+        assert!(tokio::net::TcpStream::connect(address).await.is_err());
+        assert!(jobs.wait_login("browser").is_err());
+        next.store_challenge(challenge().await).unwrap();
+        drop(next);
+        assert!(jobs.wait_login("new").is_ok());
     }
 
-    async fn polling(jobs: &Jobs, session: &str) -> JobGuard {
+    async fn challenge() -> BrowserChallenge {
+        BrowserChallenge::begin("").await.unwrap()
+    }
+
+    async fn authorizing(jobs: &Jobs, session: &str) -> JobGuard {
         let begin = jobs.begin_login(session.into()).await.unwrap();
-        begin.store_challenge(challenge()).unwrap();
+        begin.store_challenge(challenge().await).unwrap();
         drop(begin);
         jobs.wait_login(session).unwrap().1
     }
@@ -240,7 +259,7 @@ mod tests {
     #[tokio::test]
     async fn retry_cancels_old_login_and_waits_for_resource_release() {
         let jobs = Jobs::default();
-        let old = polling(&jobs, "old").await;
+        let old = authorizing(&jobs, "old").await;
         let old_cancel = old.cancel.clone();
         let next_jobs = jobs.clone();
         let next = tokio::spawn(async move { next_jobs.begin_login("new".into()).await.unwrap() });
@@ -249,13 +268,13 @@ mod tests {
             !next.is_finished(),
             "must release core's lock before starting again"
         );
-        assert!(old.store_challenge(challenge()).is_err());
+        assert!(old.store_challenge(challenge().await).is_err());
         drop(old);
         let next = next.await.unwrap();
         assert!(jobs.busy(), "old guard must not clear its successor");
         jobs.cancel_login("old").await;
         assert!(!next.cancel.is_cancelled());
-        next.store_challenge(challenge()).unwrap();
+        next.store_challenge(challenge().await).unwrap();
         drop(next);
         assert!(jobs.wait_login("old").is_err());
         let (_, new) = jobs.wait_login("new").unwrap();
@@ -265,7 +284,7 @@ mod tests {
     #[tokio::test]
     async fn new_task_replaces_login_but_downloads_are_never_preempted() {
         let jobs = Jobs::default();
-        let old = polling(&jobs, "old").await;
+        let old = authorizing(&jobs, "old").await;
         let old_cancel = old.cancel.clone();
         let next_jobs = jobs.clone();
         let next = tokio::spawn(async move { next_jobs.task().await.unwrap() });
@@ -290,7 +309,7 @@ mod tests {
     #[tokio::test]
     async fn cancelled_login_drops_a_blocked_future_before_successor_runs() {
         let jobs = Jobs::default();
-        let login = polling(&jobs, "old").await;
+        let login = authorizing(&jobs, "old").await;
         let lock = Arc::new(tokio::sync::Mutex::new(()));
         let held = lock.clone().lock_owned().await;
         let worker = tokio::spawn(async move {
@@ -313,16 +332,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_code_is_invalidated_even_before_polling_starts() {
+    async fn pending_session_is_invalidated_even_before_waiting_starts() {
         let jobs = Jobs::default();
         let begin = jobs.begin_login("old".into()).await.unwrap();
-        begin.store_challenge(challenge()).unwrap();
+        begin.store_challenge(challenge().await).unwrap();
         drop(begin);
         let task = jobs.task().await.unwrap();
         assert!(jobs.wait_login("old").is_err());
         drop(task);
         let next = jobs.begin_login("new".into()).await.unwrap();
-        next.store_challenge(challenge()).unwrap();
+        next.store_challenge(challenge().await).unwrap();
         drop(next);
         jobs.cancel_login("old").await;
         jobs.cancel_login("new").await;
@@ -332,7 +351,7 @@ mod tests {
     #[tokio::test]
     async fn rapid_retries_preserve_the_entire_cleanup_chain() {
         let jobs = Jobs::default();
-        let first = polling(&jobs, "first").await;
+        let first = authorizing(&jobs, "first").await;
         let second_jobs = jobs.clone();
         let second = tokio::spawn(async move { second_jobs.begin_login("second".into()).await });
         first.cancel.cancelled().await;

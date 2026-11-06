@@ -25,6 +25,42 @@ pub enum Action {
     Groups {
         content: nekocrate_core::version_management::ContentKind,
     },
+    CachedResources {
+        content: nekocrate_core::version_management::ContentKind,
+    },
+    CacheResources {
+        #[serde(default)]
+        inputs: Vec<nekocrate_core::resources::LocalImport>,
+        #[serde(default)]
+        sources: Vec<nekocrate_core::resources::ResourceCopySource>,
+    },
+    DownloadCachedResource {
+        scope: nekocrate_core::resources::ResourceCatalog,
+        project: String,
+        version: String,
+    },
+    RemoveCachedResource {
+        content: nekocrate_core::version_management::ContentKind,
+        file: String,
+    },
+    CachedResourceMetadata {
+        content: nekocrate_core::version_management::ContentKind,
+        file: String,
+    },
+    CachedResourcePresentation {
+        content: nekocrate_core::version_management::ContentKind,
+        file: String,
+    },
+    CachedResourceSource {
+        content: nekocrate_core::version_management::ContentKind,
+        file: String,
+        source: String,
+    },
+    OpenCachedResource {
+        content: nekocrate_core::version_management::ContentKind,
+        file: String,
+        source: Option<String>,
+    },
     Cache,
     ClearCache {
         category: CacheKind,
@@ -102,6 +138,51 @@ pub fn handle<'a>(
     Box::pin(async move {
         let launcher = state.launcher.clone();
         match action {
+            Action::DownloadCachedResource {
+                scope,
+                project,
+                version,
+            } => {
+                use tauri::Emitter;
+                let (cancel, _guard) = state.job().await?;
+                let handle = app.clone();
+                let progress: EventSink = std::sync::Arc::new(move |event| {
+                    let _ = handle.emit("resource-library-progress", event);
+                });
+                let result = launcher
+                    .download_cached_resource(&scope, &project, &version, &cancel, &progress)
+                    .await;
+                if let Err(error) = &result {
+                    let _ = nekocrate_core::diagnostics::record_error(
+                        launcher.root(),
+                        "download_cached_resource",
+                        error,
+                    );
+                }
+                Ok(json!(result?))
+            }
+
+            Action::CacheResources { inputs, sources } => Ok(json!(
+                launcher
+                    .cache_game_resources(
+                        inputs,
+                        sources,
+                        &tokio_util::sync::CancellationToken::new()
+                    )
+                    .await?
+            )),
+            Action::OpenCachedResource {
+                content,
+                file,
+                source,
+            } => {
+                let path = crate::blocking::run(move || {
+                    launcher.cached_resource_path(content, &file, source.as_deref())
+                })
+                .await??;
+                app.opener().reveal_item_in_dir(path)?;
+                Ok(Value::Null)
+            }
             Action::ApplyAccountSkin { account, id } => {
                 let (bytes, slim) = skin_for_upload(&launcher, &id).await?;
                 Ok(json!(
@@ -138,6 +219,32 @@ pub fn handle<'a>(
                 crate::blocking::value(move || -> Result<Value> {
                     Ok(match other {
                         Action::Groups { content } => json!(launcher.resource_groups(content)),
+                        Action::CachedResources { content } => {
+                            json!(launcher.cached_resources(content)?)
+                        }
+                        Action::CachedResourceMetadata { content, file } => {
+                            json!(launcher.cached_resource_metadata(content, &file)?)
+                        }
+                        Action::CachedResourceSource {
+                            content,
+                            file,
+                            source,
+                        } => json!(launcher.cached_resource_source(content, &file, &source)?),
+                        Action::CachedResourcePresentation { content, file } => {
+                            use base64::Engine;
+                            let result = launcher.cached_resource_presentation(content, &file)?;
+                            let icon = result.icon.map(|(bytes, mime)| {
+                                format!(
+                                    "data:{mime};base64,{}",
+                                    base64::engine::general_purpose::STANDARD.encode(bytes)
+                                )
+                            });
+                            json!({"icon":icon,"project":result.project})
+                        }
+                        Action::RemoveCachedResource { content, file } => {
+                            launcher.remove_cached_resource(content, &file)?;
+                            Value::Null
+                        }
                         Action::Cache => json!(launcher.resource_cache()?),
                         Action::ClearCache { category } => {
                             launcher.clear_resource_cache(category)?;

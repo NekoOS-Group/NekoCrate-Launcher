@@ -125,7 +125,7 @@ test("拖拽惯性逐帧完成，controls change 与更新返回值不产生双�
   assert.equal(renders, 31);
   assert.equal(clock.size, 0);
 });
-test("隐藏／弹窗／丢失上下文时暂停，恢复补绘，销毁后不再绘制", () => {
+test("隐藏／丢失上下文时暂停，恢复补绘，销毁后不再绘制", () => {
   const clock = frameClock();
   let renders = 0;
   const drawing = createDemandRenderer(

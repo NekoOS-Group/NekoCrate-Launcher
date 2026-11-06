@@ -91,9 +91,10 @@ pub(super) async fn probe_candidates(root: &Path, mut candidates: Vec<PathBuf>) 
     candidates.dedup();
     let cache_path = root.join("metadata/java-probes.json");
     let mut cache: ProbeCache = storage::read_json(&cache_path).unwrap_or_default();
-    if cache.schema != 1 {
+    if cache.schema != 2 {
         cache.entries.clear();
-        cache.schema = 1;
+        // Re-probe pre-vendor entries once, then reuse the expanded metadata.
+        cache.schema = 2;
     }
     let mut found = Discovery::default();
     let mut pending = Vec::new();
@@ -533,10 +534,22 @@ mod tests {
         assert!(!first.runtimes[0].jdk);
         probe_candidates(&cache, candidates.clone()).await;
         assert_eq!(std::fs::read(bin.join("probes")).unwrap(), b"x");
+        // Old probe caches did not contain vendor information. Upgrade once,
+        // rather than indefinitely displaying a blank vendor for unchanged JVMs.
+        let cache_file = cache.join("metadata/java-probes.json");
+        let mut legacy: serde_json::Value = storage::read_json(&cache_file).unwrap();
+        legacy["schema"] = 1.into();
+        for entry in legacy["entries"].as_object_mut().unwrap().values_mut() {
+            entry["info"].as_object_mut().unwrap().remove("vendor");
+        }
+        storage::write_json(&cache_file, &legacy).unwrap();
+        probe_candidates(&cache, candidates.clone()).await;
+        probe_candidates(&cache, candidates.clone()).await;
+        assert_eq!(std::fs::read(bin.join("probes")).unwrap(), b"xx");
         std::fs::write(&release, "changed release").unwrap();
         std::fs::write(bin.join("javac"), "compiler").unwrap();
         assert!(probe_candidates(&cache, candidates.clone()).await.runtimes[0].jdk);
-        assert_eq!(std::fs::read(bin.join("probes")).unwrap(), b"xx");
+        assert_eq!(std::fs::read(bin.join("probes")).unwrap(), b"xxx");
         std::fs::write(&java, "#!/bin/sh\nexit 1\n").unwrap();
         let broken = probe_candidates(&cache, candidates).await;
         assert!(broken.runtimes.is_empty());

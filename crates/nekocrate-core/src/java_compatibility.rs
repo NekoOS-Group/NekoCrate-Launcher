@@ -25,9 +25,14 @@ impl Compatibility {
         if !self.majors.contains(&major) {
             return Some(format!("Java {major} 不在游戏与加载器的兼容范围内"));
         }
-        let number = java_version_number(version)?;
+        let Some(number) = java_version_number(version) else {
+            return Some(format!("无法识别候选 Java 版本：{version}"));
+        };
+        if number[0] != major {
+            return Some(format!("Java 主版本与版本号不一致：{major} / {version}"));
+        }
         self.constraints.iter().find_map(|(source, constraint)| {
-            (constraint.allows_version(number) == Some(false)).then(|| {
+            (constraint.allows_version(&number) == Some(false)).then(|| {
                 format!(
                     "{source} 的 Java 约束{} {}",
                     if constraint.deny { "排除" } else { "要求" },
@@ -170,7 +175,7 @@ pub fn assess_in_directory(v: &Version, working: &Path) -> Result<Compatibility>
                 let source = path.file_name().unwrap().to_string_lossy().into_owned();
                 for constraint in &evidence.constraints {
                     uncertain +=
-                        usize::from(constraint.allows_version([baseline, 0, 0, 0]).is_none());
+                        usize::from(constraint.allows_version(&[baseline, 0, 0, 0]).is_none());
                     // Patch-level ranges must be checked against the actual JVM,
                     // not against a fictional x.0.0 JVM for the whole major.
                     result
@@ -218,19 +223,22 @@ fn legacy_java8(v: &Version, game: &str, linux: bool) -> bool {
 fn loader_limit(kind: &str, version: &str) -> Option<(u32, Option<&'static str>)> {
     // Forge's fourth version component is not SemVer (e.g. 14.23.5.2860).
     let v = java_version_number(version)?;
+    let v = v.as_slice();
     match kind {
         "forge" if v[0] <= 14 => Some((8, None)),
         "forge" if v[0] <= 28 => Some((10, None)),
         "forge" if v[0] <= 31 => Some((15, None)),
-        "forge" if ([34, 0, 0, 0]..=[36, 2, 25, 0]).contains(&v) => Some((8, Some("(,8.0.320]"))),
-        "forge" if v[0] == 36 && v >= [36, 2, 26, 0] => Some((23, None)),
-        "forge" if v[0] == 37 && v <= [37, 0, 79, 0] => Some((16, None)),
-        "forge" if ([45, 0, 21, 0]..=[45, 0, 65, 0]).contains(&v) => Some((19, None)),
-        "forge" if ([45, 0, 66, 0]..=[47, 4, 8, 0]).contains(&v) => Some((21, None)),
-        "neoforge" if v <= [20, 2, 62, 0] && !version.contains("25w14craftmine") => {
+        "forge" if (&[34, 0, 0, 0][..]..=&[36, 2, 25, 0][..]).contains(&v) => {
+            Some((8, Some("(,8.0.320]")))
+        }
+        "forge" if v[0] == 36 && v >= &[36, 2, 26, 0] => Some((23, None)),
+        "forge" if v[0] == 37 && v <= &[37, 0, 79, 0] => Some((16, None)),
+        "forge" if (&[45, 0, 21, 0][..]..=&[45, 0, 65, 0][..]).contains(&v) => Some((19, None)),
+        "forge" if (&[45, 0, 66, 0][..]..=&[47, 4, 8, 0][..]).contains(&v) => Some((21, None)),
+        "neoforge" if v <= &[20, 2, 62, 0] && !version.contains("25w14craftmine") => {
             Some((21, None))
         }
-        "fabric" if v < [0, 17, 0, 0] => Some((24, None)),
+        "fabric" if v < &[0, 17, 0, 0] => Some((24, None)),
         _ => None,
     }
 }
@@ -268,72 +276,56 @@ struct Constraint {
     maven: bool,
 }
 impl Constraint {
-    fn allows_version(&self, version: [u32; 4]) -> Option<bool> {
-        let mut unknown = false;
+    fn allows_version(&self, version: &[u32]) -> Option<bool> {
+        let mut matched = false;
         for range in &self.ranges {
             let result = if self.maven {
                 maven_matches_version(range, version)
             } else {
                 fabric_matches_version(range, version)
             };
-            match result {
-                Some(true) => return Some(!self.deny),
-                None => unknown = true,
-                _ => (),
-            }
+            matched |= result?;
         }
-        if unknown { None } else { Some(self.deny) }
+        Some(matched != self.deny)
     }
 }
 
 /// Numeric Java release, excluding vendor/build metadata; normalizes 1.8.0_321.
 /// Also accepts the quoted version lines retained in older runtime indexes.
-pub(crate) fn java_version_number(value: &str) -> Option<[u32; 4]> {
+pub(crate) fn java_version_number(value: &str) -> Option<Vec<u32>> {
     let value = value.split('"').nth(1).unwrap_or(value).trim();
     let value = value.split(['-', '+', ' ']).next()?;
     let mut parts = value
         .split(['.', '_'])
-        .map(str::parse::<u32>)
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .ok()?;
+        .map(|part| {
+            if part.is_empty() || !part.bytes().all(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            part.parse::<u32>().ok()
+        })
+        .collect::<Option<Vec<_>>>()?;
     if parts.len() >= 2 && parts[0] == 1 && parts[1] <= 8 {
         parts.remove(0);
     }
-    if parts.is_empty() || parts.len() > 4 {
+    if parts.is_empty() {
         return None;
     }
-    let mut result = [0; 4];
-    result[..parts.len()].copy_from_slice(&parts);
-    Some(result)
+    // Runtime.Version permits additional numeric components. Preserve them for
+    // ordering and Maven constraints, padding/normalizing trailing zeroes only.
+    while parts.len() > 4 && parts.last() == Some(&0) {
+        parts.pop();
+    }
+    parts.resize(parts.len().max(4), 0);
+    Some(parts)
 }
 
-fn fabric_matches_version(range: &str, version: [u32; 4]) -> Option<bool> {
-    let mut terms = vec![];
-    for term in range.split_whitespace() {
-        let term = if term.chars().next()?.is_ascii_digit() && !term.contains(['x', 'X', '*']) {
-            // Fabric plain versions are exact, whereas semver's default is ^.
-            let mut pieces: Vec<_> = term.split('.').collect();
-            while pieces.len() < 3 {
-                pieces.push("0");
-            }
-            format!("={}", pieces.join("."))
-        } else {
-            term.to_owned()
-        };
-        terms.push(term);
-    }
-    if terms.is_empty() {
-        return None;
-    }
-    let req = semver::VersionReq::parse(&terms.join(", ")).ok()?;
-    Some(req.matches(&semver::Version::new(
-        version[0].into(),
-        version[1].into(),
-        version[2].into(),
-    )))
+fn fabric_matches_version(range: &str, version: &[u32]) -> Option<bool> {
+    // Fabric's built-in java Mod reports the specification major, not the
+    // runtime patch/build. Share all other predicate semantics with Mod repair.
+    crate::fabric_version::matches(range, &version.first()?.to_string())
 }
 
-fn maven_matches_version(range: &str, version: [u32; 4]) -> Option<bool> {
+fn maven_matches_version(range: &str, version: &[u32]) -> Option<bool> {
     let range = range.trim();
     if !range.starts_with(['[', '(']) || !range.ends_with([']', ')']) {
         return None;
@@ -345,9 +337,9 @@ fn maven_matches_version(range: &str, version: [u32; 4]) -> Option<bool> {
         } else {
             let n = java_version_number(lower.trim())?;
             if range.starts_with('[') {
-                version >= n
+                version >= n.as_slice()
             } else {
-                version > n
+                version > n.as_slice()
             }
         };
         let upper = if upper.trim().is_empty() {
@@ -355,14 +347,14 @@ fn maven_matches_version(range: &str, version: [u32; 4]) -> Option<bool> {
         } else {
             let n = java_version_number(upper.trim())?;
             if range.ends_with(']') {
-                version <= n
+                version <= n.as_slice()
             } else {
-                version < n
+                version < n.as_slice()
             }
         };
         Some(lower && upper)
     } else if range.starts_with('[') && range.ends_with(']') {
-        Some(version == java_version_number(body)?)
+        Some(version == java_version_number(body)?.as_slice())
     } else {
         None
     }
@@ -456,7 +448,7 @@ fn inspect_archive<R: Read + Seek>(
     let mut result = ModEvidence::default();
     let mut nested = vec![];
     let fabric = read_entry(zip, "fabric.mod.json", 1024 * 1024)?
-        .map(|bytes| serde_json::from_slice::<Value>(&bytes))
+        .map(|bytes| crate::fabric_metadata::parse(&bytes))
         .transpose()?;
     // Some Forge packs load this Fabric mod through a bridge. Inspect its identity
     // independently of the selected loader; do not require a JDK for all mods.
@@ -758,15 +750,25 @@ mod tests {
         .unwrap();
         assert_eq!(accepted(&v, temp.path()), (17..=26).collect::<Vec<_>>());
         assert_eq!(
-            fabric_matches_version("something unsupported", [26, 0, 0, 0]),
-            None
-        );
-        assert_eq!(
-            maven_matches_version("[17.0.8,)", [17, 0, 7, 0]),
+            fabric_matches_version("something unsupported", &[26, 0, 0, 0]),
             Some(false)
         );
-        assert_eq!(fabric_matches_version("17", [17, 0, 0, 0]), Some(true));
-        assert_eq!(fabric_matches_version("17", [18, 0, 0, 0]), Some(false));
+        assert_eq!(
+            maven_matches_version("[17.0.8,)", &[17, 0, 7, 0]),
+            Some(false)
+        );
+        assert_eq!(fabric_matches_version("17", &[17, 0, 0, 0]), Some(true));
+        assert_eq!(fabric_matches_version("17", &[18, 0, 0, 0]), Some(false));
+        assert_eq!(fabric_matches_version(">=17-", &[21, 0, 13, 0]), Some(true));
+        assert_eq!(
+            Constraint {
+                ranges: vec!["*".into(), ">invalid".into()],
+                deny: false,
+                maven: false,
+            }
+            .allows_version(&[21, 0, 0, 0]),
+            None
+        );
     }
 
     #[test]
@@ -818,24 +820,98 @@ mod tests {
             "mod.jar",
             &[(
                 "fabric.mod.json",
-                br#"{"id":"test","depends":{"java":">=17.0.8 <22"},"conflicts":{"java":"21.x"}}"#
+                br#"{"id":"test","depends":{"java":">=17 <22"},"conflicts":{"java":"21.x"}}"#
                     .to_vec(),
             )],
         );
         let compatibility = assess(&v, temp.path()).unwrap();
-        assert!(compatibility.rejection(17, "17.0.7").is_some());
+        assert!(compatibility.rejection(17, "17.0.7").is_none());
         assert!(compatibility.rejection(17, "17.0.8").is_none());
         assert!(compatibility.rejection(21, "21.0.7").is_none());
         assert!(compatibility.rejection(25, "25.0.1").is_some());
         assert_eq!(
-            maven_matches_version("[17.0.8.1,21)", [17, 0, 8, 0]),
+            maven_matches_version("[17.0.8.1,21)", &[17, 0, 8, 0]),
             Some(false)
         );
         assert_eq!(
-            maven_matches_version("[17.0.8.1,21)", [17, 0, 8, 1]),
+            maven_matches_version("[17.0.8.1,21)", &[17, 0, 8, 1]),
             Some(true)
         );
-        assert_eq!(java_version_number("1.8.0_321-b07"), Some([8, 0, 321, 0]));
+        assert_eq!(
+            java_version_number("1.8.0_321-b07"),
+            Some(vec![8, 0, 321, 0])
+        );
+    }
+
+    #[test]
+    fn fabric_java_dependency_matches_specification_version_not_runtime_patch() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut v = profile("net.fabricmc:fabric-loader:0.18.6", "9.11");
+        v.java_version = Some(crate::model::JavaVersion { major: 21 });
+        v.compatible_java_majors.clear();
+        install_mod(
+            temp.path(),
+            "Cobblemon-fabric-1.8.4+1.21.1.jar",
+            &[("fabric.mod.json", fabric_meta(json!("21"), Value::Null))],
+        );
+        let compatibility = assess(&v, temp.path()).unwrap();
+        assert!(compatibility.majors.contains(&27));
+        for version in ["21", "21.0.7+6-LTS", "21.0.13+9-LTS"] {
+            assert_eq!(compatibility.rejection(21, version), None, "{version}");
+        }
+        assert!(
+            compatibility
+                .rejection(27, "27.0.1.0.2+1")
+                .unwrap()
+                .contains("Cobblemon")
+        );
+        assert!(
+            compatibility
+                .rejection(21, "invalid")
+                .unwrap()
+                .contains("无法识别")
+        );
+        assert!(compatibility.rejection(21, "27.0.1").is_some());
+        // Even a patch-looking Fabric declaration is evaluated against the
+        // specification version, just as Fabric's java builtin evaluates it.
+        assert_eq!(
+            fabric_matches_version(">=21.0.1", &[21, 0, 13, 0]),
+            Some(false)
+        );
+        assert_eq!(fabric_matches_version("21.x", &[21, 0, 13, 0]), Some(true));
+    }
+
+    #[test]
+    fn extended_java_versions_keep_all_numeric_components_for_patch_constraints() {
+        let version = java_version_number("27.0.1.0.2+1-LTS").unwrap();
+        assert_eq!(version, vec![27, 0, 1, 0, 2]);
+        assert_eq!(java_version_number("27.0.1.0.2.0+9"), Some(version.clone()));
+        assert_eq!(
+            java_version_number("1.8.0_504-b01"),
+            Some(vec![8, 0, 504, 0])
+        );
+        assert_eq!(
+            maven_matches_version("[27.0.1.0.2,27.0.1.0.3)", &version),
+            Some(true)
+        );
+        assert_eq!(
+            maven_matches_version("(,27.0.1.0.2)", &version),
+            Some(false)
+        );
+        assert_eq!(
+            maven_matches_version("[27.0.1.0.2.0]", &version),
+            Some(true)
+        );
+        for invalid in [
+            "",
+            "unknown",
+            "27..1",
+            "27.0.1.0.bad",
+            "27.4294967296",
+            "27.",
+        ] {
+            assert_eq!(java_version_number(invalid), None, "{invalid}");
+        }
     }
 
     #[test]

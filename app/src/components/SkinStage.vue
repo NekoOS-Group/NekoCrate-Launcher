@@ -103,8 +103,8 @@ function updatePause() {
   const paused = props.paused || document.hidden || contextLost;
   drawing?.setPaused(paused);
   idleMotion?.setPaused(paused || !props.idle || !!reducedMotion?.matches);
-  // Account selection happens in a dialog: its short transition remains visible
-  // behind that dialog, while continuous idle rendering stays paused.
+  // Account transitions keep running while their dialog is open, just like
+  // the visible home scene. Only visibility/context loss pauses the carousel.
   carousel?.setPaused(document.hidden || contextLost);
   if (paused || reducedMotion?.matches) {
     const active = reactions?.active;

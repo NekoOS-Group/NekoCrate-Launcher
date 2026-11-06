@@ -54,6 +54,11 @@ export function rememberDialogFocus(dialog: HTMLDialogElement) {
   returnFocus.set(dialog, previous);
 }
 
+/** An outside click already has a new focus destination. */
+export function forgetDialogFocus(dialog: HTMLDialogElement) {
+  returnFocus.delete(dialog);
+}
+
 export function prepareDialogLeave(element: Element) {
   if (!(element instanceof HTMLDialogElement)) return;
   element.dataset.closing = "true";

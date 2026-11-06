@@ -43,13 +43,15 @@ const compact = computed(
   display: grid;
   place-items: center;
   padding: 12px;
+  /* Only the visual outline interpolates; hit testing uses the live target. */
   transition:
-    left 140ms ease-out,
-    top 140ms ease-out,
-    width 140ms ease-out,
-    height 140ms ease-out,
+    left 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    top 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    width 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    height 180ms cubic-bezier(0.22, 1, 0.36, 1),
     color 120ms,
-    border-color 120ms;
+    border-color 120ms,
+    opacity 120ms;
 }
 .drop-target span {
   max-width: 100%;
@@ -74,10 +76,6 @@ const compact = computed(
   color: #ed9999;
   border-color: currentColor;
   box-shadow: none;
-}
-.drop-target-enter-active,
-.drop-target-leave-active {
-  transition: opacity 120ms;
 }
 .drop-target-enter-from,
 .drop-target-leave-to {

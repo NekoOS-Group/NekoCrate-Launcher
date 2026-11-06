@@ -23,7 +23,7 @@ pub struct ResourceCatalog {
     pub platform: Platform,
 }
 impl ResourceCatalog {
-    fn target(&self) -> Result<ResourceTarget> {
+    pub(super) fn target(&self) -> Result<ResourceTarget> {
         storage::safe_version(&self.minecraft)?;
         if let Some(loader) = &self.loader {
             anyhow::ensure!(
@@ -128,6 +128,15 @@ pub(super) fn compatible(
                     .any(|other| other.eq_ignore_ascii_case(l))
             }))
 }
+const PRESENTATION_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+fn cache_is_fresh(path: &Path, ttl: Duration) -> bool {
+    fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.elapsed().ok())
+        .is_some_and(|age| age < ttl)
+}
+
 impl Provider {
     pub(super) fn new(launcher: &Launcher, platform: Platform) -> Result<Self> {
         let key = if platform == Platform::Curseforge {
@@ -157,25 +166,35 @@ impl Provider {
         query: &[(&str, String)],
         cancel: &CancellationToken,
     ) -> Result<Value> {
+        let url = self.url(path, query)?;
+        self.get_at(url, cancel).await
+    }
+    async fn get_at(&self, url: reqwest::Url, cancel: &CancellationToken) -> Result<Value> {
+        let cached = self.cache_path(&url);
+        if cache_is_fresh(&cached, Duration::from_secs(600))
+            && let Ok(value) = storage::read_json::<Value>(&cached)
+        {
+            return Ok(value);
+        }
+        self.fetch(url, cancel).await
+    }
+    fn url(&self, path: &str, query: &[(&str, String)]) -> Result<reqwest::Url> {
         let base = if self.platform == Platform::Modrinth {
             "https://api.modrinth.com/v2/"
         } else {
             "https://api.curseforge.com/v1/"
         };
-        let url = reqwest::Url::parse_with_params(&format!("{base}{path}"), query)?;
-        let digest = ring::digest::digest(&ring::digest::SHA256, url.as_str().as_bytes());
-        let cached = self
-            .cache
-            .join(format!("{}.json", hex::encode(digest.as_ref())));
-        if fs::metadata(&cached)
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|time| time.elapsed().ok())
-            .is_some_and(|age| age < Duration::from_secs(600))
-            && let Ok(value) = storage::read_json::<Value>(&cached)
-        {
-            return Ok(value);
-        }
+        Ok(reqwest::Url::parse_with_params(
+            &format!("{base}{path}"),
+            query,
+        )?)
+    }
+    fn cache_path(&self, url: &reqwest::Url) -> PathBuf {
+        let hash = ring::digest::digest(&ring::digest::SHA256, url.as_str().as_bytes());
+        self.cache.join(format!("{}.json", hex::encode(hash)))
+    }
+    async fn fetch(&self, url: reqwest::Url, cancel: &CancellationToken) -> Result<Value> {
+        let cached = self.cache_path(&url);
         let mut request = self.client.get(url);
         if let Some(key) = &self.key {
             request = request.header("x-api-key", key);
@@ -217,20 +236,70 @@ impl Provider {
         match result {
             Ok(value) => Ok(value),
             Err(error) if !cancel.is_cancelled() => {
-                let base = if self.platform == Platform::Modrinth {
-                    "https://api.modrinth.com/v2/"
-                } else {
-                    "https://api.curseforge.com/v1/"
-                };
-                let url = reqwest::Url::parse_with_params(
-                    &format!("{base}{path}"),
-                    &[] as &[(&str, String)],
-                )?;
-                let hash = hex::encode(ring::digest::digest(
-                    &ring::digest::SHA256,
-                    url.as_str().as_bytes(),
-                ));
-                storage::read_json(&self.cache.join(format!("{hash}.json"))).map_err(|_| error)
+                storage::read_json(&self.cache_path(&self.url(path, &[])?)).map_err(|_| error)
+            }
+            Err(error) => Err(error),
+        }
+    }
+    /// Long descriptions are immediately usable offline, even after expiry.
+    /// The UI can explicitly revalidate in the background using `refresh`.
+    pub(super) async fn get_presentation(
+        &self,
+        path: &str,
+        refresh: bool,
+        revision: Option<&Value>,
+        cancel: &CancellationToken,
+    ) -> Result<(Value, bool)> {
+        self.presentation_at(self.url(path, &[])?, refresh, revision, cancel)
+            .await
+    }
+    pub(super) fn cached_presentation(&self, path: &str) -> Option<(Value, bool)> {
+        self.cached_presentation_at(&self.url(path, &[]).ok()?, None)
+    }
+    fn cached_presentation_at(
+        &self,
+        url: &reqwest::Url,
+        revision: Option<&Value>,
+    ) -> Option<(Value, bool)> {
+        let path = self.cache_path(url);
+        let value = storage::read_json::<Value>(&path).ok()?;
+        let changed =
+            revision.is_some_and(|revision| value.get("_nekocrate_revision") != Some(revision));
+        Some((value, changed || !cache_is_fresh(&path, PRESENTATION_TTL)))
+    }
+    async fn presentation_at(
+        &self,
+        url: reqwest::Url,
+        refresh: bool,
+        revision: Option<&Value>,
+        cancel: &CancellationToken,
+    ) -> Result<(Value, bool)> {
+        if cancel.is_cancelled() {
+            bail!("操作已取消");
+        }
+        let path = self.cache_path(&url);
+        let mut cached = self.cached_presentation_at(&url, revision);
+        if !refresh && let Some(value) = cached.take() {
+            return Ok(value);
+        }
+        let result = tokio::time::timeout(Duration::from_secs(8), self.fetch(url, cancel))
+            .await
+            .map_err(|_| anyhow::anyhow!("项目介绍请求超时"))
+            .and_then(|value| value);
+        match result {
+            Ok(mut value) => {
+                // CurseForge's body is a separate endpoint. Tie it to the project
+                // revision so fresh project metadata cannot bless an old body.
+                if let Some(revision) = revision
+                    && let Some(object) = value.as_object_mut()
+                {
+                    object.insert("_nekocrate_revision".into(), revision.clone());
+                    let _ = storage::write_json(&path, &value);
+                }
+                Ok((value, false))
+            }
+            Err(error) if !cancel.is_cancelled() => {
+                cached.map(|(value, _)| (value, true)).ok_or(error)
             }
             Err(error) => Err(error),
         }
@@ -271,7 +340,7 @@ impl Provider {
             }
         }
     }
-    async fn project(&self, id: &str, cancel: &CancellationToken) -> Result<Project> {
+    pub(super) async fn project(&self, id: &str, cancel: &CancellationToken) -> Result<Project> {
         identifier(id)?;
         let path = if self.platform == Platform::Modrinth {
             format!("project/{id}")
@@ -289,7 +358,7 @@ impl Provider {
         }
         Ok(project(v, self.platform))
     }
-    async fn versions(
+    pub(super) async fn versions(
         &self,
         target: &ResourceTarget,
         kind: ResourceKind,
@@ -362,6 +431,10 @@ pub(super) fn project(v: &Value, platform: Platform) -> Project {
             .or_else(|| v["id"].as_str())
             .unwrap_or_default();
         Project {
+            updated: v["updated"]
+                .as_str()
+                .or(v["date_modified"].as_str())
+                .map(str::to_owned),
             latest_version: v["latest_version"]
                 .as_str()
                 .filter(|s| !s.is_empty())
@@ -395,6 +468,7 @@ pub(super) fn project(v: &Value, platform: Platform) -> Project {
         }
     } else {
         Project {
+            updated: v["dateModified"].as_str().map(str::to_owned),
             latest_version: v["mainFileId"]
                 .as_u64()
                 .filter(|id| *id > 0)
@@ -786,25 +860,7 @@ impl Launcher {
                     .push(format!("资源与游戏或加载器版本不兼容：{}", version.name));
                 continue;
             }
-            let primary: Vec<_> = version.files.iter().filter(|f| f.primary).collect();
-            let file = if primary.len() == 1 {
-                primary[0]
-            } else if version.files.len() == 1 {
-                &version.files[0]
-            } else {
-                bail!("资源包含多个主文件，无法安全选择：{}", detail.name);
-            };
-            component(&file.name)?;
-            let url = reqwest::Url::parse(&file.url)
-                .context("作者未提供可用下载地址，请从项目页面下载后拖入")?;
-            if url.scheme() != "https"
-                || !url.username().is_empty()
-                || url.password().is_some()
-                || file.sha1.len() != 40
-                || !file.sha1.bytes().all(|c| c.is_ascii_hexdigit())
-            {
-                bail!("资源缺少安全下载地址或校验信息");
-            }
+            let file = primary_file(&version)?;
             if entry_kind == ResourceKind::Saves {
                 bail!("地图请从项目页面下载后拖入，确认压缩包目录后安装");
             }
@@ -911,5 +967,176 @@ impl Launcher {
             }
         }
         Ok(plan)
+    }
+}
+
+/// Select and validate a provider artifact before any installation or collection.
+pub(super) fn primary_file(version: &ResourceVersion) -> Result<&ResourceFile> {
+    let primary: Vec<_> = version.files.iter().filter(|f| f.primary).collect();
+    let file = if primary.len() == 1 {
+        primary[0]
+    } else if version.files.len() == 1 {
+        &version.files[0]
+    } else {
+        bail!("资源包含多个主文件，无法安全选择：{}", version.name);
+    };
+    component(&file.name)?;
+    let url =
+        reqwest::Url::parse(&file.url).context("作者未提供可用下载地址，请从项目页面下载后拖入")?;
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || file.sha1.len() != 40
+        || !file.sha1.bytes().all(|c| c.is_ascii_hexdigit())
+    {
+        bail!("资源缺少安全下载地址或校验信息");
+    }
+    Ok(file)
+}
+
+#[cfg(test)]
+mod presentation_cache_tests {
+    use super::*;
+    use std::time::SystemTime;
+
+    fn provider(root: &Path) -> Provider {
+        Provider {
+            client: crate::test_http::client(),
+            platform: Platform::Curseforge,
+            key: None,
+            cache: root.into(),
+        }
+    }
+    fn seed(api: &Provider, url: &reqwest::Url, value: &Value, age: Duration) -> PathBuf {
+        let path = api.cache_path(url);
+        storage::write_json(&path, value).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(SystemTime::now() - age)
+            .unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn descriptions_reuse_days_old_cache_but_installation_requests_do_not() {
+        let temp = tempfile::tempdir().unwrap();
+        let api = provider(temp.path());
+        let (url, server) =
+            crate::test_http::serve(vec![(200, json!({"data":"new"}).to_string())]).await;
+        let url: reqwest::Url = url.parse().unwrap();
+        let old = json!({"data":"cached description"});
+        seed(&api, &url, &old, Duration::from_secs(3 * 24 * 3600));
+        let cancel = CancellationToken::new();
+        let (cached, stale) = api
+            .presentation_at(url.clone(), false, None, &cancel)
+            .await
+            .unwrap();
+        assert_eq!(cached, old);
+        assert!(!stale);
+        // Same URL/cache file, but resolving installation information retains 10-minute freshness.
+        assert_eq!(api.get_at(url, &cancel).await.unwrap()["data"], "new");
+        assert_eq!(server.await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn expired_description_returns_before_revalidation_and_updates_on_explicit_refresh() {
+        let temp = tempfile::tempdir().unwrap();
+        let api = provider(temp.path());
+        let (url, server) =
+            crate::test_http::serve(vec![(200, json!({"body":"new"}).to_string())]).await;
+        let url: reqwest::Url = url.parse().unwrap();
+        let old = json!({"body":"old"});
+        seed(&api, &url, &old, PRESENTATION_TTL + Duration::from_secs(1));
+        let cancel = CancellationToken::new();
+        assert_eq!(
+            api.presentation_at(url.clone(), false, None, &cancel)
+                .await
+                .unwrap(),
+            (old, true)
+        );
+        let (fresh, stale) = api
+            .presentation_at(url.clone(), true, None, &cancel)
+            .await
+            .unwrap();
+        assert!(!stale);
+        assert_eq!(fresh["body"], "new");
+        assert_eq!(
+            api.presentation_at(url, false, None, &cancel)
+                .await
+                .unwrap(),
+            (fresh, false)
+        );
+        assert_eq!(server.await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn curseforge_bodies_follow_project_revision_and_legacy_cache_is_still_readable() {
+        let temp = tempfile::tempdir().unwrap();
+        let api = provider(temp.path());
+        let cancel = CancellationToken::new();
+        for previous in [None, Some(json!(["2026-11-01", 100]))] {
+            let (url, server) =
+                crate::test_http::serve(vec![(200, json!({"data":"new body"}).to_string())]).await;
+            let url: reqwest::Url = url.parse().unwrap();
+            let mut old = json!({"data":"old body"});
+            if let Some(previous) = previous {
+                old["_nekocrate_revision"] = previous;
+            }
+            let path = seed(&api, &url, &old, Duration::from_secs(60));
+            let revision = json!(["2026-11-02", 101]);
+            assert_eq!(
+                api.presentation_at(url.clone(), false, Some(&revision), &cancel)
+                    .await
+                    .unwrap(),
+                (old, true)
+            );
+            let (fresh, stale) = api
+                .presentation_at(url.clone(), true, Some(&revision), &cancel)
+                .await
+                .unwrap();
+            assert!(!stale);
+            assert_eq!(fresh["data"], "new body");
+            assert_eq!(
+                storage::read_json::<Value>(&path).unwrap()["_nekocrate_revision"],
+                revision
+            );
+            assert!(
+                !api.presentation_at(url, false, Some(&revision), &cancel)
+                    .await
+                    .unwrap()
+                    .1
+            );
+            assert_eq!(server.await.unwrap().len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_refresh_preserves_old_bytes_and_explicit_cancellation_is_not_hidden() {
+        let temp = tempfile::tempdir().unwrap();
+        let api = provider(temp.path());
+        let (url, server) = crate::test_http::serve(vec![(503, "unavailable".into())]).await;
+        let url: reqwest::Url = url.parse().unwrap();
+        let old = json!({"data":"offline copy"});
+        let path = seed(&api, &url, &old, PRESENTATION_TTL + Duration::from_secs(1));
+        let before = fs::read(&path).unwrap();
+        let cancel = CancellationToken::new();
+        assert_eq!(
+            api.presentation_at(url.clone(), true, None, &cancel)
+                .await
+                .unwrap(),
+            (old, true)
+        );
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(server.await.unwrap().len(), 1);
+        cancel.cancel();
+        assert!(
+            api.presentation_at(url, false, None, &cancel)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("取消")
+        );
     }
 }

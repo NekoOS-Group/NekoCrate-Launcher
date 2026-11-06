@@ -207,6 +207,55 @@ function draggingFixture(ids = ["a", "b"], grid = false) {
   };
 }
 
+test("vertical instance drags scroll the main dock and use vertical drop targets", async () => {
+  const f = draggingFixture(["a", "b", "c", "d"]);
+  try {
+    let rendered = f.instances.value;
+    Object.assign(f.ui.strip.value, {
+      dataset: { orientation: "vertical" },
+      clientHeight: 180,
+      getBoundingClientRect: () => ({
+        left: 100,
+        right: 164,
+        top: 500,
+        bottom: 680,
+        width: 64,
+        height: 180,
+      }),
+      querySelectorAll: () =>
+        rendered.map((item, index) => ({
+          dataset: { instanceId: item.id },
+          offsetLeft: 4,
+          offsetTop: index * 60,
+          offsetWidth: 56,
+          offsetHeight: 56,
+          querySelector: () => ({ focus() {} }),
+        })),
+    });
+    f.start("a");
+    f.track(110, 655);
+    assert.deepEqual(
+      f.ui.displayInstances.value.map((i) => i.id),
+      ["b", "c", "a", "d"],
+    );
+    assert.ok(f.ui.strip.value.scrollTop > 0);
+    rendered = f.ui.displayInstances.value;
+    f.track(154, 655);
+    assert.deepEqual(
+      f.ui.displayInstances.value.map((i) => i.id),
+      ["b", "c", "a", "d"],
+    );
+    f.release(154, 655);
+    await flush();
+    assert.deepEqual(f.moves, [["a", "d"]]);
+    f.ui.keyboard({ altKey: true, key: "ArrowUp", preventDefault() {} }, "c");
+    await flush();
+    assert.deepEqual(f.moves.at(-1), ["c", "b"]);
+  } finally {
+    f.dispose();
+  }
+});
+
 test("even a single instance can be dragged to trash; a click does not remove it", async () => {
   const f = draggingFixture(["a"]);
   try {

@@ -27,6 +27,104 @@ export function setLanguage(preference: string, system: string) {
 
 /** Chinese source keys stay readable in templates; interpolate only after translation. */
 export const english: Readonly<Record<string, string>> = {
+  服务器列表: "Servers",
+  收藏版本: "Favorite versions",
+  最近存档: "Recent worlds",
+  待办便签: "Notes",
+  像素时钟: "Pixel clock",
+  显示日期: "Show date",
+  版本已移除: "Version removed",
+  取消收藏: "Unpin version",
+  拖动排序: "Drag to reorder",
+  完成: "Done",
+  拖入版本收藏: "Drag a version here to pin it",
+  编辑待办: "Edit note",
+  删除待办: "Delete note",
+  添加待办: "Add note",
+  "记下一件事…": "Write something\u2026",
+  给小屋补一扇窗: "Add a window to the cabin",
+  备份生存世界: "Back up the survival world",
+  "整理一下 Mods": "Organize Mods",
+  打开存档目录: "Open world folder",
+  山间小屋: "Mountain cabin",
+  生存世界: "Survival world",
+  最近游玩: "Recently played",
+  暂时无法读取存档: "Worlds unavailable",
+  还没有本地存档: "No local worlds yet",
+  我的服务器: "My server",
+  暂不可达: "Unreachable",
+  在线状态: "Server status",
+  查询中: "Checking",
+  连接使用的版本: "Connect with version",
+  移除服务器: "Remove server",
+  添加或拖入服务器地址: "Add or drop a server address",
+  服务器名称: "Server name",
+  服务器地址: "Server address",
+  "地址，例如 localhost:25565": "Address, e.g. localhost:25565",
+  添加服务器: "Add server",
+  显示游戏内服务器: "Show in-game servers",
+  请输入有效的服务器地址: "Enter a valid server address",
+  已添加此服务器: "Server already added",
+  "最多添加 32 个服务器": "You can add up to 32 servers",
+  "最多添加 100 条待办": "You can add up to 100 notes",
+  "最多收藏 32 个版本": "You can pin up to 32 versions",
+  收藏此版本: "Pin this version",
+  文字角度: "Text angle",
+  字体大小: "Text size",
+  订阅来源: "Feed sources",
+  文字靠左: "Align text left",
+  文字靠右: "Align text right",
+  "展开 Trends": "Show Trends",
+  暂无动态: "No updates yet",
+  暂时无法获取动态: "Updates unavailable",
+  取消边缘隐藏: "Disable edge auto-hide",
+  "拖动上边缘调整 Trends 高度": "Drag the top edge to resize Trends",
+  "拖动下边缘调整 Trends 高度": "Drag the bottom edge to resize Trends",
+  "部分订阅暂不可用，稍后自动重试":
+    "Some feeds are unavailable; retrying automatically later",
+  点击切换一言样式: "Click to switch quote style",
+  "切换一言样式，当前为 {style}": "Switch quote style, currently {style}",
+  重试加载字体: "Retry loading font",
+  一言样式: "Quote style",
+  简洁: "Simple",
+  居中: "Centered",
+  "MC 标语": "MC splash",
+  添加小组件: "Add widget",
+  一言: "Hitokoto",
+  新闻订阅: "News",
+  管理订阅: "Manage subscriptions",
+  刷新新闻: "Refresh news",
+  换一句: "Another quote",
+  "Minecraft 官方动态": "Minecraft news",
+  猫咪盒子更新: "NekoCrate updates",
+  "RSS / Atom 订阅地址": "RSS / Atom feed URL",
+  添加订阅: "Subscribe",
+  选择想关注的订阅源: "Choose your news sources",
+  暂无新闻: "No news yet",
+  暂时无法获取一言: "Quote unavailable",
+  暂时无法获取新闻: "News unavailable",
+  "暂时无法刷新，保留上次内容": "Unable to refresh. Showing saved content.",
+  "部分订阅暂不可用，可稍后刷新":
+    "Some feeds are unavailable. Try refreshing later.",
+  "最多添加 8 个订阅源": "You can add up to 8 feeds",
+  "请输入有效的 HTTP 或 HTTPS 订阅地址": "Enter a valid HTTP or HTTPS feed URL",
+  已订阅此地址: "Already subscribed to this feed",
+  界面布局: "Interface layout",
+  编辑布局: "Edit layout",
+  恢复默认布局: "Reset layout",
+  工具栏: "Toolbar",
+  商城: "Store",
+  编辑工具栏: "Edit toolbar",
+  添加工具栏按钮: "Add toolbar button",
+  "移除 {name}": "Remove {name}",
+  切换为横排: "Switch to horizontal",
+  切换为竖排: "Switch to vertical",
+  "{name} 设置保存失败：{error}": "Could not save settings for {name}: {error}",
+  实例栏: "Instances",
+  主题切换: "Themes",
+  启动与版本: "Launch & versions",
+  "移动{name}，方向键调整，Shift 微调":
+    "Move {name}. Use arrow keys; hold Shift for fine adjustment.",
   "导出 ZIP": "Export ZIP",
   附带便携版启动器: "Include portable launcher",
   平台: "Platform",
@@ -44,6 +142,7 @@ export const english: Readonly<Record<string, string>> = {
   请拖到目标存档: "Drop onto the target world",
   "复制到 {name} · {version}": "Copy to {name} \u00b7 {version}",
   请一次拖入一个配置文件: "Drop one configuration file at a time",
+  "请一次拖入一个 Java 可执行文件": "Drop one Java executable at a time",
   此处只接收配置文件: "This area accepts configuration files only",
   配置文件格式不匹配: "Configuration formats do not match",
   比较并替换配置: "Compare and replace configuration",
@@ -107,6 +206,15 @@ export const english: Readonly<Record<string, string>> = {
   查看介绍: "View details",
   重新加载介绍: "Retry description",
   加入预选: "Select resource",
+  加入新版本的预选资源: "Add to the new version's resource selection",
+  请先选择游戏版本并等待当前操作完成:
+    "Select a game version and wait for the current operation to finish",
+  "数据包需要目标存档，请在版本安装后拖入存档":
+    "Data packs need a world. Drop them onto a world after installing the version",
+  "此处只接收 Mods、资源包、光影和存档":
+    "Drop Mods, resource packs, shaders or worlds here",
+  请从游戏资源或版本管理中拖入资源:
+    "Drag resources from Game resources or Manage versions",
   已预选: "Selected",
   更新于: "Updated",
   下载量: "Downloads",
@@ -233,6 +341,8 @@ export const english: Readonly<Record<string, string>> = {
   目标版本已有此资源: "This resource is already in the target version",
   "已复制 {name} 到 {version}": "Copied {name} to {version}",
   刷新: "Refresh",
+  最大化窗口: "Maximize window",
+  还原窗口: "Restore window",
   关闭: "Close",
   移除: "Remove",
   确认: "Confirm",
@@ -254,6 +364,16 @@ export const english: Readonly<Record<string, string>> = {
   手动登记: "Registered",
   系统安装: "System",
   移入回收站: "Move to Trash",
+  "删除整合包 Mod": "Remove modpack Mods",
+  "这些 Mod 由整合包清单声明，删除后可能导致游戏无法启动。":
+    "These Mods are declared by the modpack. Removing them may prevent the game from starting.",
+  修复缺失前置: "Install missing dependencies",
+  "缺失前置已安装，请重新启动游戏。":
+    "Missing dependencies installed. Start the game again.",
+  拖到此处移入回收站: "Drop here to move to Trash",
+  "已移入回收站 {count} 项资源": "Moved {count} resources to Trash",
+  "复制存档到 {name} · {version}": "Copy world to {name} · {version}",
+  "每次可删除 1–256 项资源": "Select 1–256 resources to remove",
   取消登记: "Unregister",
   正在被实例使用: "In use by an instance",
   "未发现 Java，可登记本地文件或获取所需版本。":
@@ -392,6 +512,47 @@ export const english: Readonly<Record<string, string>> = {
     "Unsupported bytecode in the loader or parser",
   "Mod 依赖缺失或版本冲突": "Missing or incompatible mod dependencies",
   "存在重复的 Mod": "Duplicate mods",
+  配置引用了未注册的游戏内容:
+    "Configuration references unregistered game content",
+  "核对异常中的物品或方块所属 Mod 是否缺失、被禁用或版本不符；报错的读取方不一定是缺失组件。":
+    "Check whether the Mod providing the item or block is missing, disabled, or incompatible. The reporting Mod may only be reading the content.",
+  整合包必需组件已被禁用: "Required modpack components are disabled",
+  "在 Mods 管理中重新启用列出的文件，再启动游戏。":
+    "Re-enable the listed files in Mods management, then launch again.",
+  整合包清单中的必需文件缺失: "Required modpack files are missing",
+  "按整合包清单补齐对应文件；不要用同名的任意版本替代。":
+    "Restore the files specified by the modpack manifest, using the required versions.",
+  本地文件与整合包声明不同: "Local files differ from the modpack manifest",
+  "核对是否主动更新过这些文件；差异本身不能证明它是崩溃原因。":
+    "Check whether these files were intentionally updated. A difference alone does not identify the crash cause.",
+  "发现整合包清单之外的 Mod": "Mods outside the modpack manifest were found",
+  "这些可能是自行添加的 Mod 或整合包覆盖文件，不据此认定冲突或删除。":
+    "These may be user additions or modpack overrides. Their presence alone is not a reason to report a conflict or remove them.",
+  组件版本与声明的要求不匹配:
+    "Component versions differ from declared requirements",
+  "根据下列要求核对游戏、加载器和 Mod 版本。":
+    "Check game, loader, and Mod versions against the requirements below.",
+  "发现缺失、禁用或冲突的 Mod 依赖":
+    "Missing, disabled, or conflicting Mod dependencies found",
+  "在 Mods 管理中启用所需前置，或安装满足要求的版本。":
+    "Enable the required dependencies in Mods management, or install compatible versions.",
+  "多个启用文件声明了相同 Mod ID":
+    "Multiple enabled files declare the same Mod ID",
+  "核对重复文件，保留适用于当前整合包的版本。":
+    "Review duplicates and keep the version intended for this modpack.",
+  "Mod 文件无法作为 JAR 读取": "Mod files could not be read as JAR archives",
+  "重新下载列出的 Mod 文件，并保留整合包要求的版本。":
+    "Download the listed Mod files again using the versions required by the modpack.",
+  启动清单中的游戏文件或运行库缺失:
+    "Game files or runtime libraries in the launch manifest are missing",
+  "校验并补齐所列文件；外部加载器可使用原安装方式修复。":
+    "Verify and restore the listed files. External loaders can be repaired using their original installer.",
+  部分组件信息未能核对: "Some component information could not be checked",
+  "这些项目保留为未知，不会因此判定版本不兼容或自动修改文件。":
+    "These items remain unknown. They will not be treated as incompatible or modified automatically.",
+  本地组件核对未完成: "Local component checks could not be completed",
+  "原始启动异常仍保留在日志中。":
+    "The original launch exception remains in the log.",
   配置文件读取失败: "Configuration loading failed",
   "Mixin 注入失败": "Mixin injection failed",
   图形上下文创建失败: "Graphics context creation failed",
@@ -478,8 +639,6 @@ export const english: Readonly<Record<string, string>> = {
   目标存档: "Target world",
   选择存档: "Choose a world",
   请先在此版本中创建存档: "Create a world in this version first",
-  此版本与同目录的其他版本共享资源:
-    "This version shares resources with other versions in this game directory",
   复用已有文件: "Reuse existing file",
   "必要前置已包含，不覆盖已有的不同文件":
     "Required dependencies included; existing different files are preserved",
@@ -735,6 +894,16 @@ export const english: Readonly<Record<string, string>> = {
   继续下载: "Resume download",
   已暂停: "Paused",
   已缓存: "Cached",
+  选择版本: "Select version",
+  下载到资源库: "Download to library",
+  全局缓存: "Global library",
+  缓存到启动器: "Save to global library",
+  仅显示全局缓存: "Show global library only",
+  资源已在全局缓存中: "This resource is already in the global library",
+  此文件不在全局资源库中: "This file is not in the global library",
+  "全局资源库支持 Mods、资源包、光影和数据包":
+    "The global library supports Mods, resource packs, shaders and data packs",
+
   "已校验 {done} / {total} 个文件": "Verified {done} / {total} files",
   通用设置: "General",
   网络设置: "Network",
@@ -760,21 +929,25 @@ export const english: Readonly<Record<string, string>> = {
   启动游戏: "Launch game",
   下载游戏: "Download game",
   下载并启动游戏: "Download & launch",
+  修复并启动游戏: "Repair & launch",
+  "读取已安装 Mod 的依赖": "Read installed Mod dependencies",
+  查找并下载兼容前置: "Find and download compatible dependencies",
+  核对前置与依赖约束: "Validate dependencies and constraints",
+  修复中: "Repairing",
+  "修复并启动 {version}": "Repair and launch {version}",
   "下载并启动 {version}": "Download and launch {version}",
   设置分类: "Settings categories",
-  刷新账户与皮肤: "Refresh account and skin",
+  账户自动刷新失败: "Automatic account refresh failed",
   日志: "Logs",
   关闭面板: "Close panel",
   取消: "Cancel",
   微软登录: "Microsoft sign-in",
-  "有效期约 {minutes} 分钟": "Valid for about {minutes} min",
-  复制验证码: "Copy code",
-  "复制验证码 {code}": "Copy code {code}",
-  打开微软登录页: "Open Microsoft sign-in",
-  打开登录页: "Open sign-in page",
-  取消登录: "Cancel sign-in",
-  复制登录地址: "Copy sign-in URL",
-  "等待授权…": "Waiting for sign-in…",
+  "无法创建本机登录回调，请重试":
+    "Could not receive a local sign-in callback. Please try again.",
+  "浏览器登录已超时，请重新登录":
+    "Browser sign-in timed out. Please sign in again.",
+  无法完成微软浏览器登录: "Could not complete Microsoft browser sign-in",
+  "微软登录请求超时，请重试": "Microsoft sign-in timed out. Please try again.",
   选择启动账户: "Choose an account to play",
   当前账户: "Current account",
   移除账户: "Remove account",
@@ -867,7 +1040,7 @@ export const english: Readonly<Record<string, string>> = {
   清空此实例日志: "Clear this instance's logs",
   回到最新日志: "Jump to latest",
   "没有符合筛选条件的日志。": "No logs match these filters.",
-  "{name}，{version}，双击查看运行日志，按 F2 设置，拖动或按 Alt 加左右方向键排序":
+  "{name}，{version}，双击查看运行日志，按 F2 设置，拖动或按 Alt 加方向键排序":
     "{name}, {version}. Double-click for logs, F2 for settings; drag or Alt + arrow keys to reorder",
   关闭对话框: "Close dialog",
   移除实例: "Remove instance",
@@ -973,12 +1146,10 @@ export const english: Readonly<Record<string, string>> = {
   校验与修复: "Verify & repair",
   安装游戏: "Install game",
   切换账户: "Switch account",
-  刷新账户: "Refresh account",
   保存设置: "Save settings",
   已复制: "Copied",
   "选择 bin/java 或 bin/java.exe": "Choose bin/java or bin/java.exe",
-  "账户暂无皮肤资料，请刷新账户。":
-    "No skin data is available. Refresh the account.",
+  "账户暂无可用的皮肤资料。": "No skin data is available for this account.",
   "皮肤加载失败 · 显示 Steve": "Skin unavailable · Showing Steve",
   皮肤纹理无法读取: "Could not read the skin texture",
   "当前设备无法创建 3D 皮肤预览":
@@ -986,13 +1157,12 @@ export const english: Readonly<Record<string, string>> = {
   "当前为界面预览。请运行桌面版以管理实例和启动游戏。":
     "This is a UI preview. Open the desktop app to manage instances and play.",
   "请等待当前任务完成。": "Wait for the current task to finish.",
-  "正在取消登录…": "Cancelling sign-in…",
   "正在取消，已校验的文件将保留在缓存中。":
     "Cancelling. Verified files will remain cached.",
   "请在桌面启动器中登录，浏览器预览不支持微软授权。":
     "Sign in from the desktop launcher. Microsoft sign-in is unavailable in the browser preview.",
-  "未能自动打开浏览器。请点击下方登录链接重试。":
-    "Could not open your browser. Click the sign-in link below to retry.",
+  "未能自动打开浏览器，请点击加号重试。":
+    "Could not open your browser. Click the plus button to retry.",
   "并发下载请填写 1–256 的整数。":
     "Parallel downloads must be an integer from 1 to 256.",
   "失败重试请填写 0–5 的整数。":
@@ -1000,10 +1170,10 @@ export const english: Readonly<Record<string, string>> = {
   "无法访问剪贴板，请手动选择并复制。":
     "Clipboard unavailable. Select and copy the text manually.",
   "实例名称应为 1–80 个字符": "Instance names must contain 1–80 characters",
-  "{name}，{version}，双击或按 F2 设置，拖动或按 Alt 加左右方向键排序":
-    "{name}, {version}. Double-click or press F2 for settings. Drag or press Alt+Left/Right to reorder.",
-  "{name}，{version}，双击查看下载进度，按 F2 设置，拖动或按 Alt 加左右方向键排序":
-    "{name}, {version}. Double-click for download progress. Press F2 for settings. Drag or press Alt+Left/Right to reorder.",
+  "{name}，{version}，双击或按 F2 设置，拖动或按 Alt 加方向键排序":
+    "{name}, {version}. Double-click or press F2 for settings. Drag or press Alt+Arrow keys to reorder.",
+  "{name}，{version}，双击查看下载进度，按 F2 设置，拖动或按 Alt 加方向键排序":
+    "{name}, {version}. Double-click for download progress. Press F2 for settings. Drag or press Alt+Arrow keys to reorder.",
   "为 {name} 下载游戏版本": "Download a game version for {name}",
   "启动 {version}": "Launch {version}",
   "使用 {name} 启动游戏": "Play as {name}",

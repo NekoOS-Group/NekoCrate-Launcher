@@ -1,6 +1,6 @@
 # Microsoft 登录配置
 
-NekoCrate 使用公共客户端的 OAuth 设备授权流程。Client ID 是公开应用标识；不要在启动器中填写或嵌入 Client Secret，也不要复用其他启动器的 ID。
+NekoCrate 桌面版与 CLI 统一使用浏览器中的 OAuth 授权码流程（PKCE）。桌面界面保持账户列表，不展示授权等待页。Client ID 是公开应用标识；不要在启动器中填写或嵌入 Client Secret，也不要复用其他启动器的 ID。
 
 ## 猫咪盒子应用注册信息
 
@@ -22,7 +22,7 @@ Minecraft API 审核状态：项目维护者于 2026-10-27 确认已通过 Mojan
 
 ## Java 版玩家名称
 
-账户弹窗中的微软账户名称在悬停时显示，单击后原位编辑，不切换当前启动账户。回车或输入框右侧确认图标提交；未提交时失焦或 Esc 放弃。编辑提示仅为“30天可修改一次”。失败后保留输入内容与右上角错误提示，重新进入编辑、重试期间不清空错误；成功或手动关闭错误提示才清除。此操作修改 Java 版云端玩家名称，不修改 Microsoft 显示名或 Xbox Gamertag。
+账户下拉面板按纵向列表排列，每行左侧为与顶部账户按钮一致的 40×40 头像，右侧显示名称；单击名称后原位编辑，不切换当前启动账户。回车或输入框右侧确认图标提交；未提交时失焦或 Esc 放弃。编辑提示仅为“30天可修改一次”。失败后保留输入内容与右上角错误提示，重新进入编辑、重试期间不清空错误；成功或手动关闭错误提示才清除。此操作修改 Java 版云端玩家名称，不修改 Microsoft 显示名或 Xbox Gamertag。
 
 `rename_account` 将点击时的账户 ID 固定传给 Rust，复用账户会话。先校验 3–16 位 ASCII 字母、数字、下划线，再查询官方 `GET /minecraft/profile/namechange` 和 `GET /minecraft/profile/name/{name}/available`，允许后提交 `PUT /minecraft/profile/name/{name}`。冷却资格以服务返回为准，不根据本机日期推算；仅改变大小写时跳过自身名称的可用性查询，仍由服务执行冷却规则。相同名称不发送请求。返回档案须匹配账户 UUID 与目标名称，然后同步数据库、内存启动会话和前端名称，保留皮肤、游客和当前选中账户。
 
@@ -32,24 +32,31 @@ Minecraft API 审核状态：项目维护者于 2026-10-27 确认已通过 Mojan
 
 1. 在 Microsoft Entra 的应用注册中创建你自己的应用。
 2. 账户类型需要允许个人 Microsoft 账户（Xbox/Minecraft 使用的消费者账户）。
-3. 在 Authentication 中允许公共客户端流程（Allow public client flows）。设备流程无需启动器接收重定向回调。
-4. 点击左上角账户卡片，再点击头像列表中的「+」，直接开始微软登录。启动器内置上表中的项目 Client ID，账户界面不再要求用户配置应用 ID。开发者仍可通过数据文件中的 `settings.microsoft_client_id` 覆盖默认值；空值（包括旧版本留下的空配置）自动使用内置 ID。
+3. 在 Authentication → Add a platform → **Mobile and desktop applications** 中登记 `http://localhost`，并保留 Allow public client flows。不要把这个回调登记成 Web 或 SPA。启动器实际使用 `http://localhost:<临时端口>/`；微软匹配 localhost 回调时忽略端口，无需登记每个临时端口。
+4. 点击左上角账户卡片，在卡片下方展开账户列表，再点击「+」直接开始微软登录。下拉面板没有遮罩，不阻止操作主界面；选择账户后收起，点击外部或按 Esc 也可收起，Tab 和方向键可访问账户及管理操作。启动器内置上表中的项目 Client ID，账户界面不再要求用户配置应用 ID。开发者仍可通过数据文件中的 `settings.microsoft_client_id` 覆盖默认值；空值（包括旧版本留下的空配置）自动使用内置 ID。
 5. 申请/确认你的应用具备 Minecraft API 的访问许可。微软 OAuth 成功不代表 Minecraft 会接受该应用；若 Minecraft 登录阶段返回应用访问错误，需先处理注册/许可问题。
-6. 点击添加账户后，启动器显示设备码并自动复制到剪贴板，在系统默认浏览器打开微软返回的授权地址。在网页中输入设备码并授权，启动器自动完成登录。打开浏览器失败不会终止授权，可点击验证码下方的登录地址重试。启动器只接收令牌，不接收账户密码。
+6. 点击添加账户后，系统默认浏览器直接打开微软账号选择页。授权请求使用 `prompt=select_account`，不预填 `login_hint`，允许选择记住的账号或使用其他账号。账户列表保持原位，完成授权后直接加入新头像。浏览器打开失败时再次点击加号重试。
+7. 关闭账户列表仅收起面板，不中断浏览器授权，登录成功也不会重新弹出面板。再次点击加号、开始新任务或退出启动器时清理旧会话，迟到结果不能覆盖新会话。
+
+CLI 的 `login` 命令输出授权链接，请在运行 CLI 的同一台电脑上用浏览器打开；完成授权后通过本机回调继续登录。
+
+若微软网页出现 `invalid_request`，提示 `redirect_uri` 未注册，先核对第 3 步：代码中的 Client ID 必须属于登记回调的那个应用，平台必须为 Mobile and desktop applications，URI 为 `http://localhost`。这项是微软服务端配置，更新启动器不会自动修改应用注册。保存后从启动器重新发起登录，旧网页不会自动更新。
+
+浏览器登录只在 IPv4 loopback 上监听临时端口，最多等待 15 分钟（单调时钟计时）。每次使用独立的随机 `state` 与 32 字节随机 PKCE verifier，采用 S256；verifier、回调授权码与令牌始终留在 Rust。接收端校验请求方法、路径、Host、state 及重复参数，限制请求大小与读取时间，不把错误回调当作用户取消。收到有效结果后关闭监听，再用原始 verifier 与相同 redirect URI 一次性兑换授权码。回调页面不包含授权参数、不缓存、不发送 Referer；日志不输出授权码、verifier 或原始身份服务响应。取消与超时均释放监听端口。真实账号选择、多因素认证及后续 Minecraft 登录仍需用户完成端到端验收。
 
 请求权限：`XboxLive.signin offline_access`。
 
 流程：
 
 ```text
-Microsoft device code → Microsoft access/refresh token
+Microsoft authorization code + PKCE → Microsoft access/refresh token
 → Xbox Live user token → XSTS token
 → Minecraft access token → entitlements → player profile
 ```
 
 刷新令牌按数据目录命名空间和玩家 UUID 存储到系统钥匙串，访问令牌只在内存与游戏进程参数中短暂使用。前端、数据库、启动器日志不输出令牌。Java 进程接收访问令牌属于游戏启动协议的一部分。
 
-已选择微软账户时，登录或首次刷新得到的会话按账户和 Client ID 缓存在当前进程中。游戏启动直接复用有效会话；在有效期结束前 60 秒才重新刷新授权、检查权益。有效期同时检查单调时钟和系统时间，避免时间回拨或系统睡眠延长令牌有效期。刷新令牌首次读取后同样保留在内存中，只有轮换时才写回钥匙串；手动「刷新账户」仍强制刷新。macOS 保存凭据时只查询条目引用再更新，不额外读取旧凭据，不改变现有条目的访问控制。移除账户会清除内存中的凭据，退出后缓存自然释放。刷新失败保留错误，不自动改用其他玩家身份。Linux 的微软账户需要解锁的 Secret Service（例如 GNOME Keyring/KWallet），钥匙串不可用时会显示错误，不回退到明文文件。
+已选择微软账户时，登录或首次刷新得到的会话按账户和 Client ID 缓存在当前进程中。游戏启动直接复用有效会话；在有效期结束前 60 秒才重新刷新授权、检查权益。有效期同时检查单调时钟和系统时间，避免时间回拨或系统睡眠延长令牌有效期。刷新令牌首次读取后同样保留在内存中，只有轮换时才写回钥匙串；CLI 的 `refresh` 命令仍可强制刷新。桌面端移除账户刷新按钮：启动、切换当前账户、打开账户列表、窗口重新可见或网络恢复时检查，窗口可见期间每分钟检查一次。这些检查只比较本地有效期，仅在到期前 60 秒或已经过期时发起后台刷新，不再定时拉取账户资料。重启后，如果持久化的登录有效期尚未临近，也不会因内存缺少访问令牌而提前读取钥匙串；实际启动游戏等需要令牌的操作仍按需获取会话。名称和皮肤随登录、凭据刷新或用户主动修改资料更新。后台请求不占用下载任务，不修改选中账户，已有登录／改名等账户操作繁忙时跳过。网络失败保留旧资料和有效会话，记录诊断日志，至少间隔 1 分钟再试；不会自动打开浏览器或反复弹出错误。macOS 保存凭据时只查询条目引用再更新，不额外读取旧凭据，不改变现有条目的访问控制。移除账户会清除内存中的凭据，退出后缓存自然释放。刷新失败保留错误，不自动改用其他玩家身份。Linux 的微软账户需要解锁的 Secret Service（例如 GNOME Keyring/KWallet），钥匙串不可用时会显示错误，不回退到明文文件。
 
 macOS 的钥匙串授权还取决于程序的代码签名身份。`cargo ui` 使用固定的本地自签证书，在首次启动和每次 Rust 重载前签名；指定要求绑定 `dev.nekocrate.launcher` 和证书指纹，不再绑定随编译变化的二进制哈希。私钥保存在当前用户钥匙串，仅允许系统 `codesign` 使用；公证书与身份配置保存在 `~/Library/Application Support/NekoCrate/signing/`。缺失原身份时停止启动，不静默生成新证书。
 
@@ -61,12 +68,14 @@ Windows 使用 Windows Credential Manager 存储刷新令牌，Linux 使用 Secr
 
 账户列表始终保留游客入口；选择它会清空 `selected_account`，保留所有微软账户与凭据。游客名称默认 `Player`，可点击游客头像下悬停显示的名称原位修改（1–16 位英文字母、数字或下划线，回车或离开输入框保存，Esc 放弃），单独持久化在 `guest_name`。旧数据库没有这个字段时自动使用默认名称。本地 UUID 继续使用 `a01e3843-e521-3998-958a-f459800e4d11`（原 `OfflinePlayer:Player` 的 Java name-based UUID），改名不改变本地玩家数据的归属。这个身份只用于游戏进程，不创建账户记录，不需要 Client ID，也不访问微软身份服务或钥匙串。无认证的进程参数使用 `accessToken=0`，此占位值与 [Prism 的离线会话实现](https://github.com/PrismLauncher/PrismLauncher/blob/develop/launcher/minecraft/auth/AuthSession.cpp) 一致；它不是凭据，不参与日志令牌替换。需要微软身份验证的在线服务仍需登录账户。
 
-已区分的错误包括：用户拒绝授权、设备码过期、刷新令牌被撤销、Client ID/权限配置错误、Xbox 档案缺失、家庭/年龄限制、游戏权益缺失与 Java 档案未创建。
+已区分的错误包括：用户拒绝授权、浏览器授权超时、刷新令牌被撤销、Client ID/权限配置错误、Xbox 档案缺失、家庭/年龄限制、游戏权益缺失与 Java 档案未创建。
 
 文档参考：
 
-- [Microsoft 设备授权流程](https://learn.microsoft.com/entra/identity-platform/v2-oauth2-device-code)
+- [Microsoft 授权码与 PKCE](https://learn.microsoft.com/en-us/entra/identity-platform/v2-oauth2-auth-code-flow)
+- [桌面应用回调配置](https://learn.microsoft.com/en-us/entra/identity-platform/scenario-desktop-app-configuration#add-a-platform-redirect-uri)
+- [localhost 回调匹配规则](https://learn.microsoft.com/en-us/entra/identity-platform/reply-url#localhost-exceptions)
 - [Microsoft 身份验证流程](https://learn.microsoft.com/entra/identity-platform/msal-authentication-flows)
 - [Prism 应用密钥政策](https://github.com/PrismLauncher/PrismLauncher#forkingredistributingcustom-builds-policy)
 
-本原型的真实登录验收需要项目自己的 Client ID 和用户亲自完成微软授权。代码编译、错误分类测试或设备码生成均不等于完整登录验收。
+本原型的真实登录验收需要项目自己的 Client ID 和用户亲自完成微软授权。代码编译、错误分类测试或本机回调测试均不等于完整登录验收。

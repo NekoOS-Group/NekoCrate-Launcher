@@ -245,10 +245,8 @@ export interface WorkflowState {
 }
 export interface Challenge {
   session_id: string;
-  user_code: string;
   verification_uri: string;
   expires_in: number;
-  interval: number;
 }
 export interface Task {
   operation?: string;

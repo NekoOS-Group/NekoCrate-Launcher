@@ -43,10 +43,24 @@ def verify(directory):
     print(f"Frontend entry and {len(parser.references)} resources verified in {root}")
 
 
+def verify_compressed_window_icon(binary):
+    # The full-resolution icon must be embedded only as compressed data.
+    references = list((binary.parent / "build").glob("nekocrate-desktop-*/out/window-icon.rgba"))
+    if not references:
+        raise ValueError("Missing build-time window icon reference")
+    executable = binary.read_bytes()
+    for reference in references:
+        rgba = reference.read_bytes()
+        if rgba and rgba in executable:
+            raise ValueError("Uncompressed window icon is still embedded in the executable")
+
+
 def embedded(target, portable=False):
     root = Path(__file__).resolve().parents[1]
     suffix = ".exe" if "windows" in target else ""
     binary = root / "target" / target / "release" / f"nekocrate-launcher{suffix}"
+    if "windows" not in target:
+        verify_compressed_window_icon(binary)
     if "linux" in target:
         dynamic = subprocess.check_output(["readelf", "-d", str(binary)], text=True)
         if "Shared library: [libdbus-1.so.3]" not in dynamic:

@@ -139,6 +139,7 @@ onBeforeUnmount(() => {
   cancelPress();
   document.removeEventListener("pointerdown", outside, true);
 });
+defineExpose({ close });
 </script>
 
 <template>

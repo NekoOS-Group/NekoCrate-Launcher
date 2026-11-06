@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import WindowControls from "./WindowControls.vue";
 import { computed, ref } from "vue";
 import {
   Archive,
@@ -23,10 +24,15 @@ import {
 import { t } from "../i18n";
 import type { Instance, VersionManifest } from "../types";
 import type { ResourceSelection } from "../resources";
+import {
+  resourceSourceKey,
+  type ResourceCopySource,
+} from "../useResourceTransfer";
 
 const props = defineProps<{
   section?: "game" | "modpacks" | "resources";
   resources: readonly ResourceSelection[];
+  localResources?: readonly ResourceCopySource[];
   target: Instance | null;
   instances: readonly Instance[];
   manifest: VersionManifest | null;
@@ -57,6 +63,7 @@ const emit = defineEmits<{
   "update:icon": [value: number];
   importPack: [];
   removeResource: [value: ResourceSelection];
+  removeLocalResource: [value: ResourceCopySource];
   retryLoader: [];
   "update:location": [value: string];
   target: [id: string | null];
@@ -142,6 +149,7 @@ const selectionColor = computed(() =>
         @update:location="$emit('update:location', $event)"
         @browse="$emit('browse')"
       />
+      <WindowControls />
       <button
         type="button"
         class="icon-button"
@@ -298,39 +306,64 @@ const selectionColor = computed(() =>
                 </div>
               </Transition>
             </div>
-            <button
-              type="button"
-              class="download-resources list-reveal-item"
-              :style="listRevealStyle(3)"
-              :disabled="
+            <div
+              class="download-resource-drop"
+              data-drop-kind="selection"
+              :data-drop-disabled="
                 disabled ||
                 !selected ||
                 loaderLoading ||
                 (loader !== 'vanilla' && !loaderVersion)
               "
-              @click="$emit('update:section', 'resources')"
-            >
-              <Package :size="17" /><span>{{ t("资源") }}</span
-              ><small v-if="resources.length">{{ resources.length }}</small
-              ><ChevronRight :size="15" />
-            </button>
-            <TransitionGroup
-              name="resource-choice"
-              tag="div"
-              class="download-resource-choices"
+              :data-drop-loader="loader"
             >
               <button
-                v-for="item in resources"
-                :key="`${item.platform}/${item.project}`"
                 type="button"
-                :disabled="disabled"
-                :aria-label="`${t('移除')} ${item.name}`"
-                @click="$emit('removeResource', item)"
+                class="download-resources list-reveal-item"
+                :style="listRevealStyle(3)"
+                :disabled="
+                  disabled ||
+                  !selected ||
+                  loaderLoading ||
+                  (loader !== 'vanilla' && !loaderVersion)
+                "
+                @click="$emit('update:section', 'resources')"
               >
-                <span>{{ item.name }}</span
-                ><X :size="12" />
+                <Package :size="17" /><span>{{ t("资源") }}</span
+                ><small v-if="resources.length || localResources?.length">{{
+                  resources.length + (localResources?.length || 0)
+                }}</small
+                ><ChevronRight :size="15" />
               </button>
-            </TransitionGroup>
+              <TransitionGroup
+                name="resource-choice"
+                tag="div"
+                class="download-resource-choices"
+              >
+                <button
+                  v-for="item in resources"
+                  :key="`${item.platform}/${item.project}`"
+                  type="button"
+                  :disabled="disabled"
+                  :aria-label="`${t('移除')} ${item.name}`"
+                  @click="$emit('removeResource', item)"
+                >
+                  <span>{{ item.name }}</span
+                  ><X :size="12" />
+                </button>
+                <button
+                  v-for="item in localResources"
+                  :key="resourceSourceKey(item)"
+                  type="button"
+                  :disabled="disabled"
+                  :aria-label="`${t('移除')} ${item.name}`"
+                  @click="$emit('removeLocalResource', item)"
+                >
+                  <span>{{ item.name }}</span
+                  ><X :size="12" />
+                </button>
+              </TransitionGroup>
+            </div>
             <span v-if="running" class="download-detail" role="status">{{
               t("请先停止此实例的游戏")
             }}</span>
@@ -508,19 +541,22 @@ const selectionColor = computed(() =>
     color-mix(in srgb, var(--category-accent) 24%, transparent);
 }
 .catalog-filter button:focus-visible {
-  box-shadow: inset 0 0 0 1px var(--category-accent);
+  box-shadow: 0 0 14px
+    color-mix(in srgb, var(--category-accent) 22%, transparent);
 }
 .catalog-divider {
   width: 1px;
   height: 22px;
   background: var(--line);
 }
+.download-resource-drop {
+  margin-top: 24px;
+}
 .download-resources {
   display: flex;
   align-items: center;
   gap: 10px;
   width: 100%;
-  margin-top: 24px;
   padding: 12px 6px;
   border: 0;
   background: transparent;

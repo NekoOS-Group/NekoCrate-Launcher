@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { Check, Power, PowerOff, X } from "lucide-vue-next";
+import { Check, Power, PowerOff, Trash2, X } from "lucide-vue-next";
 import { t } from "../i18n";
 defineProps<{
   count: number;
@@ -7,8 +7,9 @@ defineProps<{
   mods?: boolean;
   enable?: boolean;
   disable?: boolean;
+  removable?: boolean;
 }>();
-defineEmits<{ clear: []; enabled: [value: boolean] }>();
+defineEmits<{ clear: []; enabled: [value: boolean]; remove: [] }>();
 </script>
 <template>
   <Transition name="resource-selection">
@@ -45,6 +46,17 @@ defineEmits<{ clear: []; enabled: [value: boolean] }>();
         <PowerOff :size="15" />
       </button>
       <button
+        v-if="removable"
+        type="button"
+        class="icon-button danger"
+        :disabled="busy"
+        :title="t('移入回收站')"
+        :aria-label="t('移入回收站')"
+        @click="$emit('remove')"
+      >
+        <Trash2 :size="15" />
+      </button>
+      <button
         type="button"
         class="icon-button"
         :disabled="busy"
@@ -54,6 +66,7 @@ defineEmits<{ clear: []; enabled: [value: boolean] }>();
       >
         <X :size="14" />
       </button>
+      <slot />
     </div>
   </Transition>
 </template>

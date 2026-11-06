@@ -1,19 +1,24 @@
 <script setup lang="ts">
-defineProps<{ value: number | undefined }>();
+defineProps<{ value: number | undefined; bare?: boolean }>();
 </script>
 
 <template>
   <span
     class="animated-count"
     :style="{
-      width: value === undefined ? '0ch' : `${String(value).length + 2}ch`,
+      width:
+        value === undefined
+          ? '0ch'
+          : `${String(value).length + (bare ? 0 : 2)}ch`,
     }"
-    :aria-label="value === undefined ? undefined : `(${value})`"
+    :aria-label="
+      value === undefined ? undefined : bare ? String(value) : `(${value})`
+    "
   >
     <Transition name="count-roll">
-      <span v-if="value !== undefined" :key="value" aria-hidden="true"
-        >({{ value }})</span
-      >
+      <span v-if="value !== undefined" :key="value" aria-hidden="true">{{
+        bare ? value : `(${value})`
+      }}</span>
     </Transition>
   </span>
 </template>

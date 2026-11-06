@@ -36,7 +36,7 @@ struct WorldGen {
     seed: Option<i64>,
 }
 
-pub(super) fn read(path: &Path) -> Vec<ContentSource> {
+pub(crate) fn read(path: &Path) -> Vec<ContentSource> {
     let mut sources = Vec::new();
     for name in ["level.dat", "level.dat_old"] {
         if !path.join(name).exists() {

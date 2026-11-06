@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import WindowControls from "./WindowControls.vue";
 import {
   computed,
   nextTick,
@@ -64,6 +65,7 @@ const recoveryIcons = {
   java: Coffee,
   memory: MemoryStick,
   mods: Package,
+  dependencies: Wrench,
   repair: Wrench,
   settings: Settings2,
   report: FileText,
@@ -287,6 +289,7 @@ onBeforeUnmount(() => {
         >
           <Trash2 :size="16" />
         </button>
+        <WindowControls />
         <button
           class="icon-button"
           :aria-label="t('关闭日志')"

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import WindowControls from "./WindowControls.vue";
 import {
   computed,
   inject,
@@ -8,6 +9,7 @@ import {
   ref,
   shallowRef,
   watch,
+  useId,
 } from "vue";
 import {
   Box,
@@ -42,6 +44,7 @@ import {
 } from "../useResourceSelection";
 import {
   isResourceDragKind,
+  resourceRemovalKey,
   type ResourceCopySource,
 } from "../useResourceTransfer";
 import VersionContentItem from "./VersionContentItem.vue";
@@ -66,11 +69,13 @@ import type {
 import { anchorModFiles, modFileName, modRowKeys } from "../contentIdentity";
 import type { ModActions } from "../modManagement";
 import type { ResourceRpc } from "../projectPresentation";
+const panelId = `version-content-${useId()}`;
 const gameTransfer = inject(gameTransferKey, undefined);
 const props = defineProps<{
   rpc: ResourceRpc;
   initialVersion?: string;
   initialTab?: ContentKind;
+  selectionRevision?: number;
   modActions?: ModActions;
   instance: Instance;
   instances: readonly Instance[];
@@ -159,6 +164,15 @@ const selected = ref(
     props.instance.selected_version ||
     props.instance.versions[0]?.id ||
     "",
+);
+watch(
+  () =>
+    [props.initialVersion, props.initialTab, props.selectionRevision] as const,
+  ([version, kind]) => {
+    if (version && props.instance.versions.some((item) => item.id === version))
+      selected.value = version;
+    if (kind) tab.value = kind;
+  },
 );
 const version = computed(() =>
   props.instance.versions.find((v) => v.id === selected.value),
@@ -287,6 +301,32 @@ const selection = useResourceSelection(
   contentRowKey,
 );
 const batchSaving = ref(false);
+const removeResources = inject(resourceRemovalKey, undefined);
+async function removeSelectedResources() {
+  if (
+    props.locked ||
+    batchSaving.value ||
+    !removeResources ||
+    !isResourceDragKind(tab.value)
+  )
+    return;
+  const sources = selectedFiles.value.map((file) => ({
+    kind: tab.value as ResourceCopySource["kind"],
+    instance: props.instance.id,
+    version: selected.value,
+    file: file.file_name,
+    name: file.name,
+  }));
+  if (!sources.length) return;
+  batchSaving.value = true;
+  try {
+    await removeResources(sources);
+  } catch (error) {
+    emit("error", error);
+  } finally {
+    batchSaving.value = false;
+  }
+}
 const selectedFiles = selection.selected;
 const selectedHasEnabled = computed(() =>
   selectedFiles.value.some((file) => file.enabled),
@@ -475,10 +515,9 @@ async function reloadCounts() {
     if (current === countRequest) emit("error", error);
   }
 }
-function refresh() {
+async function refresh() {
   metadataRefresh.value++;
-  void reload();
-  void reloadCounts();
+  await Promise.all([reload(true), reloadCounts()]);
 }
 let pollTimer: ReturnType<typeof setTimeout> | undefined;
 let pollTicket = 0;
@@ -624,14 +663,14 @@ function moveTab(direction: number, event: KeyboardEvent) {
   const next = (index + direction + items.length) % items.length;
   tab.value = items[next].id;
   (event.currentTarget as HTMLElement).parentElement
-    ?.querySelector<HTMLButtonElement>("#version-content-tab-" + items[next].id)
+    ?.querySelector<HTMLButtonElement>(`#${panelId}-tab-${items[next].id}`)
     ?.focus();
 }
 async function showContent(kind: VersionContentTab) {
   tab.value = kind;
   await nextTick();
   tabBar.value
-    ?.querySelector<HTMLButtonElement>("#version-content-tab-" + kind)
+    ?.querySelector<HTMLButtonElement>(`#${panelId}-tab-${kind}`)
     ?.focus({ preventScroll: true });
 }
 async function change(remove = false) {
@@ -718,6 +757,7 @@ defineExpose({ refresh });
         >
           <RefreshCw :size="18" :class="{ spin: loading }" />
         </button>
+        <WindowControls />
         <button
           class="icon-button"
           :disabled="saving"
@@ -878,14 +918,14 @@ defineExpose({ refresh });
           >
             <button
               v-for="item in visibleTabs"
-              :id="`version-content-tab-${item.id}`"
+              :id="`${panelId}-tab-${item.id}`"
               :data-drop-kind="item.id"
               :key="item.id"
               class="settings-tab"
               :style="{ '--tab-color': item.color }"
               role="tab"
               :aria-selected="tab === item.id"
-              aria-controls="version-content-panel"
+              :aria-controls="panelId"
               :tabindex="tab === item.id ? 0 : -1"
               @click="tab = item.id"
               @keydown.right.prevent="moveTab(1, $event)"
@@ -904,11 +944,11 @@ defineExpose({ refresh });
           </TransitionGroup>
         </div>
         <div
-          id="version-content-panel"
+          :id="panelId"
           :data-drop-kind="tab"
           class="version-manager-panel"
           role="tabpanel"
-          :aria-labelledby="`version-content-tab-${tab}`"
+          :aria-labelledby="`${panelId}-tab-${tab}`"
           :aria-busy="loading"
           tabindex="0"
         >
@@ -1028,6 +1068,8 @@ defineExpose({ refresh });
                     :busy="locked || batchSaving"
                     :enable="selectedHasDisabled"
                     :disable="selectedHasEnabled"
+                    :removable="!!removeResources"
+                    @remove="removeSelectedResources"
                     @clear="selection.clear"
                     @enabled="setSelectedEnabled"
                   />

@@ -7,7 +7,7 @@ use serde_json::json;
 use std::{io::Write, sync::Arc};
 use tokio_util::sync::CancellationToken;
 
-fn fixture(isolated: bool) -> (tempfile::TempDir, Launcher, String, PathBuf) {
+pub(super) fn fixture(isolated: bool) -> (tempfile::TempDir, Launcher, String, PathBuf) {
     let temp = tempfile::tempdir().unwrap();
     let launcher = Launcher::open(Some(temp.path().join("launcher"))).unwrap();
     let instance = launcher.create_instance("Games", "1.20.1").unwrap();
@@ -32,7 +32,7 @@ fn fixture(isolated: bool) -> (tempfile::TempDir, Launcher, String, PathBuf) {
     }
     (temp, launcher, instance.id, working)
 }
-fn archive(path: &Path, entries: &[(&str, &str)]) {
+pub(super) fn archive(path: &Path, entries: &[(&str, &str)]) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     let mut zip = zip::ZipWriter::new(fs::File::create(path).unwrap());
     for (name, data) in entries {
@@ -42,13 +42,13 @@ fn archive(path: &Path, entries: &[(&str, &str)]) {
     }
     zip.finish().unwrap();
 }
-fn local(path: &Path) -> LocalImport {
+pub(super) fn local(path: &Path) -> LocalImport {
     LocalImport {
         path: path.to_owned(),
         kind: None,
     }
 }
-fn sink() -> EventSink {
+pub(super) fn sink() -> EventSink {
     Arc::new(|_| {})
 }
 
@@ -73,7 +73,7 @@ fn content_directory_uses_the_actual_profile_and_does_not_create_missing_folders
             .is_err()
     );
 }
-async fn install(launcher: &Launcher, plan: &ResourcePlan) -> Result<()> {
+pub(super) async fn install(launcher: &Launcher, plan: &ResourcePlan) -> Result<()> {
     launcher
         .install_resources(
             &plan.target.instance,
@@ -85,7 +85,12 @@ async fn install(launcher: &Launcher, plan: &ResourcePlan) -> Result<()> {
         .await
 }
 
-fn copy_target(launcher: &Launcher, id: &str, working: &Path, isolated: bool) -> PathBuf {
+pub(super) fn copy_target(
+    launcher: &Launcher,
+    id: &str,
+    working: &Path,
+    isolated: bool,
+) -> PathBuf {
     launcher.add_version(id, "target").unwrap();
     let game = launcher.instance(id).unwrap().game_dir(launcher.root());
     let mut profile = crate::test_http::version_fixture("target");
@@ -132,6 +137,7 @@ async fn mod_copy_preserves_source_and_disabled_state_and_is_idempotent() {
             );
         }
         let source = ResourceCopySource {
+            global: false,
             kind: ResourceKind::Mods,
             instance: id.clone(),
             version: "1.20.1".into(),
@@ -165,6 +171,7 @@ fn drag_export_resolves_only_listed_resources_and_keeps_the_original() {
         &[("fabric.mod.json", r#"{"id":"cat","version":"1"}"#)],
     );
     let mut source = ResourceCopySource {
+        global: false,
         kind: ResourceKind::Mods,
         instance: id,
         version: "1.20.1".into(),
@@ -215,6 +222,7 @@ fn mod_copy_rejects_conflicts_and_unlisted_sources_without_touching_files() {
     let before = fs::read(target.join("mods/example.jar")).unwrap();
     let cancel = CancellationToken::new();
     let mut source = ResourceCopySource {
+        global: false,
         kind: ResourceKind::Mods,
         instance: id.clone(),
         version: "1.20.1".into(),
@@ -248,6 +256,7 @@ fn mod_copy_between_versions_sharing_a_directory_does_nothing() {
         &[("fabric.mod.json", r#"{"id":"example","version":"1"}"#)],
     );
     let source = ResourceCopySource {
+        global: false,
         kind: ResourceKind::Mods,
         instance: id.clone(),
         version: "1.20.1".into(),
@@ -290,6 +299,7 @@ async fn resource_copy_routes_packs_and_shaders_to_the_other_instance_without_mo
         let original = working.join(kind.directory()).join(name);
         archive(&original, &contents);
         let source = ResourceCopySource {
+            global: false,
             kind,
             instance: id.clone(),
             version: "1.20.1".into(),
@@ -311,6 +321,7 @@ async fn resource_copy_routes_packs_and_shaders_to_the_other_instance_without_mo
     fs::write(folder.join("pack.mcmeta"), "{}").unwrap();
     fs::write(folder.join("assets/example/a.txt"), "texture").unwrap();
     let source = ResourceCopySource {
+        global: false,
         kind: ResourceKind::Resourcepacks,
         instance: id,
         version: "1.20.1".into(),
@@ -731,7 +742,12 @@ async fn cancelled_plan_survives_restart_and_duplicate_mod_ids_are_rejected() {
     assert!(!working.join("mods/another-name.jar").exists());
 }
 
-fn cache(launcher: &Launcher, path: &str, args: &[(&str, String)], value: serde_json::Value) {
+pub(super) fn cache(
+    launcher: &Launcher,
+    path: &str,
+    args: &[(&str, String)],
+    value: serde_json::Value,
+) {
     let url = reqwest::Url::parse_with_params(&format!("https://api.modrinth.com/v2/{path}"), args)
         .unwrap();
     let hash = hex::encode(ring::digest::digest(
@@ -746,10 +762,14 @@ fn cache(launcher: &Launcher, path: &str, args: &[(&str, String)], value: serde_
     )
     .unwrap();
 }
-fn remote(id: &str, project: &str, dependencies: serde_json::Value) -> serde_json::Value {
+pub(super) fn remote(
+    id: &str,
+    project: &str,
+    dependencies: serde_json::Value,
+) -> serde_json::Value {
     json!({"id":id,"project_id":project,"name":id,"version_number":"1.0","version_type":"release", "game_versions":["1.20.1"],"loaders":["fabric"],"files":[{"filename":format!("{project}.jar"),"url":format!("https://cdn.modrinth.com/data/{project}/{id}.jar"),"size":10,"primary":true,"hashes":{"sha1":"0000000000000000000000000000000000000000"}}],"dependencies":dependencies})
 }
-fn cache_project(launcher: &Launcher, id: &str) {
+pub(super) fn cache_project(launcher: &Launcher, id: &str) {
     cache(
         launcher,
         &format!("project/{id}"),
@@ -786,6 +806,29 @@ async fn display_project_uses_cached_body_and_authors_without_installing_anythin
         .unwrap();
     assert_eq!(summary.icon_url, details.project.icon_url);
     assert_eq!(summary.id, "cat");
+    let members_url = reqwest::Url::parse_with_params(
+        "https://api.modrinth.com/v2/project/cat/members",
+        &[] as &[(&str, String)],
+    )
+    .unwrap();
+    let hash = hex::encode(ring::digest::digest(
+        &ring::digest::SHA256,
+        members_url.as_str().as_bytes(),
+    ));
+    fs::remove_file(
+        launcher
+            .root()
+            .join(format!("metadata/resources/{hash}.json")),
+    )
+    .unwrap();
+    // Return cached text in the first poll, without waiting for an optional team request.
+    let cancel = CancellationToken::new();
+    let pending = launcher.resource_project(Platform::Modrinth, "cat", &cancel);
+    let details = futures_util::FutureExt::now_or_never(pending)
+        .unwrap()
+        .unwrap();
+    assert_eq!(details.body, "## A cat world");
+    assert!(details.refresh_required);
     assert!(
         launcher
             .resource_project(Platform::Modrinth, "../cat", &CancellationToken::new())
@@ -1274,6 +1317,7 @@ fn search_metadata_preserves_authors_and_featured_categories_for_both_providers(
     let mr = provider::project(
         &json!({
             "project_id": "cat", "title": "Cat", "downloads": 10000,
+            "date_modified": "2026-11-02T00:00:00Z", "latest_version": "new-version",
             "author": "CatTeam", "display_categories": ["magic", "adventure"],
             "categories": ["fabric", "magic", "adventure"]
         }),
@@ -1282,9 +1326,12 @@ fn search_metadata_preserves_authors_and_featured_categories_for_both_providers(
     assert_eq!(mr.downloads, 10000);
     assert_eq!(mr.authors, ["CatTeam"]);
     assert_eq!(mr.categories, ["magic", "adventure"]);
+    assert_eq!(mr.updated.as_deref(), Some("2026-11-02T00:00:00Z"));
+    assert_eq!(mr.latest_version.as_deref(), Some("new-version"));
     let cf = provider::project(
         &json!({
             "id": 123, "name": "Cat", "downloadCount": 12000.0,
+            "dateModified": "2026-11-03T00:00:00Z", "mainFileId": 101,
             "authors": [{"name": "CatTeam"}, {"name": "Neko"}],
             "categories": [{"name": "Magic"}, {"name": "Adventure and RPG"}]
         }),
@@ -1293,6 +1340,8 @@ fn search_metadata_preserves_authors_and_featured_categories_for_both_providers(
     assert_eq!(cf.downloads, 12000);
     assert_eq!(cf.authors, ["CatTeam", "Neko"]);
     assert_eq!(cf.categories, ["Magic", "Adventure and RPG"]);
+    assert_eq!(cf.updated.as_deref(), Some("2026-11-03T00:00:00Z"));
+    assert_eq!(cf.latest_version.as_deref(), Some("101"));
     let old: Project = serde_json::from_value(json!({
         "id": "old", "name": "Old", "description": "", "downloads": 0, "url": ""
     }))
@@ -1520,6 +1569,7 @@ async fn batch_resource_copy_checks_every_file_before_installing_and_keeps_disab
                 )],
             );
             ResourceCopySource {
+                global: false,
                 kind: ResourceKind::Mods,
                 instance: id.clone(),
                 version: "1.20.1".into(),
@@ -1735,6 +1785,51 @@ async fn selected_resources_survive_cancel_and_restart_and_finish_in_the_version
         cache(&launcher, &format!("version/{name}1"), &[], value);
     }
     let picks = vec![pick("cat", "cat1"), pick("ice", "ice1")];
+    let source_directory = copy_target(&launcher, &id, &working, true);
+    launcher.select_version(&id, "1.20.1").unwrap();
+    let local_mod = source_directory.join("mods/local.jar.disabled");
+    archive(
+        &local_mod,
+        &[("fabric.mod.json", r#"{"id":"local","version":"1"}"#)],
+    );
+    let local_pack = temp.path().join("Local.zip");
+    archive(
+        &local_pack,
+        &[
+            (
+                "pack.mcmeta",
+                r#"{"pack":{"pack_format":15,"description":"Local"}}"#,
+            ),
+            ("assets/test/lang/en_us.json", "{}"),
+        ],
+    );
+    launcher
+        .cache_game_resources(
+            vec![LocalImport {
+                path: local_pack,
+                kind: Some(ResourceKind::Resourcepacks),
+            }],
+            vec![],
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let sources = vec![
+        ResourceCopySource {
+            global: false,
+            kind: ResourceKind::Mods,
+            instance: id.clone(),
+            version: "target".into(),
+            file: "local.jar.disabled".into(),
+        },
+        ResourceCopySource {
+            global: true,
+            kind: ResourceKind::Resourcepacks,
+            instance: String::new(),
+            version: String::new(),
+            file: "Local.zip".into(),
+        },
+    ];
     launcher
         .queue_version_resources(
             &id,
@@ -1742,6 +1837,7 @@ async fn selected_resources_survive_cancel_and_restart_and_finish_in_the_version
             &target.minecraft,
             target.loader.clone(),
             picks.clone(),
+            sources.clone(),
         )
         .unwrap();
     assert!(!working.join("mods/cat.jar").exists());
@@ -1773,7 +1869,14 @@ async fn selected_resources_survive_cancel_and_restart_and_finish_in_the_version
             .installed
     );
     launcher
-        .queue_version_resources(&id, "1.20.1", &target.minecraft, target.loader, picks)
+        .queue_version_resources(
+            &id,
+            "1.20.1",
+            &target.minecraft,
+            target.loader,
+            picks,
+            sources,
+        )
         .unwrap();
     launcher
         .install_selected_resources(&id, "1.20.1", &CancellationToken::new(), &sink())
@@ -1781,6 +1884,9 @@ async fn selected_resources_survive_cancel_and_restart_and_finish_in_the_version
         .unwrap();
     assert!(working.join("mods/cat.jar").is_file());
     assert!(working.join("mods/ice.jar").is_file());
+    assert!(working.join("mods/local.jar.disabled").is_file());
+    assert!(working.join("resourcepacks/Local.zip").is_file());
+    assert!(local_mod.is_file(), "copying must preserve the source");
     assert!(!selection::has_selection(
         &launcher.available_game_dir(&id).unwrap(),
         "1.20.1"
@@ -1794,7 +1900,93 @@ async fn selected_resources_survive_cancel_and_restart_and_finish_in_the_version
             .installed
     );
     assert!(launcher.resource_plans(&id, "1.20.1").unwrap().is_empty());
-    assert_eq!(records(&working).unwrap().len(), 2);
+    assert_eq!(records(&working).unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn local_only_preselection_resumes_one_plan_after_staging_and_restart() {
+    let (_temp, launcher, id, working) = fixture(true);
+    let source_directory = copy_target(&launcher, &id, &working, true);
+    let source_file = source_directory.join("shaderpacks/Shaders.zip");
+    archive(&source_file, &[("shaders/main.fsh", "void main() {}")]);
+    let target = launcher.resource_target(&id, "1.20.1").unwrap();
+    launcher
+        .mutate(|db| {
+            let version = &mut db.instances[0].versions[0];
+            version.minecraft_version = Some(target.minecraft.clone());
+            version.loader = target.loader.clone();
+            Ok(())
+        })
+        .unwrap();
+    let source = ResourceCopySource {
+        global: false,
+        kind: ResourceKind::Shaderpacks,
+        instance: id.clone(),
+        version: "target".into(),
+        file: "Shaders.zip".into(),
+    };
+    // Invalid identities must never create a pending selection or escape the source list.
+    let invalid = ResourceCopySource {
+        file: "../Shaders.zip".into(),
+        ..source.clone()
+    };
+    assert!(
+        launcher
+            .queue_version_resources(
+                &id,
+                "1.20.1",
+                &target.minecraft,
+                target.loader.clone(),
+                vec![],
+                vec![invalid]
+            )
+            .is_err()
+    );
+    assert!(!selection::has_selection(
+        &launcher.available_game_dir(&id).unwrap(),
+        "1.20.1"
+    ));
+    launcher
+        .queue_version_resources(
+            &id,
+            "1.20.1",
+            &target.minecraft,
+            target.loader,
+            vec![],
+            vec![source],
+        )
+        .unwrap();
+    assert!(!working.join("shaderpacks/Shaders.zip").exists());
+    let cancel = CancellationToken::new();
+    let stop = cancel.clone();
+    let stop_before_commit: EventSink = Arc::new(move |event| {
+        if event.kind == "workflow" && event.step.as_deref() == Some("resource_commit") {
+            stop.cancel();
+        }
+    });
+    assert!(
+        launcher
+            .install_selected_resources(&id, "1.20.1", &cancel, &stop_before_commit)
+            .await
+            .is_err()
+    );
+    assert_eq!(launcher.resource_plans(&id, "1.20.1").unwrap().len(), 1);
+    assert!(source_file.is_file());
+    // Once staged, recovery must not require the original resource to remain present.
+    fs::remove_file(source_file).unwrap();
+    let root = launcher.root().to_owned();
+    drop(launcher);
+    let launcher = Launcher::open(Some(root)).unwrap();
+    launcher
+        .install_selected_resources(&id, "1.20.1", &CancellationToken::new(), &sink())
+        .await
+        .unwrap();
+    assert!(working.join("shaderpacks/Shaders.zip").is_file());
+    assert!(launcher.resource_plans(&id, "1.20.1").unwrap().is_empty());
+    assert!(!selection::has_selection(
+        &launcher.available_game_dir(&id).unwrap(),
+        "1.20.1"
+    ));
 }
 
 #[tokio::test]
@@ -1853,6 +2045,7 @@ async fn datapack_drop_targets_one_world_and_preview_never_writes() {
         vec!["Pack.zip"]
     );
     let source = ResourceCopySource {
+        global: false,
         kind: ResourceKind::Datapacks,
         instance: id.clone(),
         version: "1.20.1".into(),
@@ -1863,6 +2056,7 @@ async fn datapack_drop_targets_one_world_and_preview_never_writes() {
         .version_content(&id, "1.20.1", ContentKind::Datapacks)
         .unwrap();
     let source = ResourceCopySource {
+        global: false,
         file: listing.files[0].file_name.clone(),
         ..source
     };

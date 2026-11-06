@@ -50,8 +50,15 @@ export function instanceGridDropTarget(
   draggedId: string,
   clientX: number,
   clientY: number,
+  orientation: "horizontal" | "vertical" = "horizontal",
 ): string | null {
   if (!positions.length) return null;
+  if (orientation === "vertical")
+    return (
+      positions.find(
+        (item) => item.id !== draggedId && clientY < item.top + item.height / 2,
+      )?.id ?? null
+    );
   const row = positions.reduce((nearest, item) =>
     Math.abs(clientY - item.top - item.height / 2) <
     Math.abs(clientY - nearest.top - nearest.height / 2)

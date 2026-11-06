@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import WindowControls from "./WindowControls.vue";
 import {
   computed,
   onBeforeUnmount,
@@ -6,6 +7,7 @@ import {
   ref,
   shallowRef,
   watch,
+  useId,
 } from "vue";
 import {
   ArrowLeft,
@@ -13,7 +15,6 @@ import {
   Check,
   Download,
   FileCode2,
-  FolderOpen,
   Image,
   LoaderCircle,
   Map,
@@ -33,6 +34,8 @@ import type { Task } from "../types";
 import type {
   DetectedResource,
   ResourceKind,
+  ResourceCatalogScope,
+  ResourceLibraryDestination,
   ResourcePlan,
   ResourcePlatform,
   ResourceProject,
@@ -49,18 +52,27 @@ import { listRevealStyle } from "../listMotion";
 
 const props = defineProps<{
   embedded?: boolean;
-  session: ResourceSession;
+  session?: ResourceSession;
+  library?: ResourceLibraryDestination;
+  download?: (
+    scope: ResourceCatalogScope,
+    project: string,
+    version: string,
+  ) => Promise<boolean>;
+  importResources?: (
+    inputs: { path: string; kind: ResourceKind }[],
+  ) => Promise<boolean>;
   busy: boolean;
   task?: Task;
   controlPending?: boolean;
   retrying?: string;
   retryEnabled?: boolean;
   rpc: <T>(op: string, data?: Record<string, unknown>) => Promise<T>;
-  prepare: (
+  prepare?: (
     op: string,
     data: Record<string, unknown>,
   ) => Promise<ResourcePlan | undefined>;
-  install: (plan: ResourcePlan) => Promise<boolean>;
+  install?: (plan: ResourcePlan) => Promise<boolean>;
 }>();
 const emit = defineEmits<{
   close: [];
@@ -73,33 +85,39 @@ const emit = defineEmits<{
   continue: [];
   installed: [plan: ResourcePlan];
 }>();
-const categories = [
+const browserId = `resource-browser-${useId()}`;
+const allCategories = [
   { value: "mods", label: "Mods", icon: Package, color: "#69dcb5" },
   { value: "resourcepacks", label: "资源包", icon: Image, color: "#b49aef" },
   { value: "datapacks", label: "数据包", icon: FileCode2, color: "#e7bc76" },
   { value: "shaderpacks", label: "光影", icon: Sparkles, color: "#e6c68a" },
   { value: "saves", label: "存档", icon: Map, color: "#7dbfee" },
 ] as const;
-const kind = ref<ResourceKind>(props.session.kind);
-const platform = ref<ResourcePlatform>(props.session.platform || "modrinth");
+const categories = computed(() =>
+  allCategories.filter((c) => !props.library || c.value !== "saves"),
+);
+const kind = ref<ResourceKind>(
+  props.library?.kind || props.session?.kind || "mods",
+);
+const platform = ref<ResourcePlatform>(props.session?.platform || "modrinth");
 const query = ref("");
 const target = shallowRef<ResourceTarget>();
 const project = shallowRef<ResourceProject>();
 const versions = shallowRef<ResourceVersion[]>([]);
 const chosen = ref("");
-const world = ref(props.session.world || "");
+const world = ref(props.session?.world || "");
 const loadingVersions = ref(false);
 const preparing = ref(false);
 const installing = ref(false);
 const complete = ref(false);
 const plan = shallowRef<ResourcePlan>();
 const pending = shallowRef<ResourcePlan[]>([]);
-const files = ref<DetectedResource[]>(props.session.files || []);
+const files = ref<DetectedResource[]>(props.session?.files || []);
 const selectedKinds = ref<Record<string, ResourceKind>>({});
-const local = ref(!!props.session.files?.length);
+const local = ref(!!props.session?.files?.length);
 const fileGroups = computed(() =>
   [
-    ...categories.map((category) => ({
+    ...categories.value.map((category) => ({
       label: category.label,
       files: files.value.filter(
         (file) => selectedKinds.value[file.path] === category.value,
@@ -112,22 +130,31 @@ const fileGroups = computed(() =>
   ].filter((group) => group.files.length),
 );
 const icon = (category: ResourceKind) =>
-  categories.find((c) => c.value === category)?.icon || Package;
+  categories.value.find((c) => c.value === category)?.icon || Package;
 const versionTitle = computed(() =>
   versionName(
-    props.session.instance.versions.find((v) => v.id === props.session.version),
+    props.session?.instance.versions.find(
+      (v) => v.id === props.session?.version,
+    ),
   ),
 );
 const scope = computed(() => ({
-  id: props.session.instance.id,
-  version: props.session.version,
+  id: props.session?.instance.id,
+  version: props.session?.version,
   platform: platform.value,
   kind: kind.value,
 }));
+const catalogScope = computed<ResourceCatalogScope>(() => ({
+  minecraft: props.library?.minecraft || "",
+  loader: props.library?.loader || null,
+  platform: platform.value,
+  kind: kind.value,
+}));
+const compatibility = computed(() => props.library || target.value);
 const feed = useCatalogFeed<ResourceProject>(
   (offset) =>
-    props.rpc("search_resources", {
-      scope: scope.value,
+    props.rpc(props.library ? "search_resource_catalog" : "search_resources", {
+      scope: props.library ? catalogScope.value : scope.value,
       query: query.value,
       offset,
     }),
@@ -141,10 +168,12 @@ const {
   revision: resultGeneration,
   scrollTop,
 } = feed;
-const worldRequired = computed(() =>
-  local.value
-    ? files.value.some((f) => selectedKinds.value[f.path] === "datapacks")
-    : kind.value === "datapacks",
+const worldRequired = computed(
+  () =>
+    !props.library &&
+    (local.value
+      ? files.value.some((f) => selectedKinds.value[f.path] === "datapacks")
+      : kind.value === "datapacks"),
 );
 const blocked = computed(
   () => props.busy || preparing.value || installing.value,
@@ -157,12 +186,20 @@ const showTask = computed(
 );
 const canPreview = computed(
   () =>
-    target.value &&
+    !!compatibility.value &&
     !blocked.value &&
+    !(props.library && complete.value) &&
     (!worldRequired.value || world.value) &&
     (local.value
       ? files.value.length > 0 &&
-        files.value.every((f) => selectedKinds.value[f.path])
+        files.value.every(
+          (f) =>
+            !f.issue &&
+            f.format === "resource" &&
+            categories.value.some(
+              (c) => c.value === selectedKinds.value[f.path],
+            ),
+        )
       : !!chosen.value),
 );
 const bytes = (size: number) =>
@@ -177,8 +214,8 @@ async function search(append = false) {
   if (
     local.value ||
     kind.value === "saves" ||
-    !target.value ||
-    (kind.value === "mods" && !target.value.loader)
+    !compatibility.value?.minecraft ||
+    (kind.value === "mods" && !compatibility.value.loader)
   ) {
     feed.invalidate();
     return;
@@ -193,10 +230,13 @@ async function selectProject(item: ResourceProject) {
   chosen.value = "";
   loadingVersions.value = true;
   try {
-    const result = await props.rpc<ResourceVersion[]>("resource_versions", {
-      scope: scope.value,
-      project: item.id,
-    });
+    const result = await props.rpc<ResourceVersion[]>(
+      props.library ? "catalog_resource_versions" : "resource_versions",
+      {
+        scope: props.library ? catalogScope.value : scope.value,
+        project: item.id,
+      },
+    );
     if (request !== versionRequest || disposed) return;
     versions.value = result;
     chosen.value =
@@ -222,26 +262,33 @@ function back() {
     local.value = false;
     files.value = [];
   }
+  complete.value = false;
 }
 function setFiles(value: DetectedResource[]) {
   files.value = value;
   selectedKinds.value = Object.fromEntries(
-    value.filter((f) => f.kinds.length === 1).map((f) => [f.path, f.kinds[0]]),
+    value
+      .filter(
+        (f) =>
+          f.kinds.length === 1 &&
+          categories.value.some((c) => c.value === f.kinds[0]),
+      )
+      .map((f) => [f.path, f.kinds[0]]),
   );
   local.value = true;
   project.value = undefined;
   plan.value = undefined;
   complete.value = false;
 }
-async function pick(directory = false) {
+async function pick() {
+  if (blocked.value) return;
   try {
     const paths = await open({
       multiple: true,
-      directory,
-      title: t(directory ? "导入资源目录" : "导入资源文件"),
-      ...(directory
-        ? {}
-        : { filters: [{ name: "Minecraft", extensions: ["jar", "zip"] }] }),
+      title: t("导入资源文件"),
+      filters: [
+        { name: "Minecraft", extensions: ["jar", "zip", "disabled", "off"] },
+      ],
     });
     if (!paths) return;
     const result = await props.rpc<DetectedResource[]>("inspect_resources", {
@@ -256,7 +303,22 @@ async function preview() {
   if (!canPreview.value) return;
   preparing.value = true;
   try {
-    const result = await props.prepare(
+    if (props.library) {
+      complete.value = local.value
+        ? !!(await props.importResources?.(
+            files.value.map((f) => ({
+              path: f.path,
+              kind: selectedKinds.value[f.path],
+            })),
+          ))
+        : !!(await props.download?.(
+            catalogScope.value,
+            project.value!.id,
+            chosen.value,
+          ));
+      return;
+    }
+    const result = await props.prepare?.(
       local.value ? "prepare_local_resources" : "prepare_resource",
       local.value
         ? {
@@ -287,7 +349,7 @@ async function install() {
   if (!plan.value || blocked.value || plan.value.conflicts.length) return;
   installing.value = true;
   try {
-    complete.value = await props.install(plan.value);
+    complete.value = !!(await props.install?.(plan.value));
     if (complete.value) {
       pending.value = pending.value.filter((p) => p.id !== plan.value?.id);
       emit("installed", plan.value!);
@@ -312,11 +374,26 @@ watch(
     emit("installed", plan.value!);
   },
 );
-watch([kind, platform, local], () => {
-  versionRequest++;
-  project.value = undefined;
-  chosen.value = "";
-  void search();
+watch(
+  [
+    kind,
+    platform,
+    local,
+    () => props.library?.minecraft,
+    () => props.library?.loader?.kind,
+  ],
+  () => {
+    versionRequest++;
+    project.value = undefined;
+    chosen.value = "";
+    loadingVersions.value = false;
+    complete.value = false;
+    feed.invalidate();
+    void search();
+  },
+);
+watch(chosen, () => {
+  complete.value = false;
 });
 watch(query, () => {
   clearTimeout(timer);
@@ -324,19 +401,24 @@ watch(query, () => {
   timer = setTimeout(() => void search(), 250);
 });
 watch(
-  () => props.session.world,
+  () => props.session?.world,
   (value) => {
     if (value && !blocked.value) world.value = value;
   },
 );
 watch(
-  () => props.session.files,
+  () => props.session?.files,
   (value) => {
     if (value && !blocked.value) setFiles(value);
   },
 );
 onMounted(async () => {
   if (files.value.length) setFiles(files.value);
+  if (props.library) {
+    void search();
+    return;
+  }
+  if (!props.session) return;
   try {
     const result = await props.rpc<ResourceTarget>("resource_target", {
       id: scope.value.id,
@@ -369,8 +451,9 @@ onBeforeUnmount(() => {
     class="resource-browser"
     :data-drop-kind="kind"
     :class="embedded ? 'resource-embedded' : 'modal glass-surface'"
-    :data-resource-instance="session.instance.id"
-    :data-resource-version="session.version"
+    :data-resource-instance="session?.instance.id"
+    :data-resource-library="library ? '' : undefined"
+    :data-resource-version="session?.version"
   >
     <ContentSwitch
       class="resource-flow"
@@ -423,7 +506,7 @@ onBeforeUnmount(() => {
       </template>
       <template v-else>
         <header
-          v-if="!embedded || plan || project || local"
+          v-if="!embedded || plan || project || local || $slots.destination"
           class="modal-header resource-header list-reveal-item"
           :style="listRevealStyle(0)"
         >
@@ -440,7 +523,7 @@ onBeforeUnmount(() => {
             <h2 class="dialog-heading" tabindex="-1">
               {{ t(plan ? "安装预览" : "添加资源") }}
             </h2>
-            <small v-if="!embedded"
+            <small v-if="!embedded && session"
               >{{ session.instance.name }} · {{ versionTitle
               }}<span v-if="target">
                 · {{ target.minecraft
@@ -448,6 +531,8 @@ onBeforeUnmount(() => {
               ></small
             >
           </div>
+          <slot name="destination" />
+          <WindowControls v-if="!embedded" />
           <button
             v-if="!embedded"
             class="icon-button resource-close"
@@ -458,13 +543,6 @@ onBeforeUnmount(() => {
             <X :size="18" />
           </button>
         </header>
-        <div
-          v-if="target?.shared"
-          class="resource-shared list-reveal-item"
-          :style="listRevealStyle(1)"
-        >
-          {{ t("此版本与同目录的其他版本共享资源") }}
-        </div>
         <template v-if="plan">
           <div class="resource-plan-list" data-list-viewport>
             <div
@@ -548,7 +626,7 @@ onBeforeUnmount(() => {
             :style="listRevealStyle(1)"
           >
             <GlassSelect
-              id="resource-provider"
+              :id="`resource-provider-${browserId}`"
               v-model="platform"
               :disabled="blocked"
               compact
@@ -574,7 +652,7 @@ onBeforeUnmount(() => {
             <span>{{ t("目标存档") }}</span
             ><GlassSelect
               v-if="target?.worlds.length"
-              id="resource-world"
+              :id="`resource-world-${browserId}`"
               v-model="world"
               literal-labels
               compact
@@ -633,7 +711,7 @@ onBeforeUnmount(() => {
                     </div>
                     <GlassSelect
                       v-if="file.kinds.length > 1"
-                      :id="`kind-${files.indexOf(file)}`"
+                      :id="`${browserId}-kind-${files.indexOf(file)}`"
                       :model-value="selectedKinds[file.path] || ''"
                       compact
                       floating
@@ -680,7 +758,7 @@ onBeforeUnmount(() => {
                   <label>{{ t("兼容版本") }}</label>
                   <GlassSelect
                     v-if="versions.length"
-                    id="resource-version"
+                    :id="`resource-version-${browserId}`"
                     v-model="chosen"
                     literal-labels
                     floating
@@ -715,9 +793,6 @@ onBeforeUnmount(() => {
                 >
                   <Map :size="40" />
                   <p>{{ t("将地图目录或 ZIP 拖入此窗口") }}</p>
-                  <button class="text-button" @click="pick()">
-                    <Upload :size="16" />{{ t("导入资源文件") }}
-                  </button>
                 </div></template
               >
               <template v-else>
@@ -748,7 +823,7 @@ onBeforeUnmount(() => {
                 >
                   {{
                     t(
-                      kind === "mods" && target && !target.loader
+                      kind === "mods" && compatibility && !compatibility.loader
                         ? "此版本尚未安装 Mod 加载器"
                         : "未找到兼容资源",
                     )
@@ -787,22 +862,16 @@ onBeforeUnmount(() => {
             :style="listRevealStyle(3)"
             data-list-footer
           >
-            <div class="resource-import">
-              <button class="text-button" :disabled="blocked" @click="pick()">
-                <Upload :size="15" />{{ t("导入文件") }}</button
-              ><button
-                class="icon-button"
-                :disabled="blocked"
-                :aria-label="t('导入资源目录')"
-                :title="t('导入资源目录')"
-                @click="pick(true)"
-              >
-                <FolderOpen :size="17" />
-              </button>
-            </div>
+            <button
+              class="text-button resource-import"
+              :disabled="blocked"
+              @click="pick"
+            >
+              <Upload :size="15" />{{ t(local ? "选择文件" : "导入") }}
+            </button>
             <template v-if="local || project"
               ><button
-                v-if="preparing"
+                v-if="preparing && !library"
                 class="text-button"
                 @click="emit('cancel')"
               >
@@ -812,12 +881,23 @@ onBeforeUnmount(() => {
                 :disabled="!canPreview"
                 @click="preview"
               >
-                <LoaderCircle v-if="preparing" class="spin" :size="15" />{{
-                  t("预览安装")
+                <LoaderCircle v-if="preparing" class="spin" :size="15" />
+                <Check v-else-if="library && complete" :size="15" />
+                {{
+                  t(
+                    library
+                      ? complete
+                        ? "已缓存"
+                        : local
+                          ? "导入"
+                          : "下载"
+                      : "预览安装",
+                  )
                 }}
               </button></template
             >
           </footer>
+          <slot name="progress" />
         </template>
       </template>
     </ContentSwitch>
@@ -871,10 +951,6 @@ onBeforeUnmount(() => {
 .resource-close {
   margin-left: auto;
 }
-.resource-shared {
-  font-size: 11px;
-  color: var(--muted);
-}
 .resource-categories {
   display: flex;
   justify-content: space-evenly;
@@ -926,6 +1002,7 @@ onBeforeUnmount(() => {
 .resource-search input {
   width: 100%;
   border: 0;
+  box-shadow: none;
   border-bottom: 1px solid var(--line);
   border-radius: 0;
   background: transparent;
@@ -1098,7 +1175,7 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 10px;
 }
-.resource-import button {
+.resource-import {
   font-size: 12px;
 }
 .resource-conflict {

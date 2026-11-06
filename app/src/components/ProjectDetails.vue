@@ -39,17 +39,35 @@ const loading = ref(false),
 let generation = 0;
 async function load(refresh = false) {
   const request = ++generation;
-  loading.value = true;
+  loading.value = !detail.value;
   failed.value = false;
   try {
     const result = await projectMedia(props.rpc).details(
       props.platform,
       props.project.id,
       refresh,
+      props.project,
     );
     if (request === generation) {
       detail.value = result;
       emit("loaded", result);
+      loading.value = false;
+    }
+    if (!refresh && result.refresh_required && request === generation) {
+      try {
+        const updated = await projectMedia(props.rpc).details(
+          props.platform,
+          props.project.id,
+          true,
+          props.project,
+        );
+        if (request === generation) {
+          detail.value = updated;
+          emit("loaded", updated);
+        }
+      } catch {
+        /* Revalidation must never remove a readable cached description. */
+      }
     }
   } catch {
     if (request === generation) failed.value = true;
@@ -58,9 +76,15 @@ async function load(refresh = false) {
   }
 }
 watch(
-  () => [props.platform, props.project.id],
-  () => {
-    detail.value = undefined;
+  () => [
+    props.platform,
+    props.project.id,
+    props.project.updated,
+    props.project.latest_version,
+  ],
+  (current, previous) => {
+    if (!previous || current[0] !== previous[0] || current[1] !== previous[1])
+      detail.value = undefined;
     void load();
   },
   { immediate: true },

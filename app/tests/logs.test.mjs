@@ -122,7 +122,7 @@ test("double-clicking a running instance opens scoped logs; idle and downloading
     await ui.openInstance(instance);
     assert.equal(ui.showLogs.value, true);
     assert.equal(ui.logScope.value, instance.id);
-    assert.equal(ui.utility.value, null);
+    assert.equal(ui.utility.value, "settings");
     assert.equal(ui.modal.value, null);
     assert.equal(
       fixture.calls.some((call) => call.op === "instance_directory"),

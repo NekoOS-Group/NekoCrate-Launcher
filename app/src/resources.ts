@@ -3,6 +3,17 @@ import { t } from "./i18n.ts";
 export type ResourceKind =
   "mods" | "resourcepacks" | "datapacks" | "shaderpacks" | "saves";
 export type ResourcePlatform = "modrinth" | "curseforge";
+export interface ResourceCatalogScope {
+  minecraft: string;
+  loader: { kind: string; version: string } | null;
+  kind: ResourceKind;
+  platform: ResourcePlatform;
+}
+export interface ResourceLibraryDestination {
+  minecraft: string;
+  loader: { kind: string; version: string } | null;
+  kind: ResourceKind;
+}
 export interface ResourceTarget {
   instance: string;
   version: string;
@@ -13,6 +24,7 @@ export interface ResourceTarget {
   shared: boolean;
 }
 export interface ResourceProject {
+  updated?: string | null;
   latest_version?: string | null;
   icon_url?: string | null;
   id: string;
@@ -121,6 +133,72 @@ export const resourceKindLabel = (kind: string): string =>
     )[kind] || kind,
   );
 
+const inactiveDropKinds = [
+  "metadata",
+  "libraries",
+  "cache",
+  "blocked",
+  "resources",
+];
+const nonResourceDropKinds = [...inactiveDropKinds, "skins", "java", "config"];
+function resourceFileMatches(file: DetectedResource, kind?: string): boolean {
+  // A failed read (e.g. a damaged archive or a denied path) is an actionable
+  // error, not evidence that the file belongs to a different resource type.
+  if (file.format === "unknown")
+    return !!file.issue && (!kind || !nonResourceDropKinds.includes(kind));
+  if (!kind) return true;
+  if (nonResourceDropKinds.includes(kind)) return false;
+  if (kind === "selection")
+    return file.format === "resource" && !file.kinds.includes("datapacks");
+  if (kind === "version")
+    return ["resource", "version_directory"].includes(file.format);
+  if (kind === "instance")
+    return ["resource", "modpack", "version_directory"].includes(file.format);
+  if (kind === "directory")
+    return [
+      "directory",
+      "versions_directory",
+      "version_directory",
+      "instance_archive",
+    ].includes(file.format);
+  if (kind === "modpack") return file.format === kind;
+  return (
+    file.format === "resource" && file.kinds.includes(kind as ResourceKind)
+  );
+}
+/** Type mismatches are not drop targets; operational/compatibility errors can
+ * still be shown on an otherwise matching target. A ZIP's detected contents,
+ * never its extension or the hovered region, determine its resource type. */
+export function resourceDropTypeMatches(
+  files: readonly DetectedResource[],
+  kind?: string,
+): boolean {
+  return (
+    files.length > 0 && files.every((file) => resourceFileMatches(file, kind))
+  );
+}
+
+// These dedicated targets don't use game-resource archive detection.
+export function dedicatedDropTypeMatches(
+  paths: readonly string[],
+  kind?: string,
+): boolean {
+  if (
+    !paths.length ||
+    kind === "selection" ||
+    inactiveDropKinds.includes(kind || "")
+  )
+    return false;
+  if (kind === "skins") return paths.every((path) => /\.png$/i.test(path));
+  if (kind === "config")
+    return paths.every((path) =>
+      /\.(json5?|toml|cfg|conf|properties|yaml|yml|ini)$/i.test(path),
+    );
+  if (kind === "java")
+    return paths.every((path) => /(?:^|[/\\])javaw?(?:\.exe)?$/i.test(path));
+  return true;
+}
+
 /** An explicit target is a constraint, never a hint to reinterpret a ZIP. */
 export function resourceDropIssue(
   files: readonly DetectedResource[],
@@ -130,25 +208,15 @@ export function resourceDropIssue(
   const unknown = files.find((file) => file.format === "unknown");
   if (unknown) return unknown.issue || t("无法识别文件内容");
   if (!kind) return;
-  if (["metadata", "libraries", "cache", "blocked", "resources"].includes(kind))
+  if (kind === "selection") {
+    if (files.some((file) => file.kinds.includes("datapacks")))
+      return t("数据包需要目标存档，请在版本安装后拖入存档");
+    if (files.every((file) => file.format === "resource")) return;
+    return t("此处只接收 Mods、资源包、光影和存档");
+  }
+  if (nonResourceDropKinds.includes(kind))
     return t("请拖到目标版本或对应的资源区域");
-  const mismatch = files.find((file) =>
-    kind === "version"
-      ? !["resource", "version_directory"].includes(file.format)
-      : kind === "instance"
-        ? !["resource", "modpack", "version_directory"].includes(file.format)
-        : kind === "directory"
-          ? ![
-              "directory",
-              "versions_directory",
-              "version_directory",
-              "instance_archive",
-            ].includes(file.format)
-          : kind === "modpack"
-            ? file.format !== kind
-            : file.format !== "resource" ||
-              !file.kinds.includes(kind as ResourceKind),
-  );
+  const mismatch = files.find((file) => !resourceFileMatches(file, kind));
   if (mismatch)
     return t("{name} 是{actual}，此处只接收{expected}", {
       name: mismatch.name,

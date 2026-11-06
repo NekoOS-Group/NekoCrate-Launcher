@@ -16,7 +16,7 @@ export function showDropHint(
   invalid = false,
 ) {
   const box = element?.getBoundingClientRect();
-  dropHint.value = {
+  const next = {
     left: box?.left ?? 14,
     top: box?.top ?? 14,
     width: box?.width ?? window.innerWidth - 28,
@@ -24,6 +24,20 @@ export function showDropHint(
     message,
     invalid,
   };
+  const current = dropHint.value;
+  // Hit testing follows layout changes while the pointer is stationary. Avoid
+  // repainting an unchanged hint on every animation frame during a drag.
+  if (
+    current &&
+    current.left === next.left &&
+    current.top === next.top &&
+    current.width === next.width &&
+    current.height === next.height &&
+    current.message === next.message &&
+    current.invalid === next.invalid
+  )
+    return;
+  dropHint.value = next;
 }
 export function clearDropHint() {
   dropHint.value = undefined;

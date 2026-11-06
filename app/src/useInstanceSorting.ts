@@ -128,7 +128,7 @@ export function useInstanceSorting(
       clearPreview();
       return;
     }
-    if (list === overflow.value) {
+    if (list === overflow.value || list.dataset?.orientation === "vertical") {
       if (tile.offsetTop < list.scrollTop + 4)
         list.scrollTop = tile.offsetTop - 4;
       else if (
@@ -235,7 +235,8 @@ export function useInstanceSorting(
       opacity: "1",
     };
     if (!dropAllowed.value) return;
-    if (zone === "overflow") {
+    const vertical = list.dataset?.orientation === "vertical";
+    if (zone === "overflow" || vertical) {
       const delta =
         pointer.y < box.top + 28
           ? pointer.y - box.top - 28
@@ -260,6 +261,7 @@ export function useInstanceSorting(
       draggedId.value,
       pointer.x,
       pointer.y,
+      vertical ? "vertical" : "horizontal",
     );
     if (zone === "main" && target === null)
       target =
@@ -409,12 +411,16 @@ export function useInstanceSorting(
     event.stopImmediatePropagation();
   }
   function keyboard(event: KeyboardEvent, id: string) {
-    if (!event.altKey || !["ArrowLeft", "ArrowRight"].includes(event.key))
+    if (
+      !event.altKey ||
+      !["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)
+    )
       return;
     event.preventDefault();
     if (blocked.value || draggedId.value) return;
     const index = instances.value.findIndex((item) => item.id === id);
-    const nextIndex = index + (event.key === "ArrowLeft" ? -1 : 1);
+    const backwards = event.key === "ArrowLeft" || event.key === "ArrowUp";
+    const nextIndex = index + (backwards ? -1 : 1);
     if (index < 0 || nextIndex < 0 || nextIndex >= instances.value.length)
       return;
     if (
@@ -423,7 +429,7 @@ export function useInstanceSorting(
       expanded.value = true;
     move(
       id,
-      event.key === "ArrowLeft"
+      backwards
         ? instances.value[index - 1].id
         : (instances.value[index + 2]?.id ?? null),
     );

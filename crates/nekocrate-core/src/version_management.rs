@@ -412,7 +412,7 @@ fn content_directory(working: &Path, kind: ContentKind) -> PathBuf {
         ContentKind::Datapacks | ContentKind::Unresolved => working.to_owned(),
     }
 }
-fn read_content(
+pub(crate) fn read_content(
     working: &Path,
     resolved: Option<&version::ResolvedVersion>,
     kind: ContentKind,
@@ -460,7 +460,7 @@ fn sort_content(files: &mut [LocalContentFile]) {
         (item.name.to_lowercase(), item.file_name.to_lowercase())
     });
 }
-fn apply_identity(file: &mut LocalContentFile, identity: ModIdentity) {
+pub(crate) fn apply_identity(file: &mut LocalContentFile, identity: ModIdentity) {
     if let Some(name) = identity.name {
         file.name = name;
     }
@@ -618,6 +618,8 @@ pub(crate) fn mod_metadata(path: &Path) -> Option<ModIdentity> {
                 .ok()
                 .and_then(|s| toml::from_str::<toml::Value>(s).ok())
                 .and_then(|v| serde_json::to_value(v).ok())
+        } else if descriptor == "fabric.mod.json" {
+            crate::fabric_metadata::parse(&bytes).ok()
         } else {
             serde_json::from_slice(&bytes).ok()
         };

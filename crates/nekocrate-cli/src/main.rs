@@ -155,8 +155,8 @@ async fn main() -> Result<()> {
         Commands::Login => {
             let challenge = launcher.begin_login().await?;
             println!(
-                "请打开 {} 并输入验证码 {}",
-                challenge.verification_uri, challenge.user_code
+                "请在此电脑的浏览器中打开以下地址并完成微软登录：\n{}",
+                challenge.verification_uri
             );
             let a = launcher.finish_login(challenge, &cancel).await?;
             println!("已登录：{}（Java 权益已验证）", a.username);

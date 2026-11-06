@@ -10,7 +10,12 @@ name = "nekocrate_desktop"
 crate-type = ["rlib"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2", features = ["codegen"] }
+# Decode this icon's PNG only at build time; runtime reuses DEFLATE.
+png = "0.18"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+syn = { version = "2", features = ["full", "visit-mut"] }
+quote = "1"
 
 [dependencies]
 anyhow.workspace = true
@@ -32,6 +37,9 @@ rfd = { version = "0.16", default-features = false, features = ["gtk3"] }
 # Text only; retain the same X11/Wayland/native clipboard backend.
 arboard = { version = "3.7", default-features = false, features = ["wayland-data-control"] }
 
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
 drag = { version = "2.1.1", default-features = false }
 
@@ -49,3 +57,4 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_
 [dev-dependencies]
 tauri = { version = "2", default-features = false, features = ["test"] }
 tempfile = "3"
+png = "0.18"

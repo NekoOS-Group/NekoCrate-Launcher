@@ -5,6 +5,8 @@ import {
   resourceDropTarget,
   routeResourceDrop,
   resourceDropIssue,
+  resourceDropTypeMatches,
+  dedicatedDropTypeMatches,
 } from "../src/resources.ts";
 import {
   settingsFixture,
@@ -170,9 +172,14 @@ test("ZIP target constraints preserve inspected types and reject mismatches, inc
         matches,
         `${file.name} -> ${kind}`,
       );
+      assert.equal(resourceDropTypeMatches([file], kind), matches);
     }
   }
   assert.ok(resourceDropIssue(files.slice(0, 2), "resourcepacks"));
+  assert.equal(
+    resourceDropTypeMatches(files.slice(0, 2), "resourcepacks"),
+    false,
+  );
   assert.equal(
     resourceDropIssue(
       [
@@ -187,6 +194,49 @@ test("ZIP target constraints preserve inspected types and reject mismatches, inc
     undefined,
   );
   assert.deepEqual(files, before);
+});
+
+test("type filtering keeps multi-type archives intact and hides passive or unrelated targets", () => {
+  const both = {
+    name: "both.zip",
+    format: "resource",
+    kinds: ["datapacks", "resourcepacks"],
+  };
+  assert.equal(resourceDropTypeMatches([both], "datapacks"), true);
+  assert.equal(resourceDropTypeMatches([both], "resourcepacks"), true);
+  for (const kind of [
+    "mods",
+    "shaderpacks",
+    "saves",
+    "modpack",
+    "skins",
+    "java",
+    "config",
+    "metadata",
+    "libraries",
+    "cache",
+    "blocked",
+    "resources",
+  ]) {
+    assert.equal(resourceDropTypeMatches([both], kind), false, kind);
+  }
+  assert.equal(
+    resourceDropTypeMatches([
+      { name: "readme.txt", format: "unknown", kinds: [] },
+    ]),
+    false,
+  );
+  assert.equal(resourceDropTypeMatches([], "mods"), false);
+  assert.equal(dedicatedDropTypeMatches(["/skin.png"], "skins"), true);
+  assert.equal(dedicatedDropTypeMatches(["/mod.jar"], "skins"), false);
+  assert.equal(dedicatedDropTypeMatches(["/config.toml"], "config"), true);
+  assert.equal(dedicatedDropTypeMatches(["/mod.jar"], "config"), false);
+  assert.equal(dedicatedDropTypeMatches(["/jdk/bin/java"], "java"), true);
+  assert.equal(
+    dedicatedDropTypeMatches(["C:\\jdk\\bin\\javaw.exe"], "java"),
+    true,
+  );
+  assert.equal(dedicatedDropTypeMatches(["/mod.jar"], "java"), false);
 });
 
 function dropElement(dataset, parent) {
@@ -211,7 +261,7 @@ function dropElement(dataset, parent) {
   };
 }
 
-test("a ZIP dropped on the wrong resource tab stays there with a reason and never opens another importer", async () => {
+test("a ZIP dropped on the wrong resource tab stays quiet and never opens another importer", async () => {
   const f = await settingsFixture();
   try {
     f.fixture.hovered = dropElement(
@@ -238,7 +288,7 @@ test("a ZIP dropped on the wrong resource tab stays there with a reason and neve
       },
     });
     await flush();
-    assert.equal(dropHint.value.invalid, true);
+    assert.equal(dropHint.value, undefined);
     for (let i = 0; i < 10; i++)
       f.fileDrop({ payload: { type: "over", position: { x: 105, y: 100 } } });
     f.fileDrop({
@@ -263,9 +313,7 @@ test("a ZIP dropped on the wrong resource tab stays there with a reason and neve
     );
     assert.equal(f.context.resourceSession.value, undefined);
     assert.equal(f.context.error.value, "");
-    assert.equal(dropHint.value.left, 30);
-    assert.equal(dropHint.value.invalid, true);
-    assert.match(dropHint.value.message, /world.zip/);
+    assert.equal(dropHint.value, undefined);
   } finally {
     f.dispose();
   }

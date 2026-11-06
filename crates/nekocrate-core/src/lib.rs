@@ -9,10 +9,13 @@ mod download_concurrency;
 mod download_stall;
 mod download_tasks;
 pub mod fabric;
+mod fabric_metadata;
+mod fabric_version;
 pub mod folder_import;
 pub mod game_export;
 pub mod game_import;
 mod game_options;
+pub mod home_dashboard;
 mod installation;
 mod installer_cache;
 mod instance_creation;
@@ -48,6 +51,7 @@ mod verification;
 pub mod version;
 pub mod version_management;
 pub mod version_metadata;
+pub mod widget_font;
 
 use anyhow::{Context, Result, bail};
 use model::*;
@@ -805,7 +809,7 @@ impl Launcher {
                 versions.push(old.clone());
             }
         }
-        versions.sort_by_key(|version| {
+        crate::sorting::sort_by_cached_key(&mut versions, |version| {
             previous
                 .versions
                 .iter()
@@ -1139,20 +1143,16 @@ impl Launcher {
         )
         .await
     }
-    pub async fn begin_login(&self) -> Result<auth::DeviceChallenge> {
-        auth::begin(
-            &download::Downloader::new(self.root(), self.settings())?.client,
-            &self.settings().microsoft_client_id,
-        )
-        .await
+    pub async fn begin_login(&self) -> Result<auth::BrowserChallenge> {
+        auth::BrowserChallenge::begin(&self.settings().microsoft_client_id).await
     }
     pub async fn finish_login(
         &self,
-        challenge: auth::DeviceChallenge,
+        challenge: auth::BrowserChallenge,
         cancel: &CancellationToken,
     ) -> Result<Account> {
         let client = download::Downloader::new(self.root(), self.settings())?.client;
-        let session = auth::finish(&client, challenge, cancel).await?;
+        let session = challenge.finish(&client, cancel).await?;
         // Waiting for a browser authorization does not block existing accounts.
         let _guard = self.0.account_operation.lock().await;
         download::check_cancel(cancel)?;
@@ -1324,7 +1324,19 @@ impl Launcher {
         cancel: &CancellationToken,
         sink: EventSink,
     ) -> Result<u32> {
-        let result = Box::pin(self.launch_inner(id, cancel, sink.clone())).await;
+        self.launch_to_server(id, None, cancel, sink).await
+    }
+    pub async fn launch_to_server(
+        &self,
+        id: &str,
+        server: Option<&str>,
+        cancel: &CancellationToken,
+        sink: EventSink,
+    ) -> Result<u32> {
+        if let Some(address) = server {
+            home_dashboard::ServerAddress::parse(address)?;
+        }
+        let result = Box::pin(self.launch_inner(id, server, cancel, sink.clone())).await;
         if let Err(error) = &result
             && !cancel.is_cancelled()
         {
@@ -1343,6 +1355,7 @@ impl Launcher {
     async fn launch_inner(
         &self,
         id: &str,
+        server: Option<&str>,
         cancel: &CancellationToken,
         sink: EventSink,
     ) -> Result<u32> {
@@ -1358,9 +1371,9 @@ impl Launcher {
         {
             let _ = diagnostics::record_error(self.root(), "clear_crash_diagnosis", &error.into());
         }
-        let instance = self.instance(id)?;
+        let mut instance = self.instance(id)?;
         let game = self.available_game_dir(id)?;
-        let selected = instance.selected().context("请先选择游戏版本")?;
+        let selected = instance.selected().context("请先选择游戏版本")?.clone();
         anyhow::ensure!(
             !resources::has_selection(&game, &selected.id),
             "预选资源尚未安装完成，请继续下载"
@@ -1397,6 +1410,9 @@ impl Launcher {
         )
         .await?;
         let v = resolved.version;
+        if let Some(server) = server {
+            home_dashboard::apply_server_launch(&mut instance, &v, server)?;
+        }
         let root = self.root().to_owned();
         let native_game = game.clone();
         let native_version = v.clone();
@@ -1566,6 +1582,7 @@ impl Launcher {
                         &secrets,
                     );
                     report.repairable = root.can_repair_version(&log_id, &report.version);
+                    root.audit_crash_components(&log_id, &mut report);
                     if let Err(error) =
                         storage::write_json(&log_dir.join("last-crash.json"), &report)
                     {

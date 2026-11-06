@@ -14,7 +14,12 @@ pub use drop_preview::ResourceDropPreview;
 mod links;
 pub use links::ProjectLink;
 mod imports;
+mod library;
+mod removal;
+mod repair;
 pub use imports::{DetectedResource, LocalImport, ResourceCopySource};
+pub use removal::ResourceRemoval;
+pub(crate) use repair::metadata as fabric_mod_metadata;
 mod install;
 mod modpacks;
 mod presentation;
@@ -67,6 +72,8 @@ pub struct ResourceTarget {
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Project {
+    #[serde(default)]
+    pub updated: Option<String>,
     #[serde(default)]
     pub latest_version: Option<String>,
     #[serde(default)]
@@ -157,6 +164,9 @@ pub struct ResourcePlan {
     pub complete: bool,
     #[serde(default)]
     pub started: bool,
+    /// Missing Fabric IDs verified against the installed Mods before publication.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repair_dependencies: Vec<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ResourceRecord {
@@ -238,7 +248,7 @@ pub(crate) fn pending_plans(working: &Path, id: &str, version: &str) -> Result<V
             }
         }
     }
-    plans.sort_by_key(|p| std::cmp::Reverse(p.created_at));
+    crate::sorting::sort_by(&mut plans, |a, b| b.created_at.cmp(&a.created_at));
     Ok(plans)
 }
 
@@ -374,6 +384,7 @@ fn new_plan(target: ResourceTarget) -> ResourcePlan {
         created_at: storage::now(),
         complete: false,
         started: false,
+        repair_dependencies: Vec::new(),
     }
 }
 

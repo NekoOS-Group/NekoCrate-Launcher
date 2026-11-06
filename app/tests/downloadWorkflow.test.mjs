@@ -157,7 +157,7 @@ test("暂停和继续保留同一任务与进度，完成后仍执行原来的�
     assert.equal(ui.busy.value, true);
     assert.equal(ui.visibleError.value, "");
     await ui.openInstance(fixture.state.database.instances[0]);
-    assert.equal(ui.utility.value, "downloads");
+    assert.equal(ui.showDownloads.value, true);
     await ui.setDownloadPaused(true);
     assert.equal(fixture.calls.filter((call) => call.op === "pause").length, 1);
     await ui.setDownloadPaused(false);
@@ -321,7 +321,7 @@ test("IPC 文件事件只更新所属任务，失败统一提供给角落通知�
       new Error("未找到该官方游戏版本；原型暂不支持自定义加载器版本"),
     );
     await installing;
-    assert.equal(ui.utility.value, "downloads");
+    assert.equal(ui.showDownloads.value, true);
     assert.equal(ui.displayedTask.value.status, "error");
     assert.match(ui.visibleError.value, /未找到该官方游戏版本/);
     ui.dismissError();
@@ -470,6 +470,9 @@ test("single-file retry stays on the requested task and does not replace whole-t
 test("crash diagnosis stays in the scoped log without a separate report panel", async () => {
   const f = await settingsFixture();
   try {
+    const reportLoads = f.fixture.calls.filter(
+      (call) => call.op === "crash_report",
+    ).length;
     f.fixture.event({
       payload: {
         ...event("diagnosis"),
@@ -485,8 +488,8 @@ test("crash diagnosis stays in the scoped log without a separate report panel", 
       "[ERROR] [Diagnosis] Java 模块冲突",
     );
     assert.equal(
-      f.fixture.calls.some((call) => call.op === "crash_report"),
-      false,
+      f.fixture.calls.filter((call) => call.op === "crash_report").length,
+      reportLoads,
     );
   } finally {
     f.dispose();
@@ -560,7 +563,7 @@ test("需手动补齐的整合包进入等待状态，无错误弹窗，也不�
     assert.equal(task.modpack_status.missing[0].key, "manual");
     assert.equal(ui.error.value, "");
     assert.equal(ui.busy.value, false);
-    assert.equal(ui.utility.value, "downloads");
+    assert.equal(ui.showDownloads.value, true);
     assert.equal(
       fixture.calls.some((call) => call.op === "launch"),
       false,
@@ -571,7 +574,7 @@ test("需手动补齐的整合包进入等待状态，无错误弹窗，也不�
       (call) => call.op === "install",
     ).length;
     await ui.startGame();
-    assert.equal(ui.utility.value, "downloads");
+    assert.equal(ui.showDownloads.value, true);
     assert.equal(
       fixture.calls.filter((call) => call.op === "install").length,
       installs,
@@ -623,7 +626,7 @@ test("拖入手动资源框，匹配失败留在区域内，补齐后继续", as
         paths: ["/Downloads/manual.jar"],
       },
     });
-    assert.equal(ui.utility.value, "downloads");
+    assert.equal(ui.showDownloads.value, true);
     assert.equal(ui.manualPackDragging.value, true);
     fixture.fileDrop({ payload: { type: "leave" } });
     assert.equal(ui.manualPackDragging.value, false);

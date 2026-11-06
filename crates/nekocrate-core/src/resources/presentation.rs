@@ -8,6 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ProjectDetails {
+    pub refresh_required: bool,
     pub project: Project,
     pub body: String,
     pub body_format: &'static str,
@@ -104,6 +105,7 @@ fn details(v: &Value, platform: Platform, body: String, authors: Vec<String>) ->
         })
         .collect();
     ProjectDetails {
+        refresh_required: false,
         project: project(v, platform),
         // Detailed descriptions are display data, not an unbounded document viewer.
         body: body.chars().take(256_000).collect(),
@@ -131,17 +133,25 @@ fn details(v: &Value, platform: Platform, body: String, authors: Vec<String>) ->
         gallery,
     }
 }
-async fn curseforge_id(api: &Provider, id: &str, cancel: &CancellationToken) -> Result<String> {
+async fn curseforge_id(
+    api: &Provider,
+    id: &str,
+    refresh: bool,
+    cancel: &CancellationToken,
+) -> Result<String> {
     if id.bytes().all(|b| b.is_ascii_digit()) {
         return Ok(id.into());
     }
     // Match the declared URL's exact slug and class, never a fuzzy filename/name search.
     let found = api
-        .get_display(
+        .get_presentation(
             &format!("mods/search?gameId=432&classId=6&slug={id}"),
+            refresh,
+            None,
             cancel,
         )
-        .await?;
+        .await?
+        .0;
     exact_curseforge_id(&found, id).context("未找到对应的资源项目")
 }
 fn exact_curseforge_id(found: &Value, slug: &str) -> Option<String> {
@@ -163,13 +173,24 @@ impl Launcher {
     ) -> Result<Project> {
         identifier(id)?;
         let api = Provider::new(self, platform)?;
-        let value = if platform == Platform::Modrinth {
-            api.get_display(&format!("project/{id}"), cancel).await?
+        let path = if platform == Platform::Modrinth {
+            format!("project/{id}")
         } else {
-            let id = curseforge_id(&api, id, cancel).await?;
-            api.get_display(&format!("mods/{id}"), cancel).await?["data"].clone()
+            let id = curseforge_id(&api, id, false, cancel).await?;
+            format!("mods/{id}")
         };
-        Ok(project(&value, platform))
+        let (mut value, stale) = api.get_presentation(&path, false, None, cancel).await?;
+        // Icon fallback shares the project endpoint (and its long description).
+        // Keep its revalidation interval aligned with the presentation cache.
+        if stale {
+            value = api.get_presentation(&path, true, None, cancel).await?.0;
+        }
+        let value = if platform == Platform::Modrinth {
+            &value
+        } else {
+            &value["data"]
+        };
+        Ok(project(value, platform))
     }
     pub async fn resource_project(
         &self,
@@ -177,18 +198,49 @@ impl Launcher {
         id: &str,
         cancel: &CancellationToken,
     ) -> Result<ProjectDetails> {
+        self.resource_project_with_refresh(platform, id, false, cancel)
+            .await
+    }
+    pub async fn resource_project_with_refresh(
+        &self,
+        platform: Platform,
+        id: &str,
+        refresh: bool,
+        cancel: &CancellationToken,
+    ) -> Result<ProjectDetails> {
         identifier(id)?;
+        if cancel.is_cancelled() {
+            bail!("操作已取消");
+        }
         let api = Provider::new(self, platform)?;
         if platform == Platform::Modrinth {
             // Author lookup is optional; an unavailable team endpoint must not hide the body.
             let path = format!("project/{id}");
             let members = format!("project/{id}/members");
-            let (v, team) = tokio::join!(
-                api.get_display(&path, cancel),
-                tokio::time::timeout(Duration::from_secs(2), api.get_display(&members, cancel))
-            );
-            let v = v?;
-            let team = team.ok().and_then(Result::ok).unwrap_or(Value::Null);
+            let cached = (!refresh).then(|| api.cached_presentation(&path)).flatten();
+            let ((v, stale), (team, team_stale)) = if let Some(cached) = cached {
+                // A missing optional author list must not delay an already cached body.
+                (
+                    cached,
+                    api.cached_presentation(&members)
+                        .unwrap_or((Value::Null, true)),
+                )
+            } else {
+                let (v, team) = tokio::join!(
+                    api.get_presentation(&path, refresh, None, cancel),
+                    tokio::time::timeout(
+                        Duration::from_secs(2),
+                        api.get_presentation(&members, refresh, None, cancel)
+                    )
+                );
+                (
+                    v?,
+                    team.ok()
+                        .and_then(Result::ok)
+                        .or_else(|| api.cached_presentation(&members))
+                        .unwrap_or((Value::Null, false)),
+                )
+            };
             let authors = array(&team)
                 .take(16)
                 .filter_map(|a| {
@@ -198,21 +250,26 @@ impl Launcher {
                 })
                 .map(str::to_owned)
                 .collect();
-            Ok(details(&v, platform, text(&v, "body"), authors))
+            let mut result = details(&v, platform, text(&v, "body"), authors);
+            result.refresh_required = stale || team_stale;
+            Ok(result)
         } else {
-            let id = curseforge_id(&api, id, cancel).await?;
+            let id = curseforge_id(&api, id, refresh, cancel).await?;
             // Distribution restrictions affect downloads, not reading a project's page.
             let path = format!("mods/{id}");
             let description = format!("mods/{id}/description");
-            let (v, body) = tokio::try_join!(
-                api.get_display(&path, cancel),
-                api.get_display(&description, cancel)
-            )?;
+            let (v, stale) = api.get_presentation(&path, refresh, None, cancel).await?;
+            let revision = serde_json::json!([v["data"]["dateModified"], v["data"]["mainFileId"]]);
+            let (body, body_stale) = api
+                .get_presentation(&description, refresh, Some(&revision), cancel)
+                .await?;
             let authors = array(&v["data"]["authors"])
                 .take(16)
                 .map(|a| text(a, "name"))
                 .collect();
-            Ok(details(&v["data"], platform, text(&body, "data"), authors))
+            let mut result = details(&v["data"], platform, text(&body, "data"), authors);
+            result.refresh_required = stale || body_stale;
+            Ok(result)
         }
     }
     pub async fn resource_image(

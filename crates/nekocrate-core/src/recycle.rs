@@ -1,5 +1,5 @@
 //! System recycle bin operations. No private trash directory or permanent-delete fallback.
-use crate::{Launcher, model::Database, storage};
+use crate::{Launcher, model::Database, portable};
 use anyhow::{Context, Result};
 use std::{fs, path::Path};
 
@@ -39,9 +39,9 @@ impl Launcher {
         let mut candidate = db.clone();
         let result = update(&mut candidate)?;
         let database = self.root().join("database.json");
-        storage::write_json(&database, &candidate)?;
+        portable::write_database(self.root(), &database, &candidate)?;
         if exists && let Err(error) = recycle(source) {
-            if let Err(rollback) = storage::write_json(&database, &*db) {
+            if let Err(rollback) = portable::write_database(self.root(), &database, &db) {
                 return Err(error.context(format!(
                     "回收失败且无法恢复列表记录，原文件位于：{}；{rollback:#}",
                     source.display()
@@ -64,6 +64,7 @@ pub(crate) fn discard_test_fixture(source: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage;
     use anyhow::bail;
 
     #[test]

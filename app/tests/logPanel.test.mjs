@@ -30,7 +30,7 @@ let source = ts.transpileModule(
 source = source.replace(
   /from ["']([^"']+)["']/g,
   (_, name) =>
-    `from ${JSON.stringify(name === "./GlassSelect.vue" ? selectStub : name.startsWith(".") ? new URL(`${name}.ts`, file).href : import.meta.resolve(name))}`,
+    `from ${JSON.stringify(name === "./GlassSelect.vue" ? selectStub : name.endsWith(".vue") ? moduleUrl("export default { render() { return null } }") : name.startsWith(".") ? new URL(`${name}.ts`, file).href : import.meta.resolve(name))}`,
 );
 const LogPanel = (await import(moduleUrl(source))).default;
 const all = (node) => [node, ...node.children.flatMap(all)];

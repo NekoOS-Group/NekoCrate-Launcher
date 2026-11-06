@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import WindowControls from "./WindowControls.vue";
 import { computed, ref, watch } from "vue";
 import {
   Check,
@@ -114,6 +115,7 @@ const activities = {
             {{ t("取消下载") }}
           </button>
         </template>
+        <WindowControls />
         <button
           type="button"
           class="icon-button"

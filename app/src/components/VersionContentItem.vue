@@ -21,10 +21,12 @@ import {
   Settings2,
   Save,
   AlignLeft,
+  Trash2,
 } from "lucide-vue-next";
 import { modFileName } from "../contentIdentity";
 import {
   resourceTransferKey,
+  resourceRemovalKey,
   isResourceDragKind,
   type ResourceCopySource,
 } from "../useResourceTransfer";
@@ -61,40 +63,45 @@ import {
   type ModConfigFile,
   type ModConfigDocument,
 } from "../modManagement";
-const props = defineProps<{
-  rpc: ResourceRpc;
-  selected?: boolean;
-  select?: (event: MouseEvent, file: LocalContentFile) => boolean;
-  dragSources?: () => ResourceCopySource[];
-  modActions?: ModActions;
-  locked?: boolean;
-  file: LocalContentFile;
-  instanceId: string;
-  version: string;
-  kind: ContentKind;
-  icon: Component;
-  loadMetadata: (
-    id: string,
-    version: string,
-    kind: ContentKind,
-    file: string,
-  ) => Promise<ContentMetadata>;
-  openFolder: (
-    id: string,
-    version: string,
-    kind: ContentKind,
-    file: string,
-    source?: string,
-  ) => Promise<void>;
-  loadSource: (
-    id: string,
-    version: string,
-    kind: ContentKind,
-    file: string,
-    source: string,
-  ) => Promise<string>;
-  dependencyTargets: ReadonlyMap<string, string>;
-}>();
+const props = withDefaults(
+  defineProps<{
+    global?: boolean;
+    canRemove?: boolean;
+    rpc: ResourceRpc;
+    selected?: boolean;
+    select?: (event: MouseEvent, file: LocalContentFile) => boolean;
+    dragSources?: () => ResourceCopySource[];
+    modActions?: ModActions;
+    locked?: boolean;
+    file: LocalContentFile;
+    instanceId: string;
+    version: string;
+    kind: ContentKind;
+    icon: Component;
+    loadMetadata: (
+      id: string,
+      version: string,
+      kind: ContentKind,
+      file: string,
+    ) => Promise<ContentMetadata>;
+    openFolder: (
+      id: string,
+      version: string,
+      kind: ContentKind,
+      file: string,
+      source?: string,
+    ) => Promise<void>;
+    loadSource: (
+      id: string,
+      version: string,
+      kind: ContentKind,
+      file: string,
+      source: string,
+    ) => Promise<string>;
+    dependencyTargets: ReadonlyMap<string, string>;
+  }>(),
+  { canRemove: true },
+);
 const emit = defineEmits<{
   link: [url: string];
   error: [error: unknown];
@@ -103,12 +110,54 @@ const emit = defineEmits<{
 }>();
 const row = ref<HTMLElement | null>(null);
 const transferResource = inject(resourceTransferKey, undefined);
+const removeResources = inject(resourceRemovalKey, undefined);
+const removing = ref(false);
+function resourceSource(): ResourceCopySource | undefined {
+  if (!isResourceDragKind(props.kind)) return;
+  return {
+    ...(props.global ? { global: true } : {}),
+    ...(props.canRemove === false ? { removable: false } : {}),
+    kind: props.kind,
+    instance: props.instanceId,
+    version: props.version,
+    file: props.file.file_name,
+    name: displayName.value,
+  };
+}
+const removable = computed(
+  () =>
+    props.canRemove !== false &&
+    !!removeResources &&
+    isResourceDragKind(props.kind) &&
+    available.value,
+);
+async function removeResource() {
+  if (
+    !removable.value ||
+    props.locked ||
+    removing.value ||
+    modSaving.value ||
+    modDownloading.value
+  )
+    return;
+  const source = resourceSource();
+  if (!source) return;
+  removing.value = true;
+  try {
+    await removeResources!([source]);
+  } catch (error) {
+    emit("error", error);
+  } finally {
+    removing.value = false;
+  }
+}
 const draggableResource = computed(
   () =>
     !!transferResource &&
     isResourceDragKind(props.kind) &&
     available.value &&
     !props.locked &&
+    !removing.value &&
     !modSaving.value &&
     !modDownloading.value,
 );
@@ -121,16 +170,7 @@ function beginResourceDrag(event: PointerEvent) {
     !isResourceDragKind(props.kind)
   )
     return;
-  transferResource?.(
-    event,
-    props.dragSources?.() || {
-      kind: props.kind,
-      instance: props.instanceId,
-      version: props.version,
-      file: props.file.file_name,
-      name: displayName.value,
-    },
-  );
+  transferResource?.(event, props.dragSources?.() || resourceSource()!);
 }
 function selectOrExpand(event: MouseEvent) {
   if (available.value && props.select?.(event, props.file)) return;
@@ -872,12 +912,24 @@ onBeforeUnmount(() => {
           {{ formatBytes(file.declaration.total) }}</small
         >
       </span>
-      <template
-        v-if="kind === 'mods' && available && modActions && file.has_config"
+      <span
+        v-if="
+          removable ||
+          (kind === 'mods' && available && modActions && file.has_config)
+        "
+        class="content-item-actions"
+        :style="{
+          '--action-count':
+            Number(removable) +
+            Number(
+              !!(kind === 'mods' && available && modActions && file.has_config),
+            ),
+        }"
       >
         <button
+          v-if="kind === 'mods' && available && modActions && file.has_config"
           type="button"
-          class="content-item-expand"
+          class="content-item-expand content-item-config"
           :aria-label="t('配置')"
           :title="t('配置')"
           :aria-expanded="configOpen && expanded"
@@ -885,7 +937,18 @@ onBeforeUnmount(() => {
         >
           <Settings2 :size="14" />
         </button>
-      </template>
+        <button
+          v-if="removable"
+          type="button"
+          class="content-item-expand content-item-remove danger"
+          :disabled="locked || removing || modSaving || modDownloading"
+          :aria-label="`${t('移入回收站')} · ${displayName}`"
+          :title="t('移入回收站')"
+          @click.stop="removeResource"
+        >
+          <Trash2 :size="14" />
+        </button>
+      </span>
       <button
         v-if="canExpand"
         type="button"
@@ -1390,7 +1453,7 @@ span.content-item-toggle {
   outline-offset: -1px;
 }
 .content-item-heading.disabled .content-item-label,
-.content-item-heading.disabled .content-item-expand {
+.content-item-heading.disabled .content-item-expand:not(.content-item-remove) {
   opacity: 0.55;
 }
 .content-item-heading {
@@ -1477,6 +1540,37 @@ span.content-item-toggle {
 }
 .is-expanded .content-item-chevron {
   transform: rotate(90deg);
+}
+.content-item-actions {
+  display: flex;
+  align-self: stretch;
+  flex-shrink: 0;
+  gap: 11px;
+  width: 0;
+  margin-left: -11px;
+  overflow: hidden;
+  pointer-events: none;
+  opacity: 0;
+  transition:
+    width 180ms var(--motion-ease),
+    margin-left 180ms var(--motion-ease),
+    opacity 140ms,
+    color 140ms;
+}
+.content-item-heading:hover .content-item-actions,
+.content-item-actions:has(:focus-visible) {
+  width: calc(var(--action-count) * 35px - 11px);
+  margin-left: 0;
+  pointer-events: auto;
+  opacity: 1;
+}
+@media (hover: none) {
+  .content-item-actions {
+    width: calc(var(--action-count) * 35px - 11px);
+    margin-left: 0;
+    pointer-events: auto;
+    opacity: 1;
+  }
 }
 .content-item-expanded {
   display: grid;

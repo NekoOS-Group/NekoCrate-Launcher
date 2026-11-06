@@ -15,6 +15,23 @@ const account = {
   skin: null,
 };
 
+test("closing the account dropdown saves the guest draft before its input unmounts", async () => {
+  const f = await settingsFixture();
+  try {
+    f.context.utility.value = "accounts";
+    f.context.guestNameEditing.value = true;
+    f.context.guestNameDraft.value = "New_Guest";
+    f.handlers.set_guest_name = ({ name }) => name;
+    f.context.setAccountsOpen(false);
+    await flush();
+    assert.equal(f.context.utility.value, null);
+    assert.equal(f.context.guestName.value, "New_Guest");
+    assert.equal(f.calls.filter((c) => c.op === "set_guest_name").length, 1);
+  } finally {
+    f.dispose();
+  }
+});
+
 test("saved Microsoft accounts can switch to guest; late snapshots and skins cannot restore the old identity", async () => {
   const f = await settingsFixture();
   try {
@@ -37,7 +54,7 @@ test("saved Microsoft accounts can switch to guest; late snapshots and skins can
     };
     f.context.utility.value = "accounts";
     await f.context.chooseIdentity(null);
-    assert.equal(f.context.utility.value, "accounts");
+    assert.equal(f.context.utility.value, null);
     stale.resolve(old);
     skin.resolve([1, 2, 3]);
     await syncing;

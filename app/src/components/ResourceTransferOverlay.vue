@@ -6,16 +6,25 @@ import {
   Sparkles,
   FileCode2,
   Map,
+  Trash2,
+  Coffee,
 } from "lucide-vue-next";
+import { t } from "../i18n";
 import { activeDialog } from "../dialogSurface";
 import type {
-  ResourceCopySource,
   ResourceDestination,
+  ResourceDragKind,
 } from "../useResourceTransfer";
+type DragDisplay = {
+  kind: ResourceDragKind | "java";
+  name: string;
+  removable?: boolean;
+};
 defineProps<{
+  trashOnly?: boolean;
   drag?: {
-    source: ResourceCopySource;
-    sources?: ResourceCopySource[];
+    source: DragDisplay;
+    sources?: DragDisplay[];
     x: number;
     y: number;
     target?: ResourceDestination;
@@ -25,10 +34,31 @@ defineProps<{
 </script>
 <template>
   <Teleport :to="activeDialog || 'body'">
+    <Transition name="instance-trash">
+      <div
+        v-if="
+          drag &&
+          (drag.sources || [drag.source]).every(
+            (source) => source.removable !== false,
+          )
+        "
+        class="instance-trash-target resource-trash-target"
+        :class="{ active: drag.target?.trash }"
+        role="img"
+        :aria-label="t('拖到此处移入回收站')"
+      >
+        <Trash2 :size="28" />
+        <small v-if="drag.target?.trash">{{ t("移入回收站") }}</small>
+      </div>
+    </Transition>
     <div
       v-if="drag && !drag.native"
       class="resource-drag-ghost glass-surface"
-      :class="{ ready: drag.target, multiple: (drag.sources?.length || 0) > 1 }"
+      :class="{
+        ready: drag.target,
+        removing: drag.target?.trash,
+        multiple: (drag.sources?.length || 0) > 1,
+      }"
       :style="{
         transform: `translate3d(${drag.x + 16}px, ${drag.y + 16}px, 0)`,
       }"
@@ -41,6 +71,7 @@ defineProps<{
             shaderpacks: Sparkles,
             datapacks: FileCode2,
             saves: Map,
+            java: Coffee,
           }[drag.source.kind]
         "
         :size="18"
@@ -49,7 +80,10 @@ defineProps<{
       ><small v-if="(drag.sources?.length || 0) > 1" class="drag-count">{{
         drag.sources?.length
       }}</small
-      ><Copy :size="13" />
+      ><component
+        :is="trashOnly || drag.target?.trash ? Trash2 : Copy"
+        :size="13"
+      />
     </div>
   </Teleport>
 </template>
@@ -101,5 +135,17 @@ defineProps<{
 }
 .resource-drag-ghost.ready {
   color: var(--blue);
+}
+.resource-drag-ghost.removing {
+  color: var(--danger);
+}
+.resource-trash-target {
+  z-index: 122;
+}
+.resource-trash-target small {
+  position: absolute;
+  top: 64px;
+  white-space: nowrap;
+  font-size: 11px;
 }
 </style>

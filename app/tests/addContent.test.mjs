@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   settingsFixture,
+  managerActions,
   deferred,
   flush,
 } from "./helpers/appSettingsFixture.mjs";
@@ -19,6 +20,36 @@ const archive = {
     },
   },
 };
+test("store opens independently and hands a chosen pack to the installer, including an empty home screen", async () => {
+  const f = await settingsFixture();
+  try {
+    await flush();
+    f.context.activateHomeTool("store");
+    assert.equal(f.context.storeOpen.value, true);
+    assert.equal(f.context.modal.value, null);
+    f.handlers.download_modpack = () => archive;
+    f.context.snapshot.value.database.instances = [];
+    f.context.selectedInstanceId.value = "";
+    assert.equal(
+      await f.context.downloadStorePack("modrinth", "cats", "one"),
+      true,
+    );
+    assert.equal(f.context.storeOpen.value, false);
+    assert.equal(f.context.modal.value, "version");
+    assert.equal(f.context.additionSection.value, "modpacks");
+    assert.equal(f.context.editing.value, null);
+    assert.ok(f.context.form.name.trim());
+    assert.equal(f.context.packPreview.value.pack.name, "Cats");
+    assert.equal(
+      f.calls.some((c) =>
+        ["create", "prepare_modpack", "install"].includes(c.op),
+      ),
+      false,
+    );
+  } finally {
+    f.dispose();
+  }
+});
 
 test("opening the list directory uses its captured instance and version without revealing a file", async () => {
   const f = await settingsFixture();
@@ -30,7 +61,11 @@ test("opening the list directory uses its captured instance and version without 
       assert.equal(request.file, undefined);
       return true;
     };
-    await f.context.openContentFolder("instance-a", "1.21.1", "mods");
+    await managerActions(f.context).openContentFolder(
+      "instance-a",
+      "1.21.1",
+      "mods",
+    );
     assert.equal(
       f.calls.filter((c) => c.op === "open_content_folder").length,
       1,

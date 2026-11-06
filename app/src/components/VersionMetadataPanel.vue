@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { listRevealStyle } from "../listMotion";
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch, useId } from "vue";
 import { Braces, ChevronRight } from "lucide-vue-next";
 import { t, translateMessage } from "../i18n";
 import type {
@@ -9,6 +9,7 @@ import type {
   VersionMetadata,
 } from "../types";
 
+const metadataId = `metadata-${useId()}`;
 const props = defineProps<{
   version: string;
   refresh: number;
@@ -117,7 +118,7 @@ onBeforeUnmount(() => {
         <button
           class="metadata-document-toggle"
           :aria-expanded="opened === document.path"
-          :aria-controls="`metadata-file-${index}`"
+          :aria-controls="`${metadataId}-file-${index}`"
           @click="toggle(document)"
         >
           <Braces :size="18" :stroke-width="1.5" />
@@ -132,7 +133,7 @@ onBeforeUnmount(() => {
         <Transition name="metadata-expand">
           <div
             v-if="opened === document.path"
-            :id="`metadata-file-${index}`"
+            :id="`${metadataId}-file-${index}`"
             class="metadata-expanded"
           >
             <div class="metadata-expanded-clip">
@@ -197,7 +198,7 @@ onBeforeUnmount(() => {
                   v-if="document.json !== null"
                   class="metadata-source-toggle"
                   :aria-expanded="raw"
-                  :aria-controls="`metadata-source-${index}`"
+                  :aria-controls="`${metadataId}-source-${index}`"
                   @click="raw = !raw"
                 >
                   <ChevronRight :size="12" :class="{ expanded: raw }" />{{
@@ -206,7 +207,7 @@ onBeforeUnmount(() => {
                 </button>
                 <pre
                   v-if="raw && document.json !== null"
-                  :id="`metadata-source-${index}`"
+                  :id="`${metadataId}-source-${index}`"
                   class="metadata-json"
                   tabindex="0"
                   :aria-label="t('原始文件')"

@@ -4,11 +4,38 @@ import { signInWithMicrosoft } from "../src/login.ts";
 
 const challenge = {
   session_id: "test-session",
-  user_code: "TEST-CODE",
-  verification_uri: "https://www.microsoft.com/link",
+  verification_uri:
+    "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize?prompt=select_account",
   expires_in: 900,
-  interval: 5,
 };
+
+test("浏览器授权先等待回调，再打开账号选择页", async () => {
+  const browser = challenge;
+  let displayed,
+    waiting = false;
+  const opened = [];
+  const account = { id: "browser-player" };
+  const result = await signInWithMicrosoft(
+    operations({
+      begin: async () => browser,
+      showChallenge: (value) => {
+        displayed = value;
+      },
+      openBrowser: async (url) => {
+        assert.equal(displayed, browser);
+        assert.equal(waiting, true);
+        opened.push(url);
+      },
+      waitForLogin: async (value) => {
+        assert.equal(value.session_id, browser.session_id);
+        waiting = true;
+        return account;
+      },
+    }),
+  );
+  assert.equal(result, account);
+  assert.deepEqual(opened, [browser.verification_uri]);
+});
 
 function deferred() {
   let resolve, reject;
@@ -23,8 +50,6 @@ function operations(overrides = {}) {
   return {
     begin: async () => challenge,
     showChallenge: () => {},
-    copyCode: async () => {},
-    copyFailed: () => assert.fail("验证码应成功复制"),
     openBrowser: async () => {},
     browserFailed: () => assert.fail("浏览器应成功打开"),
     waitForLogin: async () => {},
@@ -32,32 +57,7 @@ function operations(overrides = {}) {
   };
 }
 
-test("点击登录即展示验证码并自动打开服务返回的微软授权页", async () => {
-  let displayed;
-  let copied;
-  const opened = [];
-  await signInWithMicrosoft(
-    operations({
-      showChallenge: (value) => {
-        displayed = value;
-      },
-      waitForLogin: async (value) => {
-        assert.equal(value.session_id, challenge.session_id);
-      },
-      copyCode: async (code) => {
-        copied = code;
-      },
-      openBrowser: async (url) => {
-        assert.equal(displayed, challenge, "浏览器打开前应已展示验证码");
-        assert.equal(copied, challenge.user_code, "浏览器打开前应已复制验证码");
-        opened.push(url);
-      },
-    }),
-  );
-  assert.deepEqual(opened, [challenge.verification_uri]);
-});
-
-test("打开浏览器失败仍保留设备授权，允许用户手动打开后完成登录", async () => {
+test("打开浏览器失败会报告错误，并保持授权结果的接收", async () => {
   const signIn = deferred();
   const reported = deferred();
   const browserError = new Error("no default browser");
@@ -80,7 +80,7 @@ test("打开浏览器失败仍保留设备授权，允许用户手动打开后�
   assert.equal(completed, true);
 });
 
-test("验证码请求失败时不打开无效网页，也不开始等待授权", async () => {
+test("授权初始化失败时不打开无效网页，也不开始等待授权", async () => {
   const failure = new Error("invalid client id");
   await assert.rejects(
     signInWithMicrosoft(
@@ -88,9 +88,9 @@ test("验证码请求失败时不打开无效网页，也不开始等待授权",
         begin: async () => {
           throw failure;
         },
-        showChallenge: () => assert.fail("不应展示验证码"),
+        showChallenge: () => assert.fail("不应记录未建立的会话"),
         openBrowser: async () => assert.fail("不应打开浏览器"),
-        waitForLogin: async () => assert.fail("不应轮询登录"),
+        waitForLogin: async () => assert.fail("不应等待登录"),
       }),
     ),
     (error) => error === failure,
@@ -102,11 +102,11 @@ test("等待浏览器打开期间也能取消授权，迟到的打开失败不�
   const signIn = deferred();
   const opened = deferred();
   const failure = new Error("登录已取消");
-  let polling = false;
+  let waiting = false;
   const login = signInWithMicrosoft(
     operations({
       waitForLogin: () => {
-        polling = true;
+        waiting = true;
         return signIn.promise;
       },
       openBrowser: () => {
@@ -118,73 +118,28 @@ test("等待浏览器打开期间也能取消授权，迟到的打开失败不�
   );
   const rejected = assert.rejects(login, (error) => error === failure);
   await opened.promise;
-  assert.equal(polling, true);
+  assert.equal(waiting, true);
   signIn.reject(failure);
   await rejected;
   browser.reject(new Error("late browser failure"));
   await new Promise((resolve) => setImmediate(resolve));
 });
 
-test("已被新登录替换的验证码响应不再显示、打开浏览器或开始轮询", async () => {
+test("已被新登录替换的响应不再记录、打开浏览器或等待授权", async () => {
   const begin = deferred();
   let current = true;
   const login = signInWithMicrosoft(
     operations({
       begin: () => begin.promise,
       isCurrent: () => current,
-      showChallenge: () => assert.fail("旧验证码不应显示"),
-      copyCode: () => assert.fail("旧验证码不应复制"),
-      waitForLogin: () => assert.fail("旧授权不应轮询"),
+      showChallenge: () => assert.fail("旧会话不应记录"),
+      waitForLogin: () => assert.fail("旧授权不应等待"),
       openBrowser: () => assert.fail("旧授权不应打开浏览器"),
     }),
   );
   current = false;
   begin.resolve(challenge);
   await login;
-});
-
-test("自动复制失败不打断微软授权和浏览器打开", async () => {
-  const signIn = deferred();
-  let reported = false,
-    opened = false;
-  const login = signInWithMicrosoft(
-    operations({
-      copyCode: async () => {
-        throw new Error("clipboard unavailable");
-      },
-      copyFailed: () => {
-        reported = true;
-      },
-      openBrowser: async () => {
-        opened = true;
-      },
-      waitForLogin: () => signIn.promise,
-    }),
-  );
-  await new Promise(setImmediate);
-  assert.equal(reported, true);
-  assert.equal(opened, true);
-  signIn.resolve(true);
-  await login;
-});
-
-test("复制过程中授权已取消时不再弹出浏览器或报告迟到的复制失败", async () => {
-  const clipboard = deferred(),
-    signIn = deferred();
-  const login = signInWithMicrosoft(
-    operations({
-      copyCode: () => clipboard.promise,
-      copyFailed: () => assert.fail("不得报告迟到的剪贴板错误"),
-      openBrowser: () => assert.fail("已取消的授权不得打开网页"),
-      waitForLogin: () => signIn.promise,
-    }),
-  );
-  const rejected = assert.rejects(login, /登录已取消/);
-  await new Promise(setImmediate);
-  signIn.reject(new Error("登录已取消"));
-  await rejected;
-  clipboard.reject(new Error("late clipboard failure"));
-  await new Promise(setImmediate);
 });
 
 test("授权成功立即返回账户，不等待系统打开浏览器的迟到回调", async () => {

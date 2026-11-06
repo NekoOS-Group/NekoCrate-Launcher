@@ -87,7 +87,7 @@ test("full ZIP opens creation with name and location selection; nothing is impor
     const importing = ui.submit();
     await flush();
     assert.equal(ui.modal.value, null);
-    assert.equal(ui.utility.value, "downloads");
+    assert.equal(ui.showDownloads.value, true);
     assert.equal(ui.current.value.cancellable, true);
     assert.deepEqual(
       ui.current.value.workflow.steps.map((s) => s.id),

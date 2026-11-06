@@ -228,6 +228,7 @@ mod tests {
             warnings: vec![],
             created_at: 0,
             complete: false,
+            repair_dependencies: Vec::new(),
             started: true,
         };
         storage::write_json(&task, &plan).unwrap();

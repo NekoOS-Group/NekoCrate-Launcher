@@ -132,3 +132,24 @@ test("picker ignores late incompatible responses and never commits after it is c
   await late;
   assert.equal(other.props.modelValue.length, 0);
 });
+
+test("local drags arriving during an online lookup cannot exceed the combined selection limit", async () => {
+  const request = deferred();
+  const h = fixture(() => request.promise);
+  try {
+    const adding = h.ui.toggle({ id: "cat", name: "Cat" });
+    h.props.localResources = Array.from({ length: 128 }, (_, i) => ({
+      file: `${i}.zip`,
+    }));
+    request.resolve(versions("cat"));
+    await adding;
+    assert.equal(h.props.modelValue.length, 0);
+    assert.ok(
+      h.events.some(
+        (event) => event.event === "error" && event.value.includes("128"),
+      ),
+    );
+  } finally {
+    h.dispose();
+  }
+});

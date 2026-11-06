@@ -96,6 +96,7 @@ mod tests {
             version: "21.0.7".into(),
             arch: "aarch64".into(),
             jdk: true,
+            vendor: String::new(),
         };
         let receipt = context.receipt(&info).unwrap();
         context.save(temp.path(), &receipt).unwrap();

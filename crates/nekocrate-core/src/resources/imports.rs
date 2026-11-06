@@ -27,8 +27,10 @@ pub struct LocalImport {
     pub path: PathBuf,
     pub kind: Option<ResourceKind>,
 }
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceCopySource {
+    #[serde(default)]
+    pub global: bool,
     pub kind: ResourceKind,
     pub instance: String,
     pub version: String,
@@ -203,14 +205,17 @@ impl Launcher {
     /// Only export a resource that is actually listed in this game version.
     /// Never accept an arbitrary absolute path from the webview.
     pub fn resource_export_path(&self, source: &ResourceCopySource) -> Result<PathBuf> {
-        use crate::version_management::ContentKind;
-        let kind = match source.kind {
-            ResourceKind::Mods => ContentKind::Mods,
-            ResourceKind::Resourcepacks => ContentKind::Resourcepacks,
-            ResourceKind::Shaderpacks => ContentKind::Shaderpacks,
-            ResourceKind::Datapacks => ContentKind::Datapacks,
-            ResourceKind::Saves => ContentKind::Saves,
+        let kind = source.kind.content_kind();
+        // A running world is not a consistent backup, even when the native
+        // drag is copy-only. Use the same guard for cross-version copies.
+        let _directory_guard = if !source.global && source.kind == ResourceKind::Saves {
+            self.resource_directory_idle(&source.instance, &source.version)?
+        } else {
+            None
         };
+        if source.global {
+            return self.cached_resource_path(kind, &source.file, None);
+        }
         Ok(self
             .version_content_path(&source.instance, &source.version, kind, &source.file, None)?
             .canonicalize()?)
@@ -247,13 +252,37 @@ impl Launcher {
         cancel: &CancellationToken,
     ) -> Result<Option<ResourcePlan>> {
         let _directory_guard = self.idle(id)?;
+        let mut plan = self.resolve_resource_copies(
+            self.resource_target(id, version)?,
+            sources,
+            world,
+            cancel,
+        )?;
+        install::preflight(&mut plan, cancel)?;
+        anyhow::ensure!(plan.conflicts.is_empty(), "{}", plan.conflicts.join("\n"));
+        if plan.entries.iter().all(|entry| entry.reuse) {
+            return Ok(None);
+        }
+        save_plan(&plan)?;
+        Ok(Some(plan))
+    }
+
+    /// Build copy entries without publishing a second task/checkpoint. New-version
+    /// preselection merges these entries with online resources into one plan.
+    pub(super) fn resolve_resource_copies(
+        &self,
+        target: ResourceTarget,
+        sources: &[ResourceCopySource],
+        world: Option<&str>,
+        cancel: &CancellationToken,
+    ) -> Result<ResourcePlan> {
         anyhow::ensure!(
             !sources.is_empty() && sources.len() <= 256,
             "每次可导入 1–256 个文件或目录"
         );
-        let target = self.resource_target(id, version)?;
         let mut paths = std::collections::HashSet::new();
         let mut inputs = Vec::new();
+        let mut collected_origins = BTreeMap::new();
         for source in sources {
             crate::download::check_cancel(cancel)?;
             anyhow::ensure!(
@@ -268,10 +297,22 @@ impl Launcher {
                 "此资源类型不支持跨版本复制"
             );
             let path = self.resource_export_path(source)?;
-            let origin = self.resource_target(&source.instance, &source.version)?;
-            if (origin.directory != target.directory || source.kind == ResourceKind::Datapacks)
-                && paths.insert(path.clone())
-            {
+            if source.global {
+                let root = self.resource_library_root()?;
+                let relative = path
+                    .strip_prefix(&root)?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if let Some(record) = records(&root)?.remove(&relative) {
+                    collected_origins.insert(path.canonicalize()?, record);
+                }
+            }
+            let distinct = source.global
+                || self
+                    .resource_target(&source.instance, &source.version)?
+                    .directory
+                    != target.directory;
+            if (distinct || source.kind == ResourceKind::Datapacks) && paths.insert(path.clone()) {
                 inputs.push(LocalImport {
                     path,
                     kind: Some(source.kind),
@@ -279,21 +320,20 @@ impl Launcher {
             }
         }
         if inputs.is_empty() {
-            return Ok(None);
+            return Ok(new_plan(target));
         }
         // Validate the whole batch before publishing any file. The normal
         // installer retains provenance, disabled states and conflict handling.
-        let plan = self.prepare_local_resources_inner(id, version, &inputs, world, cancel, true)?;
-        if !plan.conflicts.is_empty() || plan.entries.iter().all(|entry| entry.reuse) {
-            // This new plan has no staged data. Failed/idempotent drags must not
-            // accumulate unfinished tasks in the target version.
-            fs::remove_dir_all(task_dir(&plan.target, &plan.id)?)?;
-            if !plan.conflicts.is_empty() {
-                bail!("{}", plan.conflicts.join("\n"));
+        let mut plan = self.resolve_local_resources(target, &inputs, world, cancel, true)?;
+        for entry in &mut plan.entries {
+            if let Input::Local { path, digest, .. } = &entry.input
+                && let Some(record) = collected_origins.get(path)
+                && record.sha256 == *digest
+            {
+                entry.origin = record.origin.clone();
             }
-            return Ok(None);
         }
-        Ok(Some(plan))
+        Ok(plan)
     }
 
     pub fn inspect_resources(&self, paths: &[PathBuf]) -> Result<Vec<DetectedResource>> {
@@ -341,10 +381,29 @@ impl Launcher {
         listed_mod: bool,
     ) -> Result<ResourcePlan> {
         let _directory_guard = self.idle(id)?;
+        let mut plan = self.resolve_local_resources(
+            self.resource_target(id, version)?,
+            inputs,
+            world,
+            cancel,
+            listed_mod,
+        )?;
+        install::preflight(&mut plan, cancel)?;
+        save_plan(&plan)?;
+        Ok(plan)
+    }
+    fn resolve_local_resources(
+        &self,
+        target: ResourceTarget,
+        inputs: &[LocalImport],
+        world: Option<&str>,
+        cancel: &CancellationToken,
+        listed_mod: bool,
+    ) -> Result<ResourcePlan> {
         if inputs.is_empty() || inputs.len() > 256 {
             bail!("每次可导入 1–256 个文件或目录");
         }
-        let mut plan = new_plan(self.resource_target(id, version)?);
+        let mut plan = new_plan(target);
         for input in inputs {
             let mut detected = inspect(&input.path)?;
             // Legacy/core Mods may lack loader descriptors. A file already
@@ -431,10 +490,8 @@ impl Launcher {
                 content_sha256,
             });
         }
-        install::preflight(&mut plan, cancel)?;
         plan.warnings.sort();
         plan.warnings.dedup();
-        save_plan(&plan)?;
         Ok(plan)
     }
 }

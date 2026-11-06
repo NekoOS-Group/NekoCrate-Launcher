@@ -345,6 +345,17 @@ test("resource preselection is queued on the new version before installation, ne
       },
     ];
     ui.selectedResources.value = picks;
+    const local = [
+      {
+        global: true,
+        kind: "resourcepacks",
+        instance: "",
+        version: "",
+        file: "Local.zip",
+        name: "Local",
+      },
+    ];
+    ui.selectedLocalResources.value = local;
     ui.switchDownloadTarget("instance-b");
     assert.deepEqual(ui.selectedResources.value, picks);
     const order = [];
@@ -362,6 +373,7 @@ test("resource preselection is queued on the new version before installation, ne
       assert.equal(data.minecraft, "1.20.1");
       assert.equal(data.loader, null);
       assert.deepEqual(data.resources, picks);
+      assert.deepEqual(data.local, local);
       return true;
     };
     fixture.handlers.install = () => {

@@ -126,6 +126,15 @@ async fn partial_size(path: &Path) -> Result<u64> {
     }
 }
 
+fn permanent_http_error(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<reqwest::Error>()
+        .and_then(reqwest::Error::status)
+        .is_some_and(|status| {
+            status.is_client_error() && !matches!(status.as_u16(), 408 | 425 | 429)
+        })
+}
+
 fn range_total(response: &reqwest::Response, offset: u64, expected: u64) -> Result<u64> {
     let range = response
         .headers()
@@ -510,6 +519,15 @@ impl Downloader {
             .to_owned();
         self.order_candidates(&key, urls, cancel).await
     }
+    async fn file_urls(&self, url: &str, cancel: &CancellationToken) -> Result<Vec<String>> {
+        let mut urls = self.ordered_urls(url, cancel).await?;
+        // Do not race unauthenticated HEAD probes or change metadata URLs. The
+        // publisher's file URL stays first, with one official CDN fallback.
+        if let Some(fallback) = crate::curseforge::download_fallback(url) {
+            urls.push(fallback);
+        }
+        Ok(urls)
+    }
     async fn order_candidates(
         &self,
         key: &str,
@@ -563,8 +581,9 @@ impl Downloader {
                     Ok(v) => return Ok(v),
                     Err(e) => {
                         let certificate = crate::network::is_certificate_error(&e);
+                        let permanent = permanent_http_error(&e);
                         last = format!("{:#}", crate::network::explain_error(e));
-                        if certificate {
+                        if certificate || permanent {
                             break;
                         }
                     }
@@ -601,8 +620,9 @@ impl Downloader {
                     Ok(hash) => return Ok(hash),
                     Err(error) => {
                         let certificate = crate::network::is_certificate_error(&error);
+                        let permanent = permanent_http_error(&error);
                         last = format!("{:#}", crate::network::explain_error(error));
-                        if certificate {
+                        if certificate || permanent {
                             break;
                         }
                     }
@@ -856,7 +876,18 @@ impl Downloader {
                 let mut done = false;
                 let mut connection = self.clone();
                 let mut stalls = 0;
-                'sources: for url in self.ordered_urls(&file.url, cancel).await? {
+                'sources: for (source, url) in
+                    self.file_urls(&file.url, cancel).await?.iter().enumerate()
+                {
+                    if source > 0 && crate::curseforge::download_fallback(&file.url).is_some() {
+                        let message = format!("CurseForge 文件节点不可用，切换官方备用节点：{url}");
+                        sink(Event::new("warning", &message));
+                        let root = self.network_root.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let _ = crate::diagnostics::record_download_recovery(&root, &message);
+                        })
+                        .await?;
+                    }
                     for attempt in 0..=self.settings.retries {
                         let download = async {
                             let mut offset = partial_size(&part).await?;
@@ -865,7 +896,7 @@ impl Downloader {
                                 offset = 0;
                             }
                             let mut response =
-                                connection.watched_response(&url, offset, stalls).await?;
+                                connection.watched_response(url, offset, stalls).await?;
                             // A stale partial or a server without range support can
                             // safely restart, never append a whole response to it.
                             if response.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE
@@ -880,8 +911,7 @@ impl Downloader {
                                 ));
                                 tokio::fs::remove_file(&part).await?;
                                 offset = 0;
-                                response =
-                                    connection.watched_response(&url, offset, stalls).await?;
+                                response = connection.watched_response(url, offset, stalls).await?;
                             }
                             let response = response.error_for_status()?;
                             let length =
@@ -979,18 +1009,19 @@ impl Downloader {
                                 let stalled =
                                     e.downcast_ref::<crate::download_stall::Stalled>().is_some();
                                 let certificate = crate::network::is_certificate_error(&e);
+                                let permanent = permanent_http_error(&e);
                                 let e = crate::network::explain_error(e);
                                 // Invalid responses/hash failures may have discarded
                                 // the partial. Reflect the actual retained bytes.
                                 let bytes = self.partial_bytes(file).await?;
                                 file.emit(sink, "queued", bytes, file.size.max(bytes));
-                                if self.settings.adaptive_concurrency && !stalled {
+                                if self.settings.adaptive_concurrency && !stalled && !permanent {
                                     self.metrics.retries.fetch_add(1, Ordering::Relaxed);
                                 }
                                 errors.push(format!("{e:#}"));
-                                // A new attempt cannot fix this certificate. Still
-                                // allow a separately verified mirror to succeed.
-                                if certificate || attempt == self.settings.retries {
+                                // Repeating the same URL cannot fix a permanent
+                                // HTTP error or certificate. Try the next source.
+                                if certificate || permanent || attempt == self.settings.retries {
                                     break;
                                 }
                                 if stalled {
@@ -1537,6 +1568,117 @@ mod tests {
     }
     use sha1::{Digest, Sha1};
     use tokio::io::AsyncReadExt;
+
+    #[tokio::test]
+    async fn curseforge_file_sources_keep_api_choice_without_head_probes() {
+        let root = tempfile::tempdir().unwrap();
+        let d = Downloader::new(root.path(), Settings::default()).unwrap();
+        let url = "https://edge.forgecdn.net/files/9409/902/VerityCraft-MC-1.20.1-15.3.0.zip";
+        let cancel = CancellationToken::new();
+        let urls = d.file_urls(url, &cancel).await.unwrap();
+        assert_eq!(
+            urls,
+            [
+                url,
+                "https://mediafilez.forgecdn.net/files/9409/902/VerityCraft-MC-1.20.1-15.3.0.zip"
+            ]
+        );
+        assert!(
+            d.sources.lock().await.is_empty(),
+            "no unauthenticated HEAD probe"
+        );
+        assert_eq!(d.ordered_urls(url, &cancel).await.unwrap(), [url]);
+        cancel.cancel();
+        assert!(d.file_urls(url, &cancel).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn missing_file_is_not_retried_and_retains_partial_for_a_later_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let d = Downloader::new(
+            root.path(),
+            Settings {
+                proxy_mode: "none".into(),
+                retries: 2,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (url, server) = crate::test_http::serve_with_headers(vec![
+            (404, String::new(), "missing".into()),
+            (206, "Content-Range: bytes 3-7/8\r\n".into(), "ified".into()),
+        ])
+        .await;
+        let file = FileSpec {
+            url,
+            path: root.path().join("game/pack.zip"),
+            hash: hex::encode(Sha1::digest(b"verified")),
+            sha256: false,
+            size: 8,
+        };
+        let part = d.cache_path(&file).unwrap().with_extension("part");
+        fs::create_dir_all(part.parent().unwrap()).unwrap();
+        fs::write(&part, b"ver").unwrap();
+        let sink: EventSink = Arc::new(|_| {});
+        let cancel = CancellationToken::new();
+        let error = d.file(&file, &cancel, &sink).await.unwrap_err();
+        assert_eq!(error.to_string().matches("(404").count(), 1, "{error}");
+        assert_eq!(fs::read(&part).unwrap(), b"ver");
+        assert!(!file.path.exists());
+        assert_eq!(d.metrics.retries.load(Ordering::Relaxed), 0);
+        error.downcast_ref::<DownloadFailures>().unwrap().files[0]
+            .run(&cancel, &sink)
+            .await
+            .unwrap();
+        assert_eq!(fs::read(&file.path).unwrap(), b"verified");
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(
+            requests
+                .iter()
+                .all(|r| r.to_ascii_lowercase().contains("range: bytes=3-"))
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires CurseForge application credential and downloads a 75 MB archive into a temporary directory"]
+    async fn live_curseforge_archive_download_uses_official_cdn_fallback() {
+        let root = tempfile::tempdir().unwrap();
+        let settings = Settings {
+            retries: 0,
+            ..Default::default()
+        };
+        let d = Downloader::new(root.path(), settings.clone())
+            .unwrap()
+            .with_curseforge_key(root.path(), &settings, crate::curseforge::key().unwrap())
+            .unwrap();
+        let file = FileSpec {
+            url: "https://edge.forgecdn.net/files/9409/902/VerityCraft-MC-1.20.1-15.3.0.zip".into(),
+            path: root.path().join("pack.zip"),
+            hash: "3ffb7c13d257206839d052f16e801ac04e15199d".into(),
+            sha256: false,
+            size: 78_095_234,
+        };
+        let sink: EventSink = Arc::new(|event| {
+            if event.kind == "warning" {
+                eprintln!("{}", event.message);
+            }
+        });
+        d.file(&file, &CancellationToken::new(), &sink)
+            .await
+            .unwrap();
+        assert_eq!(fs::metadata(&file.path).unwrap().len(), file.size);
+        assert!(
+            Downloader::verified(&file.path, &file.hash, false, file.size)
+                .await
+                .unwrap()
+        );
+        let mut zip = zip::ZipArchive::new(fs::File::open(&file.path).unwrap()).unwrap();
+        let manifest: serde_json::Value =
+            serde_json::from_reader(zip.by_name("manifest.json").unwrap()).unwrap();
+        assert_eq!(manifest["manifestType"], "minecraftModpack");
+        assert_eq!(manifest["minecraft"]["version"], "1.20.1");
+    }
 
     #[tokio::test]
     async fn failed_file_does_not_abort_neighbors_and_retry_only_fetches_that_file() {
@@ -2257,6 +2399,37 @@ mod tests {
                         .all(|e| !e.unwrap().file_type().is_file())
                 );
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn retryable_client_errors_still_retry() {
+        for status in [408, 425, 429] {
+            let root = tempfile::tempdir().unwrap();
+            let d = Downloader::new(
+                root.path(),
+                Settings {
+                    proxy_mode: "none".into(),
+                    retries: 1,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let (url, server) =
+                crate::test_http::serve(vec![(status, "retry".into()), (200, "ok".into())]).await;
+            let file = FileSpec {
+                url,
+                path: root.path().join("file.jar"),
+                hash: hex::encode(Sha1::digest(b"ok")),
+                sha256: false,
+                size: 2,
+            };
+            let sink: EventSink = Arc::new(|_| {});
+            d.file(&file, &CancellationToken::new(), &sink)
+                .await
+                .unwrap();
+            assert_eq!(server.await.unwrap().len(), 2, "HTTP {status}");
+            assert_eq!(fs::read(&file.path).unwrap(), b"ok");
         }
     }
 

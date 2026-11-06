@@ -26,7 +26,7 @@ async fn request(client: &Client, method: Method, url: &str, token: &str) -> Res
         .send()
         .await
         .context(if changing {
-            "改名请求未完成，请刷新账户确认结果后再试"
+            "改名请求未完成，请稍后确认账户名称再试"
         } else {
             "无法检查玩家名称，请检查网络后重试"
         })?;
@@ -120,7 +120,7 @@ async fn rename_at(
         .context("玩家改名服务未返回新名称")?;
     ensure!(
         changed.eq_ignore_ascii_case(name),
-        "玩家改名服务返回的名称不匹配，请刷新账户确认结果"
+        "玩家改名服务返回的名称不匹配，请稍后确认账户名称"
     );
     validate_name(changed)?;
     Ok(Some(changed.into()))

@@ -5,6 +5,7 @@ import { parse, compileScript } from "@vue/compiler-sfc";
 import ts from "typescript";
 import { createRenderer, reactive } from "vue";
 import { deferred, flush } from "./helpers/appSettingsFixture.mjs";
+import { resourceRemovalKey } from "../src/useResourceTransfer.ts";
 
 const moduleUrl = (source) =>
   `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
@@ -49,7 +50,7 @@ const details = (path) => ({
     },
   ],
 });
-function item(options = {}, component = Item) {
+function item(options = {}, component = Item, remove) {
   const events = [];
   const props = reactive({
     instanceId: "a",
@@ -87,6 +88,7 @@ function item(options = {}, component = Item) {
       return () => null;
     },
   });
+  if (remove) app.provide(resourceRemovalKey, remove);
   app.mount({});
   const cache = [];
   return {
@@ -202,6 +204,104 @@ function nodes(vnode) {
       : vnode.children;
   return [vnode, ...(typeof children === "object" ? nodes(children) : [])];
 }
+
+test("delete/configure share the hover group before expand and never expand the row on click", async () => {
+  const removed = [],
+    reads = [];
+  const pending = deferred();
+  const h = item(
+    {
+      modActions: {},
+      file: {
+        name: "Example",
+        file_name: "example.jar",
+        enabled: true,
+        size: 123,
+        has_config: true,
+      },
+      loadMetadata: async (...args) => {
+        reads.push(args);
+        return details("/mods/example.jar");
+      },
+    },
+    RenderedItem,
+    async (sources) => {
+      removed.push(sources);
+      await pending.promise;
+    },
+  );
+  try {
+    const buttons = nodes(h.render()).filter((node) => node.type === "button");
+    const trash = buttons.find((node) =>
+      node.props?.class?.includes("content-item-remove"),
+    );
+    const expand = buttons.find(
+      (node) => node.props?.class === "content-item-expand",
+    );
+    const configure = buttons.find((node) =>
+      node.props?.class?.includes("content-item-config"),
+    );
+    assert.ok(buttons.indexOf(configure) >= 0);
+    assert.ok(buttons.indexOf(configure) < buttons.indexOf(trash));
+    assert.ok(buttons.indexOf(trash) < buttons.indexOf(expand));
+    const group = nodes(h.render()).find(
+      (node) => node.props?.class === "content-item-actions",
+    );
+    assert.equal(group.props.style["--action-count"], 2);
+    let stopped = false;
+    const event = {
+      stopPropagation() {
+        stopped = true;
+      },
+    };
+    const removal = trash.props.onClick(event);
+    await trash.props.onClick(event);
+    assert.equal(removed.length, 1, "double clicking must not delete twice");
+    assert.equal(stopped, true);
+    assert.deepEqual(reads, []);
+    assert.equal(
+      nodes(h.render()).find((n) => n.props?.class === "content-item-expand")
+        .props["aria-expanded"],
+      false,
+    );
+    pending.resolve();
+    await removal;
+    h.props.canRemove = false;
+    assert.equal(
+      nodes(h.render()).some((node) =>
+        node.props?.class?.includes("content-item-remove"),
+      ),
+      false,
+    );
+  } finally {
+    pending.resolve();
+    h.dispose();
+  }
+});
+
+test("an installed item in the global manager cannot remove but a version item still can", async () => {
+  assert.equal(
+    Item.props.canRemove.default,
+    true,
+    "omitting the Boolean prop in VersionManager must preserve removal",
+  );
+  const removed = [];
+  const h = item({ canRemove: false }, Item, async (sources) =>
+    removed.push(sources),
+  );
+  try {
+    assert.equal(h.ui.removable.value, false);
+    assert.equal(h.ui.resourceSource().removable, false);
+    await h.ui.removeResource();
+    assert.deepEqual(removed, []);
+    h.props.canRemove = undefined;
+    assert.equal(h.ui.removable.value, true);
+    await h.ui.removeResource();
+    assert.equal(removed.length, 1);
+  } finally {
+    h.dispose();
+  }
+});
 
 test("filenames are plain text; expanding a row does not open a file manager", async () => {
   for (const name of ["Example", "example.jar"]) {
@@ -910,7 +1010,9 @@ test("configuration-only Mods keep the editor without a metadata arrow, and a mi
   );
   try {
     const buttons = () =>
-      nodes(h.render()).filter((n) => n.props?.class === "content-item-expand");
+      nodes(h.render()).filter((n) =>
+        n.props?.class?.includes("content-item-config"),
+      );
     assert.equal(buttons().length, 1);
     await buttons()[0].props.onClick({ stopPropagation() {} });
     assert.ok(nodes(h.render()).some((n) => n.props?.class === "mod-config"));

@@ -154,3 +154,44 @@ test("only overflow reserves the ninth slot for its arrow", () => {
     assert.equal(visible, count <= 9 ? count : 8);
   }
 });
+test("vertical dock sorting uses height, remains stable after reordering and accounts for scroll", () => {
+  const positions = (list) =>
+    list.map((item, index) => ({
+      id: item.id,
+      left: 100,
+      top: 120 + index * 60 - 36,
+      width: 56,
+      height: 56,
+    }));
+  assert.equal(
+    instanceGridDropTarget(positions(items), "a", 100, 180, "vertical"),
+    "c",
+  );
+  assert.equal(
+    instanceGridDropTarget(positions(items), "a", 156, 180, "vertical"),
+    "c",
+  );
+  for (const source of items) {
+    for (let y = 70; y < 350; y += 3) {
+      const target = instanceGridDropTarget(
+        positions(items),
+        source.id,
+        128,
+        y,
+        "vertical",
+      );
+      const preview = moveInstanceBefore(items, source.id, target);
+      const again = instanceGridDropTarget(
+        positions(preview),
+        source.id,
+        128,
+        y,
+        "vertical",
+      );
+      assert.deepEqual(
+        ids(moveInstanceBefore(items, source.id, again)),
+        ids(preview),
+      );
+    }
+  }
+});

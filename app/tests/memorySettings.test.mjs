@@ -45,6 +45,7 @@ test("memory defaults to auto, previews each preset, and remembers custom values
     await ui.edit(instance);
     ui.form.memory_mode = "custom";
     assert.equal(ui.form.memory_mb, 7168);
+    await flush();
     ui.form.memory_mb = 0;
     assert.equal(ui.invalidCustomMemory.value, true);
     const writes = fixture.calls.filter((c) => c.op === "update").length;

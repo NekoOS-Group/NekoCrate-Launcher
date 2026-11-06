@@ -8,6 +8,8 @@ struct Selection {
     minecraft: String,
     loader: Option<ModLoader>,
     resources: Vec<ResourceSelection>,
+    #[serde(default)]
+    local: Vec<ResourceCopySource>,
     plan: Option<String>,
 }
 fn path(game: &Path, version: &str) -> Result<PathBuf> {
@@ -28,6 +30,7 @@ impl Launcher {
         minecraft: &str,
         loader: Option<ModLoader>,
         resources: Vec<ResourceSelection>,
+        local: Vec<ResourceCopySource>,
     ) -> Result<()> {
         let _operation = self
             .0
@@ -47,7 +50,7 @@ impl Launcher {
             "目标版本已变化，请重新选择资源"
         );
         anyhow::ensure!(
-            !resources.is_empty() && resources.len() <= 128,
+            resources.len() + local.len() > 0 && resources.len() + local.len() <= 128,
             "请预选 1–128 项资源"
         );
         for pick in &resources {
@@ -69,6 +72,18 @@ impl Launcher {
                 "请先选择 Mod 加载器"
             );
         }
+        for source in &local {
+            anyhow::ensure!(
+                source.kind != ResourceKind::Datapacks,
+                "数据包需要目标存档，请在版本安装后拖入存档"
+            );
+            anyhow::ensure!(
+                source.kind != ResourceKind::Mods || loader.is_some(),
+                "请先选择 Mod 加载器"
+            );
+            // Only accept listed resources, never paths supplied by the frontend.
+            self.resource_export_path(source)?;
+        }
         let path = path(&self.available_game_dir(id)?, version)?;
         if path.exists() {
             let previous: Selection = storage::read_json(&path)?;
@@ -76,7 +91,8 @@ impl Launcher {
             anyhow::ensure!(
                 previous.minecraft == minecraft
                     && previous.loader == loader
-                    && previous.resources == resources,
+                    && previous.resources == resources
+                    && previous.local == local,
                 "此版本已有待安装资源，请先继续原安装任务"
             );
             return Ok(());
@@ -87,6 +103,7 @@ impl Launcher {
                 minecraft: minecraft.into(),
                 loader,
                 resources,
+                local,
                 plan: None,
             },
         )?;
@@ -120,6 +137,19 @@ impl Launcher {
             let mut plan = self
                 .resolve_resource_selection(target, &selection.resources, None, cancel)
                 .await?;
+            if !selection.local.is_empty() {
+                let worker = self.clone();
+                let target = plan.target.clone();
+                let sources = selection.local.clone();
+                let token = cancel.clone();
+                let local = tokio::task::spawn_blocking(move || {
+                    worker.resolve_resource_copies(target, &sources, None, &token)
+                })
+                .await??;
+                plan.entries.extend(local.entries);
+                plan.conflicts.extend(local.conflicts);
+                plan.warnings.extend(local.warnings);
+            }
             let token = cancel.clone();
             plan = tokio::task::spawn_blocking(move || {
                 install::preflight(&mut plan, &token)?;

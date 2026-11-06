@@ -1,7 +1,111 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { resourceCopyDestination } from "../src/useResourceTransfer.ts";
-import { settingsFixture } from "./helpers/appSettingsFixture.mjs";
+import { settingsFixture, flush } from "./helpers/appSettingsFixture.mjs";
+
+test("new-version resource surface accepts local and library resources without an installed target", () => {
+  const surface = {
+    dataset: {
+      dropKind: "selection",
+      dropLoader: "fabric",
+      dropDisabled: "false",
+    },
+  };
+  const element = {
+    closest: (selector) =>
+      selector.includes("data-drop-kind") ? surface : null,
+  };
+  const source = {
+    kind: "mods",
+    instance: "source",
+    version: "old",
+    file: "cat.jar",
+    name: "Cat",
+  };
+  for (const global of [false, true]) {
+    assert.deepEqual(
+      resourceCopyDestination(element, { ...source, global }, [], []),
+      { selection: true, instance: "", version: "" },
+    );
+  }
+  assert.equal(
+    resourceCopyDestination(element, { ...source, kind: "datapacks" }, [], []),
+    undefined,
+  );
+  surface.dataset.dropLoader = "vanilla";
+  assert.equal(resourceCopyDestination(element, source, [], []), undefined);
+  assert.ok(
+    resourceCopyDestination(
+      element,
+      { ...source, kind: "resourcepacks" },
+      [],
+      [],
+    ),
+  );
+  surface.dataset.dropDisabled = "true";
+  assert.equal(
+    resourceCopyDestination(
+      element,
+      { ...source, kind: "resourcepacks" },
+      [],
+      [],
+    ),
+    undefined,
+  );
+});
+
+test("dragging adds a deduplicated draft without copying; destination changes preserve it and game changes clear it", async () => {
+  const f = await settingsFixture();
+  try {
+    const ui = f.context;
+    ui.newVersion(ui.instances.value[0]);
+    ui.form.version = "1.20.1";
+    await flush();
+    const source = {
+      kind: "resourcepacks",
+      instance: "instance-a",
+      version: "1.21.1",
+      file: "Cat.zip",
+      name: "Cat",
+    };
+    const cached = {
+      ...source,
+      kind: "shaderpacks",
+      global: true,
+      instance: "",
+      version: "",
+      file: "Ice.zip",
+    };
+    const target = { selection: true, instance: "", version: "" };
+    await ui.copyDraggedResource(source, target);
+    await ui.copyDraggedResources([source, cached], target);
+    assert.deepEqual(ui.selectedLocalResources.value, [source, cached]);
+    assert.equal(
+      f.calls.some((call) =>
+        [
+          "copy_resource",
+          "copy_resources",
+          "resource_manager",
+          "queue_version_resources",
+        ].includes(call.op),
+      ),
+      false,
+    );
+    ui.switchDownloadTarget(null);
+    await flush();
+    assert.equal(ui.selectedLocalResources.value.length, 2);
+    ui.removeSelectedLocalResource(source);
+    assert.deepEqual(ui.selectedLocalResources.value, [cached]);
+    await ui.copyDraggedResource({ ...source, kind: "mods" }, target);
+    assert.equal(ui.selectedLocalResources.value.length, 1);
+    assert.equal(ui.error.value, "请先选择 Mod 加载器");
+    ui.form.version = "1.21.1";
+    await flush();
+    assert.equal(ui.selectedLocalResources.value.length, 0);
+  } finally {
+    f.dispose();
+  }
+});
 
 test("Mod drop resolves only explicit, installed, idle destinations other than the source", () => {
   const source = {
@@ -50,7 +154,9 @@ test("Mod copy sends a listed identity, refreshes views on success, and retains 
   const f = await settingsFixture();
   try {
     let refreshed = 0;
-    f.context.versionManager.value = { refresh: async () => refreshed++ };
+    f.context.setVersionManager("test-window", {
+      refresh: async () => refreshed++,
+    });
     f.handlers.copy_resource = () => true;
     const selected = f.context.instances.value[0].selected_version;
     const source = {

@@ -14,7 +14,7 @@ use std::{
 mod packs;
 #[cfg(test)]
 mod tests;
-mod world;
+pub(crate) mod world;
 
 const TEXT_LIMIT: u64 = 1024 * 1024;
 pub(super) const MOD_DESCRIPTORS: [&str; 5] = [
@@ -141,29 +141,8 @@ impl Launcher {
         file: &str,
     ) -> Result<ContentMetadata> {
         let path = self.listed_content_path(id, version, kind, file)?;
-        let info = fs::metadata(&path)?;
-        let mut sources = match kind {
-            ContentKind::Unresolved => bail!("此文件尚未下载，暂无本地元数据"),
-            ContentKind::Mods => read_mod(&path)?,
-            ContentKind::Datapacks => read_pack(&path)?,
-            ContentKind::Resourcepacks | ContentKind::Shaderpacks => packs::read(&path, kind)?,
-            ContentKind::Saves => world::read(&path),
-        };
-        if info.is_dir() {
-            for source in &mut sources {
-                source.revealable =
-                    contained(&path, &path.join(&source.source)).is_ok_and(|p| p.is_file());
-            }
-        }
         let (working, _) = self.content_location(id, version)?;
-        if let Some(source) = crate::resources::provenance_source(&working, &path)? {
-            sources.push(source);
-        }
-        Ok(ContentMetadata {
-            path,
-            size: info.is_file().then_some(info.len()),
-            sources,
-        })
+        content_metadata(path, &working, kind)
     }
 
     pub fn version_content_path(
@@ -193,25 +172,8 @@ impl Launcher {
         file: &str,
         source: &str,
     ) -> Result<String> {
-        check_source(kind, source)?;
         let path = self.listed_content_path(id, version, kind, file)?;
-        if matches!(kind, ContentKind::Saves) {
-            return world::raw(&path, source);
-        }
-        let bytes = if path.is_dir() {
-            bounded(
-                fs::File::open(contained(&path, &path.join(source))?)?,
-                TEXT_LIMIT,
-            )?
-        } else {
-            let mut archive = zip::ZipArchive::new(fs::File::open(path)?)?;
-            let entry = archive.by_name(source)?;
-            if entry.size() > TEXT_LIMIT {
-                bail!("元数据内容过大");
-            }
-            bounded(entry, TEXT_LIMIT)?
-        };
-        Ok(String::from_utf8(bytes)?)
+        content_source(path, kind, source)
     }
 
     fn listed_content_path(
@@ -231,7 +193,57 @@ impl Launcher {
     }
 }
 
-fn check_source(kind: ContentKind, source: &str) -> Result<()> {
+pub(crate) fn content_source(path: PathBuf, kind: ContentKind, source: &str) -> Result<String> {
+    check_source(kind, source)?;
+    if matches!(kind, ContentKind::Saves) {
+        return world::raw(&path, source);
+    }
+    let bytes = if path.is_dir() {
+        bounded(
+            fs::File::open(contained(&path, &path.join(source))?)?,
+            TEXT_LIMIT,
+        )?
+    } else {
+        let mut archive = zip::ZipArchive::new(fs::File::open(path)?)?;
+        let entry = archive.by_name(source)?;
+        if entry.size() > TEXT_LIMIT {
+            bail!("元数据内容过大");
+        }
+        bounded(entry, TEXT_LIMIT)?
+    };
+    Ok(String::from_utf8(bytes)?)
+}
+
+pub(crate) fn content_metadata(
+    path: PathBuf,
+    working: &Path,
+    kind: ContentKind,
+) -> Result<ContentMetadata> {
+    let info = fs::metadata(&path)?;
+    let mut sources = match kind {
+        ContentKind::Unresolved => bail!("此文件尚未下载，暂无本地元数据"),
+        ContentKind::Mods => read_mod(&path)?,
+        ContentKind::Datapacks => read_pack(&path)?,
+        ContentKind::Resourcepacks | ContentKind::Shaderpacks => packs::read(&path, kind)?,
+        ContentKind::Saves => world::read(&path),
+    };
+    if info.is_dir() {
+        for source in &mut sources {
+            source.revealable =
+                contained(&path, &path.join(&source.source)).is_ok_and(|p| p.is_file());
+        }
+    }
+    if let Some(source) = crate::resources::provenance_source(working, &path)? {
+        sources.push(source);
+    }
+    Ok(ContentMetadata {
+        path,
+        size: info.is_file().then_some(info.len()),
+        sources,
+    })
+}
+
+pub(crate) fn check_source(kind: ContentKind, source: &str) -> Result<()> {
     let allowed = match kind {
         ContentKind::Unresolved => false,
         ContentKind::Mods => MOD_DESCRIPTORS.contains(&source),
@@ -353,6 +365,8 @@ fn read_mod(path: &Path) -> Result<Vec<ContentSource>> {
             let bytes = bounded(&mut entry, TEXT_LIMIT)?;
             let value: Value = if descriptor.ends_with(".toml") {
                 serde_json::to_value(toml::from_str::<toml::Value>(std::str::from_utf8(&bytes)?)?)?
+            } else if descriptor == "fabric.mod.json" {
+                crate::fabric_metadata::parse(&bytes)?
             } else {
                 serde_json::from_slice(&bytes)?
             };

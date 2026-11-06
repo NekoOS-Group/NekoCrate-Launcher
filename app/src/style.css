@@ -126,6 +126,7 @@ input::placeholder {
   --shadow: #00000028;
   --glow: color-mix(in srgb, var(--blue) 9%, transparent);
   --control-height: 44px;
+  --account-avatar-size: 40px;
   --panel-inset: 28px;
   --edge: 32px;
   --motion-ease: cubic-bezier(0.22, 1, 0.36, 1);
@@ -190,11 +191,13 @@ input::placeholder {
     0 8px 32px var(--shadow);
 }
 .account-card::before,
+.account-dropdown::before,
 .launch-control::before,
 .utility-panel::before,
 .modal::before,
 .log-panel::before,
 .account-card::after,
+.account-dropdown::after,
 .launch-control::after,
 .utility-panel::after,
 .modal::after,
@@ -208,6 +211,7 @@ input::placeholder {
   opacity: 0.7;
 }
 .account-card::before,
+.account-dropdown::before,
 .launch-control::before,
 .utility-panel::before,
 .modal::before,
@@ -218,6 +222,7 @@ input::placeholder {
   border-left-width: 1px;
 }
 .account-card::after,
+.account-dropdown::after,
 .launch-control::after,
 .utility-panel::after,
 .modal::after,
@@ -260,10 +265,16 @@ input::placeholder {
   gap: 12px;
   z-index: 3;
 }
-.account-card {
+.topbar.account-menu-open {
+  z-index: 30;
+}
+.account-card,
+.account-dropdown {
   --glass-fill: var(--control-glass-fill);
+}
+.account-card {
   display: grid;
-  grid-template-columns: 40px minmax(0, 1fr) 14px;
+  grid-template-columns: var(--account-avatar-size) minmax(0, 1fr) 14px;
   align-items: center;
   gap: 12px;
   width: 224px;
@@ -281,13 +292,20 @@ input::placeholder {
 .account-chevron {
   color: var(--blue);
   opacity: 0.6;
+  transition:
+    transform var(--motion-panel) var(--motion-ease),
+    opacity var(--motion-fade) var(--motion-ease);
+}
+.account-card[aria-expanded="true"] .account-chevron {
+  transform: rotate(180deg);
+  opacity: 1;
 }
 .account-avatar {
   position: relative;
   display: grid;
   place-items: center;
-  width: 40px;
-  height: 40px;
+  width: var(--account-avatar-size);
+  height: var(--account-avatar-size);
   border-radius: 0;
   overflow: visible;
   background: color-mix(in srgb, var(--cyan) 18%, transparent);
@@ -295,8 +313,8 @@ input::placeholder {
 }
 .account-avatar img {
   display: block;
-  width: 40px;
-  height: 40px;
+  width: var(--account-avatar-size);
+  height: var(--account-avatar-size);
   image-rendering: pixelated;
 }
 .account-identity {
@@ -1143,6 +1161,64 @@ input::placeholder {
 .dialog-heading:focus {
   outline: none;
 }
+/* Keyboard focus follows the glass controls' content instead of drawing an
+   extra rectangle. Keep native outlines in forced-colors mode, where shadows
+   are suppressed by the OS. This also covers floating menus inside dialogs. */
+@media (forced-colors: none) {
+  :is(.overlay-dialog, .tool-window, .settings-bubble):focus-visible,
+  :is(.overlay-dialog, .tool-window, .settings-bubble) :focus-visible {
+    outline: none !important;
+  }
+  :is(.overlay-dialog, .tool-window, .settings-bubble)
+    :is(
+      button,
+      a[href],
+      summary,
+      input,
+      textarea,
+      select,
+      [role="button"],
+      [role="tab"],
+      [role="option"]
+    ):focus-visible {
+    --keyboard-focus-color: var(
+      --tab-color,
+      var(
+        --category-accent,
+        var(--tile-color, var(--resource-color, var(--blue)))
+      )
+    );
+    --keyboard-focus-glow: color-mix(
+      in srgb,
+      var(--keyboard-focus-color) 65%,
+      transparent
+    );
+    text-shadow: 0 0 10px var(--keyboard-focus-glow);
+  }
+  :is(.overlay-dialog, .tool-window, .settings-bubble) .danger:focus-visible {
+    --keyboard-focus-color: var(--danger);
+  }
+  :is(.overlay-dialog, .tool-window, .settings-bubble)
+    :is(
+      button,
+      a[href],
+      summary,
+      [role="button"],
+      [role="tab"],
+      [role="option"]
+    ):focus-visible
+    :is(svg, img) {
+    filter: drop-shadow(0 0 5px var(--keyboard-focus-glow));
+  }
+  :is(.overlay-dialog, .tool-window, .settings-bubble)
+    :is(input, textarea, select):focus-visible {
+    caret-color: var(--keyboard-focus-color);
+  }
+  /* A tool frame can receive focus before its first interactive control. */
+  .tool-window-frame:focus-visible {
+    box-shadow: 0 0 22px color-mix(in srgb, var(--blue) 20%, transparent);
+  }
+}
 .dialog-panel-enter-active,
 .dialog-panel-leave-active {
   transition: opacity var(--motion-fade) var(--motion-ease);
@@ -1202,9 +1278,6 @@ input::placeholder {
     0 24px 80px #00000060;
 }
 .modal {
-  width: 480px;
-}
-.account-panel {
   width: 480px;
 }
 .utility-panel-header,
@@ -1552,25 +1625,33 @@ input:read-only {
   flex-wrap: wrap;
   justify-content: center;
   align-items: flex-start;
-  align-content: center;
-  gap: 16px;
-  min-height: 176px;
-  padding: 12px 0 20px;
+  align-content: flex-start;
+  gap: 8px;
+  padding: 0;
 }
-.account-choice,
-.account-picker > .account-add {
-  flex: 0 0 104px;
-  width: 104px;
-}
-.account-picker > .account-add:only-child {
-  justify-content: center;
+.account-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
 }
 .account-choice {
   position: relative;
+  display: grid;
+  grid-template-columns: var(--account-avatar-size) minmax(0, 1fr) 24px;
+  align-items: center;
+  gap: 12px;
   min-width: 0;
+  padding: 6px 3px;
 }
 .account-choice-move {
   transition: transform var(--motion-row) var(--motion-ease);
+}
+.account-choice-enter-active {
+  transition: opacity var(--motion-fade) var(--motion-ease);
+}
+.account-choice-enter-from {
+  opacity: 0;
 }
 .account-choice-leave-active {
   animation: none;
@@ -1586,16 +1667,20 @@ input:read-only {
 .account-select,
 .account-add {
   display: flex;
-  flex-direction: column;
   align-items: center;
   gap: 12px;
   width: 100%;
-  min-height: 112px;
-  padding: 12px;
-  border: 1px solid transparent;
+  min-height: 40px;
+  padding: 0;
+  border: 0;
   border-radius: 0;
   background: transparent;
   color: var(--ink);
+  text-align: left;
+  font-size: 13px;
+}
+.account-select {
+  grid-area: 1 / 1 / 2 / -1;
 }
 .account-select:hover:not(:disabled) {
   border-color: transparent;
@@ -1621,17 +1706,14 @@ input:read-only {
     drop-shadow(0 0 14px #ffffff88);
 }
 .account-add {
-  border: 0;
+  padding: 6px 3px;
+  color: var(--muted);
 }
 .account-add:hover:not(:disabled) .account-add-icon {
   color: var(--blue);
 }
 .account-add:hover:not(:disabled) .account-add-icon > svg {
   filter: drop-shadow(0 0 5px color-mix(in srgb, var(--blue) 60%, transparent));
-}
-.account-add:not(:only-child)::after {
-  content: "";
-  height: 20px;
 }
 .account-add-icon {
   border: 1px solid var(--glass-stroke);
@@ -1644,14 +1726,14 @@ input:read-only {
   display: grid;
   place-items: center;
   flex-shrink: 0;
-  width: 56px;
-  height: 56px;
+  width: var(--account-avatar-size);
+  height: var(--account-avatar-size);
   color: var(--muted);
 }
 .account-face {
   display: block;
-  width: 56px;
-  height: 56px;
+  width: var(--account-avatar-size);
+  height: var(--account-avatar-size);
   border-radius: 0;
   image-rendering: pixelated;
 }
@@ -1665,7 +1747,8 @@ input:read-only {
   box-sizing: content-box;
   pointer-events: none;
 }
-.account-avatar > .guest-avatar-mark {
+.account-avatar > .guest-avatar-mark,
+.account-avatar-frame > .guest-avatar-mark {
   right: -3px;
   bottom: -3px;
   z-index: 1;
@@ -1688,10 +1771,18 @@ input:read-only {
     opacity var(--motion-fade) var(--motion-ease),
     transform var(--motion-panel) var(--motion-ease);
 }
-.account-choice:hover .account-name,
-.account-choice:focus-within .account-name {
+.account-choice .account-name {
+  position: relative;
+  grid-area: 1 / 2;
+  top: auto;
+  left: auto;
+  z-index: 1;
+  font-size: 13px;
+  line-height: 22px;
+  font-family: var(--mono);
   opacity: 1;
   transform: none;
+  pointer-events: auto;
 }
 .guest-name-button,
 .account-name-button {
@@ -1699,7 +1790,7 @@ input:read-only {
   border: 0;
   background: transparent;
   color: var(--ink);
-  text-align: center;
+  text-align: left;
 }
 .account-choice:hover .guest-name-button,
 .account-choice:focus-within .guest-name-button,
@@ -1719,19 +1810,20 @@ input:read-only {
   text-shadow: 0 0 8px color-mix(in srgb, var(--blue) 40%, transparent);
 }
 .guest-name-input {
-  position: absolute;
-  top: 78px;
-  left: 0;
+  position: relative;
+  grid-area: 1 / 2;
+  z-index: 1;
   width: 100%;
   min-width: 0;
   height: 24px;
-  padding: 1px 4px;
+  padding: 1px 0;
   border-width: 0 0 1px;
   background: transparent;
   color: var(--ink);
-  font-size: 12px;
+  font-size: 13px;
+  font-family: var(--mono);
   line-height: 20px;
-  text-align: center;
+  text-align: left;
 }
 .guest-name-input:focus {
   border-color: var(--blue);
@@ -1739,11 +1831,11 @@ input:read-only {
   box-shadow: none;
 }
 .account-name-editor {
-  position: absolute;
-  top: 78px;
-  left: 50%;
-  transform: translateX(-50%);
-  width: 144px;
+  position: relative;
+  grid-area: 1 / 2;
+  z-index: 1;
+  min-width: 0;
+  width: 100%;
   display: flex;
   align-items: center;
   border-bottom: 1px solid var(--blue);
@@ -1753,15 +1845,16 @@ input:read-only {
   width: 0;
   min-width: 0;
   height: 24px;
-  padding: 1px 2px;
+  padding: 1px 0;
   border: 0;
   outline: none;
   box-shadow: none;
   background: transparent;
   color: var(--ink);
-  font-size: 12px;
+  font-size: 13px;
+  font-family: var(--mono);
   line-height: 20px;
-  text-align: center;
+  text-align: left;
 }
 .account-name-editor .icon-button {
   flex: 0 0 24px;
@@ -1771,123 +1864,27 @@ input:read-only {
   color: var(--blue);
 }
 .account-name-hint {
-  margin: -8px 0 0;
+  margin: 4px 0 0;
   color: var(--muted);
   font-size: 11px;
   line-height: 18px;
   text-align: center;
 }
 .account-choice .account-remove {
-  position: absolute;
-  top: -4px;
-  right: -4px;
+  position: relative;
+  grid-area: 1 / 3;
+  z-index: 1;
   width: 24px;
   height: 24px;
   border-radius: 0;
   opacity: 0;
+  pointer-events: none;
   color: var(--danger);
 }
 .account-choice:hover .account-remove,
 .account-choice:focus-within .account-remove {
   opacity: 1;
-}
-.account-authorizing .utility-panel-header {
-  margin-bottom: 0;
-  border-bottom-color: transparent;
-}
-.login-panel {
-  padding-top: 4px;
-  text-align: center;
-}
-.device-code {
-  display: grid;
-  grid-template-columns: 16px minmax(0, 1fr) 16px;
-  align-items: center;
-  width: 100%;
-  gap: 12px;
-  min-height: 76px;
-  padding: 12px 20px;
-  border: 1px solid var(--glass-stroke);
-  border-radius: 0;
-  background: color-mix(in srgb, var(--blue) 4%, transparent);
-  box-shadow: var(--glass-rim);
-  color: var(--blue);
-  transition:
-    border-color 180ms ease,
-    background-color 180ms ease,
-    box-shadow 180ms ease;
-}
-.device-code::before {
-  content: "";
-}
-.device-code-value {
-  padding-left: 0.12em;
-  font: 500 32px/44px var(--mono);
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.12em;
-  white-space: nowrap;
-  user-select: text;
-}
-.device-code > svg {
-  opacity: 0.6;
-  transition: opacity 180ms ease;
-}
-.device-code:hover {
-  border-color: var(--blue);
-  background: color-mix(in srgb, var(--blue) 7%, transparent);
-  box-shadow:
-    var(--glass-rim),
-    0 0 24px var(--glow);
-}
-.device-code:hover > svg,
-.device-code:focus-visible > svg {
-  opacity: 1;
-}
-.login-status {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-wrap: wrap;
-  gap: 4px 16px;
-  margin-top: 14px;
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 18px;
-}
-.waiting {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--blue);
-}
-.login-expiry {
-  font-variant-numeric: tabular-nums;
-}
-.login-address {
-  min-width: 0;
-  max-width: 100%;
-  gap: 6px;
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: 11px;
-}
-.login-address > span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.login-address > svg {
-  opacity: 0.6;
-}
-.login-address:hover {
-  color: var(--ink);
-}
-.login-footer {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin-top: 12px;
+  pointer-events: auto;
 }
 .task-row {
   display: flex;
@@ -1940,20 +1937,67 @@ input:read-only {
 .progress-track {
   margin-top: 12px;
 }
-.instance-settings,
-.global-settings,
 .download-panel {
   width: 560px;
 }
+.instance-settings,
+.global-settings {
+  --panel-inset: 16px;
+  --control-height: 34px;
+}
 .instance-settings {
-  overflow: visible;
+  width: 405px;
 }
 .instance-settings > form {
   overflow: visible;
 }
+.instance-settings .modal-header,
+.global-settings .utility-panel-header {
+  min-height: 56px;
+  margin-bottom: 12px;
+  padding-block: 10px;
+  gap: 12px;
+}
 .instance-settings .modal-header {
-  align-items: flex-start;
-  padding-block: 24px;
+  align-items: center;
+}
+:is(.instance-settings, .global-settings) .field {
+  gap: 4px;
+  font-size: 11px;
+  line-height: 18px;
+}
+:is(.instance-settings, .global-settings)
+  :is(.source-select-trigger, .field input:not([type="checkbox"])) {
+  font-size: 12px;
+  padding-inline: 9px;
+  border-radius: 5px;
+}
+.instance-settings .settings-heading {
+  gap: 10px;
+}
+.instance-settings
+  :is(
+    .instance-heading-icon,
+    .instance-heading-art,
+    .instance-heading-icon .instance-art
+  ) {
+  width: 40px;
+  height: 40px;
+}
+.instance-settings :is(.instance-name-button, .instance-name-input) {
+  height: 26px;
+  font-size: 15px;
+}
+.instance-settings .modal-fields {
+  padding-bottom: var(--panel-inset);
+}
+.instance-header-actions {
+  gap: 4px;
+  flex-shrink: 0;
+}
+.instance-header-actions .icon-button {
+  width: 32px;
+  height: 32px;
 }
 .settings-heading {
   display: flex;
@@ -2119,8 +2163,8 @@ input:read-only {
 }
 .instance-settings .modal-fields {
   display: grid;
-  grid-template-columns: 220px minmax(0, 1fr);
-  gap: 20px;
+  grid-template-columns: 184px minmax(0, 1fr);
+  gap: 12px;
 }
 .instance-settings .field {
   min-width: 0;
@@ -2165,13 +2209,8 @@ input:read-only {
 .instance-settings .input-action .icon-button {
   height: var(--control-height);
 }
-.instance-maintenance-actions {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  margin-right: auto;
-}
 .global-settings {
+  width: 360px;
   overflow-x: hidden;
   overflow-y: auto;
   scrollbar-width: none;
@@ -2441,24 +2480,24 @@ input:read-only {
 .global-settings .utility-panel-content {
   flex: 0 0 auto;
   overflow: visible;
-  padding-bottom: 24px;
+  padding-bottom: 16px;
 }
 .settings-form {
-  padding-top: 4px;
+  padding-top: 0;
 }
 .settings-tabs {
   display: flex;
   align-items: center;
   flex: 1;
-  gap: 28px;
+  gap: 24px;
 }
 .settings-tab {
-  min-height: 36px;
+  min-height: 32px;
   padding: 0;
   border: 0;
   background: transparent;
   color: var(--muted);
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 500;
   line-height: 24px;
   transition:
@@ -2471,10 +2510,10 @@ input:read-only {
   text-shadow: 0 0 14px var(--glow);
 }
 .settings-page {
-  min-height: 168px;
+  min-height: 0;
 }
 .settings-pages {
-  min-height: 244px;
+  min-height: 0;
 }
 .settings-page-enter-active,
 .settings-page-leave-active {
@@ -2498,17 +2537,17 @@ input:read-only {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 20px;
-  min-height: 48px;
+  gap: 12px;
+  min-height: 40px;
   color: var(--ink);
   font-size: 14px;
 }
 .settings-language {
   display: grid;
-  grid-template-columns: 168px minmax(0, 1fr);
+  grid-template-columns: 154px minmax(0, 1fr);
   align-items: end;
-  gap: 20px;
-  margin-bottom: 20px;
+  gap: 12px;
+  margin-bottom: 12px;
 }
 .settings-language .field {
   min-width: 0;
@@ -2536,6 +2575,21 @@ input:read-only {
 }
 .settings-update {
   align-items: flex-end;
+}
+.settings-layout {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 38px;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.settings-layout .text-button {
+  min-height: 32px;
+  gap: 6px;
+  font-size: 12px;
 }
 .settings-update-download {
   display: flex;
@@ -2565,9 +2619,9 @@ input:read-only {
 .settings-directory {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 10px;
   width: 100%;
-  padding: 10px 0;
+  padding: 8px 0 0;
   border: 0;
   background: transparent;
   color: var(--muted);
@@ -2589,8 +2643,10 @@ input:read-only {
 }
 .settings-directory small {
   display: block;
-  margin-top: 4px;
-  overflow-wrap: anywhere;
+  margin-top: 1px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font: 11px/18px var(--mono);
 }
 .settings-directory:hover:not(:disabled),
@@ -2600,7 +2656,7 @@ input:read-only {
 .settings-fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 20px;
+  gap: 12px;
   align-content: start;
 }
 .settings-fields .field {
@@ -2615,7 +2671,7 @@ input:read-only {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 12px;
   margin: 0;
   color: var(--muted);
   font-size: 12px;
@@ -2717,7 +2773,7 @@ input:read-only {
 .network-proxy {
   display: flex;
   align-items: flex-start;
-  gap: 16px;
+  gap: 12px;
 }
 .network-proxy-toggle {
   flex: 0 0 40px;
@@ -2735,16 +2791,16 @@ input:read-only {
 }
 .proxy-options-inner {
   display: grid;
-  grid-template-columns: 136px minmax(0, 1fr);
+  grid-template-columns: 112px minmax(0, 1fr);
   align-items: start;
-  gap: 16px;
+  gap: 12px;
   min-height: 0;
 }
 .proxy-auth-fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
-  margin-top: 16px;
+  gap: 12px;
+  margin-top: 10px;
 }
 .proxy-auth-fields input::placeholder {
   font-size: 11px;
@@ -2778,7 +2834,7 @@ input:read-only {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  min-height: 244px;
+  min-height: 208px;
   padding: 4px 0;
   text-align: center;
 }
@@ -3548,6 +3604,7 @@ input:read-only {
 @media (hover: none) {
   .account-choice .account-remove {
     opacity: 1;
+    pointer-events: auto;
   }
   .instance-dock .add-instance {
     width: 44px;

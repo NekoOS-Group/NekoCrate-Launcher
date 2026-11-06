@@ -4,10 +4,25 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from frontend_artifact import verify
+from frontend_artifact import verify, verify_compressed_window_icon
 
 
 class FrontendArtifactTests(unittest.TestCase):
+    def test_rejects_an_icon_left_embedded_after_runtime_replacement(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            binary = root / "nekocrate-launcher"
+            binary.write_bytes(b"native-code-compressed-icon")
+            with self.assertRaisesRegex(ValueError, "Missing build-time"):
+                verify_compressed_window_icon(binary)
+            reference = root / "build/nekocrate-desktop-fixture/out/window-icon.rgba"
+            reference.parent.mkdir(parents=True)
+            reference.write_bytes(bytes(range(256)))
+            verify_compressed_window_icon(binary)
+            binary.write_bytes(binary.read_bytes() + reference.read_bytes())
+            with self.assertRaisesRegex(ValueError, "Uncompressed window icon"):
+                verify_compressed_window_icon(binary)
+
     def test_rejects_dev031_nested_artifact(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

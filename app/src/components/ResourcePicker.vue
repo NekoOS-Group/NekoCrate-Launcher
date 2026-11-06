@@ -20,6 +20,10 @@ import CatalogTail from "./CatalogTail.vue";
 import { useCatalogFeed } from "../useCatalogFeed";
 import { t } from "../i18n";
 import { listRevealStyle } from "../listMotion";
+import {
+  resourceSourceKey,
+  type ResourceCopySource,
+} from "../useResourceTransfer";
 import type {
   ResourceKind,
   ResourcePlatform,
@@ -32,12 +36,14 @@ const props = defineProps<{
   minecraft: string;
   loader: { kind: string; version: string } | null;
   modelValue: readonly ResourceSelection[];
+  localResources?: readonly ResourceCopySource[];
   platform: ResourcePlatform;
   disabled: boolean;
   rpc: <T>(op: string, data?: Record<string, unknown>) => Promise<T>;
 }>();
 const emit = defineEmits<{
   "update:modelValue": [value: ResourceSelection[]];
+  removeLocalResource: [value: ResourceCopySource];
   back: [];
   error: [value: unknown];
   link: [url: string];
@@ -100,7 +106,12 @@ async function toggle(project: ResourceProject) {
   }
   const key = selectionKey(platform.value, project.id);
   if (pending.value.has(key)) return;
-  if (props.modelValue.length + pending.value.size >= 128) {
+  if (
+    props.modelValue.length +
+      (props.localResources?.length || 0) +
+      pending.value.size >=
+    128
+  ) {
     emit("error", t("最多预选 128 项资源"));
     return;
   }
@@ -117,6 +128,10 @@ async function toggle(project: ResourceProject) {
       compatibility !== JSON.stringify([props.minecraft, props.loader])
     )
       return;
+    if (props.modelValue.length + (props.localResources?.length || 0) >= 128) {
+      emit("error", t("最多预选 128 项资源"));
+      return;
+    }
     const version =
       versions.find((v) => v.release_type === "release") || versions[0];
     if (!version) {
@@ -161,7 +176,12 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="resource-picker">
+  <section
+    class="resource-picker"
+    data-drop-kind="selection"
+    :data-drop-disabled="disabled || !minecraft"
+    :data-drop-loader="loader?.kind || 'vanilla'"
+  >
     <Transition name="picker-heading" appear>
       <header class="picker-heading">
         <button
@@ -221,7 +241,11 @@ onBeforeUnmount(() => {
             :aria-pressed="selectedOnly"
             @click="selectedOnly = !selectedOnly"
           >
-            {{ t("已选 {count} 项", { count: modelValue.length }) }}
+            {{
+              t("已选 {count} 项", {
+                count: modelValue.length + (localResources?.length || 0),
+              })
+            }}
           </button>
         </div>
       </header>
@@ -288,9 +312,31 @@ onBeforeUnmount(() => {
               ></span
             ><X :size="16" />
           </button>
-          <span v-if="!modelValue.length" class="picker-empty">{{
-            t("尚未预选资源")
-          }}</span>
+          <button
+            v-for="(item, index) in localResources"
+            :key="resourceSourceKey(item)"
+            class="picker-card selected list-reveal-item"
+            :style="listRevealStyle(modelValue.length + index)"
+            :disabled="disabled"
+            :aria-label="`${t('移除')} ${item.name}`"
+            @click="$emit('removeLocalResource', item)"
+          >
+            <component
+              :is="
+                categories.find((c) => c.value === item.kind)?.icon || Package
+              "
+              :size="32"
+            />
+            <span
+              ><strong>{{ item.name }}</strong
+              ><small>{{ item.file }}</small></span
+            ><X :size="16" />
+          </button>
+          <span
+            v-if="!modelValue.length && !localResources?.length"
+            class="picker-empty"
+            >{{ t("尚未预选资源") }}</span
+          >
         </template>
         <template v-else>
           <div
@@ -424,6 +470,7 @@ onBeforeUnmount(() => {
 }
 .picker-search input {
   border: 0;
+  box-shadow: none;
   background: transparent;
   width: 100%;
   min-width: 0;

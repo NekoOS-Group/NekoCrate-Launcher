@@ -2565,7 +2565,7 @@ dependencies = [
 
 [[package]]
 name = "nekocrate-cli"
-version = "0.9.8-dev.1"
+version = "0.9.9-dev.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2577,15 +2577,17 @@ dependencies = [
 
 [[package]]
 name = "nekocrate-core"
-version = "0.9.8-dev.1"
+version = "0.9.9-dev.1"
 dependencies = [
  "anyhow",
+ "base64 0.23.1",
  "chrono",
  "directories",
  "fastnbt",
  "flate2",
  "futures-util",
  "hex",
+ "httparse",
  "keyring",
  "libc",
  "regex",
@@ -2614,23 +2616,27 @@ dependencies = [
 
 [[package]]
 name = "nekocrate-desktop"
-version = "0.9.8-dev.1"
+version = "0.9.9-dev.1"
 dependencies = [
  "anyhow",
  "arboard",
  "base64 0.23.1",
  "drag",
+ "flate2",
  "gtk",
  "minisign-verify",
  "nekocrate-core",
  "objc2",
  "objc2-app-kit",
  "objc2-foundation",
+ "png 0.18.1",
+ "quote",
  "reqwest",
  "rfd",
  "semver",
  "serde",
  "serde_json",
+ "syn 2.0.119",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -2644,7 +2650,7 @@ dependencies = [
 
 [[package]]
 name = "nekocrate-dev"
-version = "0.9.8-dev.1"
+version = "0.9.9-dev.1"
 dependencies = [
  "serde_json",
 ]
@@ -4495,12 +4501,14 @@ dependencies = [
  "glob",
  "heck 0.5.0",
  "json-patch",
+ "quote",
  "schemars 0.8.22",
  "semver",
  "serde",
  "serde_json",
  "static_vcruntime",
  "strsim",
+ "tauri-codegen",
  "tauri-utils",
  "tauri-winres",
  "walkdir",

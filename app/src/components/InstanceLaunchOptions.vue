@@ -60,11 +60,14 @@ const parameters = computed({
 </script>
 <template>
   <div class="instance-launch-options">
-    <div class="instance-policy-row">
+    <div class="instance-controls-row">
       <div class="instance-window-choice">
-        <label id="instance-isolation-label" for="instance-isolation-trigger">{{
-          t("版本隔离")
-        }}</label>
+        <label
+          id="instance-isolation-label"
+          for="instance-isolation-trigger"
+          :title="t('版本隔离')"
+          >{{ t("版本隔离") }}</label
+        >
         <GlassSelect
           id="instance-isolation"
           v-model="isolation"
@@ -75,12 +78,16 @@ const parameters = computed({
           ]"
           floating
           compact
+          :menu-min-width="160"
         />
       </div>
       <div class="instance-window-choice">
-        <label id="instance-logs-label" for="instance-logs-trigger">{{
-          t("日志行为")
-        }}</label>
+        <label
+          id="instance-logs-label"
+          for="instance-logs-trigger"
+          :title="t('日志行为')"
+          >{{ t("日志行为") }}</label
+        >
         <GlassSelect
           id="instance-logs"
           v-model="logs"
@@ -92,17 +99,16 @@ const parameters = computed({
           ]"
           floating
           compact
+          :menu-min-width="160"
         />
       </div>
-    </div>
-    <p v-if="directory?.changed" class="isolation-note">
-      {{ t("原文件保留在原目录，不会自动迁移。") }}
-    </p>
-    <div class="instance-window-row">
       <div class="instance-window-choice">
-        <label id="instance-window-label" for="instance-window-trigger">{{
-          t("游戏窗口")
-        }}</label>
+        <label
+          id="instance-window-label"
+          for="instance-window-trigger"
+          :title="t('游戏窗口')"
+          >{{ t("游戏窗口") }}</label
+        >
         <GlassSelect
           id="instance-window"
           v-model="mode"
@@ -114,52 +120,55 @@ const parameters = computed({
           ]"
           floating
           compact
+          :menu-min-width="160"
         />
       </div>
-      <Transition name="instance-resolution">
-        <div v-if="mode === 'windowed'" class="instance-resolution">
+      <div class="instance-minimize-choice">
+        <span id="instance-minimize-label">{{ t("启动后最小化") }}</span>
+        <div class="toggle-row instance-launch-toggle">
           <input
-            :value="modelValue.width"
-            type="number"
-            min="320"
-            max="7680"
-            :disabled="disabled"
-            :aria-label="t('窗口宽度')"
-            @input="
-              update('width', Number(($event.target as HTMLInputElement).value))
-            "
+            type="checkbox"
+            role="switch"
+            :checked="modelValue.minimize_launcher"
+            aria-labelledby="instance-minimize-label"
+            :disabled="disabled || logs === 'startup'"
+            :title="logs === 'startup' ? t('启动时优先显示日志') : undefined"
+            @change="update('minimize_launcher', !modelValue.minimize_launcher)"
           />
-          <span>×</span>
-          <input
-            :value="modelValue.height"
-            type="number"
-            min="240"
-            max="4320"
-            :disabled="disabled"
-            :aria-label="t('窗口高度')"
-            @input="
-              update(
-                'height',
-                Number(($event.target as HTMLInputElement).value),
-              )
-            "
-          />
-          <small>px</small>
         </div>
-      </Transition>
-      <div class="toggle-row instance-launch-toggle">
-        <span>{{ t("启动后最小化") }}</span>
-        <input
-          type="checkbox"
-          role="switch"
-          :checked="modelValue.minimize_launcher"
-          :aria-label="t('游戏启动后最小化')"
-          :disabled="disabled || logs === 'startup'"
-          :title="logs === 'startup' ? t('启动时优先显示日志') : undefined"
-          @change="update('minimize_launcher', !modelValue.minimize_launcher)"
-        />
       </div>
     </div>
+    <Transition name="instance-resolution">
+      <div v-if="mode === 'windowed'" class="instance-resolution">
+        <input
+          :value="modelValue.width"
+          type="number"
+          min="320"
+          max="7680"
+          :disabled="disabled"
+          :aria-label="t('窗口宽度')"
+          @change="
+            update('width', Number(($event.target as HTMLInputElement).value))
+          "
+        />
+        <span>×</span>
+        <input
+          :value="modelValue.height"
+          type="number"
+          min="240"
+          max="4320"
+          :disabled="disabled"
+          :aria-label="t('窗口高度')"
+          @change="
+            update('height', Number(($event.target as HTMLInputElement).value))
+          "
+        />
+        <small>px</small>
+      </div>
+    </Transition>
+    <p v-if="directory?.changed" class="isolation-note">
+      {{ t("原文件保留在原目录，不会自动迁移。") }}
+    </p>
     <div class="instance-jvm-options" :class="{ expanded }">
       <button
         type="button"
@@ -201,7 +210,7 @@ const parameters = computed({
               :aria-labelledby="`parameter-tab-${parameterTab}`"
             >
               <textarea
-                v-model="parameters"
+                v-model.lazy="parameters"
                 :disabled="disabled"
                 :aria-label="
                   t(parameterTabs.find((tab) => tab.id === parameterTab)!.label)
@@ -227,15 +236,47 @@ const parameters = computed({
   grid-column: 1 / -1;
   min-width: 0;
 }
-.instance-policy-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
+.instance-controls-row {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) max-content;
+  align-items: start;
+  gap: 8px;
   font-size: 11px;
 }
-.instance-policy-row .instance-window-choice :deep(.source-select) {
-  width: 144px;
+.instance-window-choice,
+.instance-minimize-choice {
+  display: grid;
+  grid-template-rows: 18px 32px;
+  gap: 4px;
+  min-width: 0;
+}
+.instance-controls-row label,
+.instance-minimize-choice > span {
+  min-width: 0;
+  margin: 0;
+  line-height: 18px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.instance-window-choice > label {
+  padding-inline: 6px;
+}
+.instance-window-choice :deep(.source-select) {
+  width: 100%;
+  min-width: 0;
+}
+.instance-controls-row .instance-window-choice :deep(.source-select-trigger) {
+  height: 32px;
+  min-height: 32px;
+  font-size: 11px;
+  padding-inline: 6px;
+  gap: 4px;
+}
+.instance-controls-row :deep(.source-select-trigger > svg) {
+  width: 12px;
+  height: 12px;
 }
 .isolation-note {
   color: var(--muted);
@@ -243,36 +284,11 @@ const parameters = computed({
   line-height: 14px;
   margin: 6px 0 0;
 }
-.instance-window-row {
-  margin-top: 12px;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 11px;
-  white-space: nowrap;
-}
-.instance-window-choice {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  flex-shrink: 0;
-}
-.instance-window-choice :deep(.source-select) {
-  width: 110px;
-  flex-shrink: 0;
-}
-.instance-window-choice :deep(.source-select-trigger) {
+.instance-launch-toggle {
   height: 32px;
   min-height: 32px;
-  font-size: 11px;
-  padding-inline: 9px;
-  gap: 4px;
-}
-.instance-launch-toggle {
-  min-height: 22px;
-  margin: 0 0 0 auto;
-  gap: 8px;
+  margin: 0;
+  justify-content: center;
 }
 .instance-launch-toggle input {
   width: 30px;
@@ -286,6 +302,7 @@ const parameters = computed({
   transform: translateX(12px);
 }
 .instance-resolution {
+  margin: 8px 0 0 auto;
   display: flex;
   align-items: center;
   gap: 4px;
@@ -327,7 +344,7 @@ const parameters = computed({
   opacity: 0;
 }
 .instance-jvm-options {
-  margin-top: 10px;
+  margin-top: 8px;
 }
 .jvm-heading {
   display: flex;

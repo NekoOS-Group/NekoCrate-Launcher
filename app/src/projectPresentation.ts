@@ -4,6 +4,7 @@ export type ResourceRpc = <T>(
   data?: Record<string, unknown>,
 ) => Promise<T>;
 export interface ProjectDetails {
+  refresh_required?: boolean;
   project: ResourceProject;
   body: string;
   body_format: "markdown" | "html";
@@ -55,12 +56,18 @@ export function projectLink(value: string, base?: string): string | undefined {
 }
 
 /** Share in-flight requests across lists/details and cap image concurrency/memory. */
-export function createProjectMedia(rpc: ResourceRpc) {
+export function createProjectMedia(rpc: ResourceRpc, now = Date.now) {
   const images = new Map<string, string>();
   const pending = new Map<string, Promise<string>>();
   const projects = new Map<
     string,
-    { time: number; value: Promise<ProjectDetails> }
+    {
+      time: number;
+      attempted?: number;
+      refreshing: boolean;
+      value: Promise<ProjectDetails>;
+      fallback?: Promise<ProjectDetails>;
+    }
   >();
   const waiters: (() => void)[] = [];
   let active = 0,
@@ -113,24 +120,83 @@ export function createProjectMedia(rpc: ResourceRpc) {
     platform: ResourcePlatform,
     project: string,
     refresh = false,
+    known?: Pick<ResourceProject, "updated" | "latest_version">,
   ) {
     const key = `${platform}/${project}`;
     const previous = projects.get(key);
-    if (!refresh && previous && Date.now() - previous.time < 600_000)
-      return previous.value;
-    const value = rpc<ProjectDetails>("resource_project", {
-      platform,
-      project,
+    // The ten-minute memory window only rechecks the local disk cache. The
+    // backend keeps descriptions seven days; installation metadata has its own TTL.
+    let entry = previous;
+    if (
+      !entry ||
+      (!entry.refreshing && (refresh || now() - entry.time >= 600_000))
+    ) {
+      if (refresh && previous) previous.attempted = now();
+      const value = rpc<ProjectDetails>("resource_project", {
+        platform,
+        project,
+        refresh,
+      });
+      entry = {
+        time: now(),
+        attempted: refresh ? now() : previous?.attempted,
+        refreshing: refresh,
+        value,
+        fallback: refresh ? previous?.value : undefined,
+      };
+      const current = entry;
+      projects.delete(key);
+      projects.set(key, current);
+      if (projects.size > 48) projects.delete(projects.keys().next().value!);
+      void value.then(
+        () => {
+          current.refreshing = false;
+          current.fallback = undefined;
+        },
+        () => {
+          if (projects.get(key) === current) {
+            if (previous) projects.set(key, previous);
+            else projects.delete(key);
+          }
+        },
+      );
+    }
+    const current = entry;
+    const readable =
+      !refresh && current.refreshing && current.fallback
+        ? current.fallback
+        : current.value;
+    return readable.then((value) => {
+      // Keep old content during offline failures, with a retry cooldown rather
+      // than re-requesting on every expand/collapse or from two visible views.
+      const cooling =
+        current.attempted !== undefined && now() - current.attempted < 60_000;
+      const changed = newerProject(value, known);
+      return {
+        ...value,
+        refresh_required: !cooling && (!!value.refresh_required || changed),
+      };
     });
-    projects.delete(key);
-    projects.set(key, { time: Date.now(), value });
-    if (projects.size > 48) projects.delete(projects.keys().next().value!);
-    void value.catch(() => {
-      if (projects.get(key)?.value === value) projects.delete(key);
-    });
-    return value;
   }
   return { image, details };
+}
+
+function newerProject(
+  cached: ProjectDetails,
+  known?: Pick<ResourceProject, "updated" | "latest_version">,
+) {
+  if (!known) return false;
+  const updated = Date.parse(known.updated || "");
+  const previous = Date.parse(cached.project.updated || cached.updated || "");
+  if (Number.isFinite(updated)) {
+    if (!Number.isFinite(previous) || updated > previous) return true;
+    if (updated < previous) return false; // An older search result cannot roll back a newer detail.
+  }
+  return (
+    !!known.latest_version &&
+    !!cached.project.latest_version &&
+    known.latest_version !== cached.project.latest_version
+  );
 }
 const stores = new WeakMap<
   ResourceRpc,

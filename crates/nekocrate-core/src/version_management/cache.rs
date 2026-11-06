@@ -48,7 +48,7 @@ impl SummaryCache {
         entries.bytes -= old.bytes;
         None
     }
-    pub(super) fn read(&self, path: &Path) -> ModIdentity {
+    pub(crate) fn read(&self, path: &Path) -> ModIdentity {
         if let Some(value) = self.get(path) {
             return value;
         }

@@ -106,6 +106,8 @@ fn from_archive(path: &Path, kind: ContentKind) -> ContentPresentation {
                     .ok()
                     .and_then(|s| toml::from_str::<toml::Value>(s).ok())
                     .and_then(|v| serde_json::to_value(v).ok())
+            } else if descriptor == "fabric.mod.json" {
+                crate::fabric_metadata::parse(&bytes).ok()
             } else {
                 serde_json::from_slice(&bytes).ok()
             };
@@ -193,26 +195,34 @@ impl Launcher {
         file: &str,
     ) -> Result<ContentPresentation> {
         let path = self.version_content_path(id, version, kind, file, None)?;
-        let mut result = if path.is_file() {
-            from_archive(&path, kind)
-        } else {
-            ContentPresentation {
-                icon: directory_icon(&path, kind),
-                ..Default::default()
-            }
-        };
         let (working, _) = self.content_location(id, version)?;
-        if let Ok(relative) = path.strip_prefix(working.canonicalize()?)
-            && let Some(record) = crate::resources::records(&working)?
-                .get(&relative.to_string_lossy().replace('\\', "/"))
-            && record.origin.platform != Platform::Local
-            && let Some(project) = &record.origin.project
-        {
-            result.project = Some(ContentProject {
-                platform: record.origin.platform,
-                id: project.clone(),
-            });
-        }
-        Ok(result)
+        content_presentation(&path, &working, kind)
     }
+}
+
+pub(crate) fn content_presentation(
+    path: &Path,
+    working: &Path,
+    kind: ContentKind,
+) -> Result<ContentPresentation> {
+    let mut result = if path.is_file() {
+        from_archive(path, kind)
+    } else {
+        ContentPresentation {
+            icon: directory_icon(path, kind),
+            ..Default::default()
+        }
+    };
+    if let Ok(relative) = path.strip_prefix(working.canonicalize()?)
+        && let Some(record) =
+            crate::resources::records(working)?.get(&relative.to_string_lossy().replace('\\', "/"))
+        && record.origin.platform != Platform::Local
+        && let Some(project) = &record.origin.project
+    {
+        result.project = Some(ContentProject {
+            platform: record.origin.platform,
+            id: project.clone(),
+        });
+    }
+    Ok(result)
 }

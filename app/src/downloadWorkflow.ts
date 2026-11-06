@@ -81,7 +81,13 @@ export function createWorkflow(
                             ["account", "准备游戏身份"],
                             ["start", "启动游戏"],
                           ]
-                        : [["request", title]];
+                        : operation === "prepare_missing_dependencies"
+                          ? [
+                              ["repair_check", "读取已安装 Mod 的依赖"],
+                              ["repair_resolve", "查找并下载兼容前置"],
+                              ["repair_validate", "核对前置与依赖约束"],
+                            ]
+                          : [["request", title]];
   return {
     steps: plan.map(([id, label], index) => ({
       id,

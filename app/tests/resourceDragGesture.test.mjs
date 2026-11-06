@@ -7,7 +7,7 @@ import {
 } from "../src/useResourceTransfer.ts";
 import { dropInteraction, dropHint } from "../src/dropSurface.ts";
 
-function fixture(exportResult) {
+function fixture(exportResult, preview) {
   const previous = Object.fromEntries(
     ["window", "document", "requestAnimationFrame", "cancelAnimationFrame"].map(
       (key) => [key, globalThis[key]],
@@ -43,8 +43,14 @@ function fixture(exportResult) {
     addEventListener() {},
     removeEventListener() {},
   };
-  globalThis.requestAnimationFrame = () => 1;
-  globalThis.cancelAnimationFrame = () => {};
+  let frame;
+  globalThis.requestAnimationFrame = (callback) => {
+    frame = callback;
+    return 1;
+  };
+  globalThis.cancelAnimationFrame = () => {
+    frame = undefined;
+  };
   let drag, start;
   const copied = [],
     exported = [],
@@ -65,6 +71,7 @@ function fixture(exportResult) {
         ],
         running: () => [],
         busy: () => false,
+        preview,
         copy: async (...args) => {
           copied.push(args);
         },
@@ -117,6 +124,11 @@ function fixture(exportResult) {
     move: (x, y) => listeners.get("pointermove")?.(event(x, y)),
     release: (x, y) => listeners.get("pointerup")?.(event(x, y)),
     finish: () => finish,
+    frame: () => frame?.(),
+    target,
+    hover: (element) => {
+      hovered = element;
+    },
     dispose() {
       app.unmount();
       Object.assign(globalThis, previous);
@@ -137,6 +149,124 @@ test("internal drag uses the existing target and cleans up on release", () => {
     assert.equal(dropInteraction.value, false);
     assert.equal(f.drag.value, undefined);
     assert.equal(f.finish(), 1);
+  } finally {
+    f.dispose();
+  }
+});
+
+test("a stationary pointer tracks changed layout and clears a target that moves away", () => {
+  const f = fixture();
+  try {
+    f.start();
+    f.move(150, 120);
+    const original = dropHint.value;
+    f.frame();
+    assert.equal(
+      dropHint.value,
+      original,
+      "unchanged geometry does not trigger another render",
+    );
+    f.target.getBoundingClientRect = () => ({
+      left: 80,
+      top: 90,
+      width: 200,
+      height: 40,
+    });
+    f.frame();
+    assert.equal(dropHint.value.left, 80);
+    assert.equal(dropHint.value.top, 90);
+    f.hover(null);
+    f.frame();
+    assert.equal(dropHint.value, undefined);
+    assert.equal(f.drag.value.target, undefined);
+    f.release(150, 120);
+    assert.equal(f.copied.length, 0);
+  } finally {
+    f.dispose();
+  }
+});
+
+test("asynchronous drop validation updates the target under the current cursor", async () => {
+  let reject;
+  const f = fixture(
+    undefined,
+    () =>
+      new Promise((_resolve, no) => {
+        reject = no;
+      }),
+  );
+  try {
+    f.start();
+    f.move(150, 120);
+    assert.equal(f.drag.value.target.version, "two");
+    reject(Error("Target is locked"));
+    await new Promise(setImmediate);
+    assert.equal(dropHint.value.invalid, true);
+    assert.equal(f.drag.value.target, undefined);
+    f.release(150, 120);
+    assert.equal(f.copied.length, 0);
+  } finally {
+    f.dispose();
+  }
+});
+
+test("mismatched types show no frame and cannot copy, while matching compatibility failures stay red", async () => {
+  let reject;
+  const f = fixture(
+    undefined,
+    () =>
+      new Promise((_yes, no) => {
+        reject = no;
+      }),
+  );
+  try {
+    f.start();
+    f.move(150, 120);
+    assert.ok(dropHint.value);
+    f.target.dataset.dropKind = "resourcepacks";
+    f.move(150, 120);
+    assert.equal(dropHint.value, undefined);
+    assert.equal(f.drag.value.target, undefined);
+    reject(Error("Incompatible Minecraft version"));
+    await new Promise(setImmediate);
+    assert.equal(
+      dropHint.value,
+      undefined,
+      "a stale compatibility result must not resurrect a wrong-type frame",
+    );
+    f.target.dataset.dropKind = "mods";
+    f.move(150, 120);
+    await new Promise(setImmediate);
+    assert.equal(dropHint.value.invalid, true);
+    assert.match(dropHint.value.message, /Incompatible Minecraft/);
+    f.target.dataset.dropKind = "config";
+    f.move(150, 120);
+    assert.equal(dropHint.value, undefined);
+    f.release(150, 120);
+    assert.deepEqual(f.copied, []);
+  } finally {
+    f.dispose();
+  }
+});
+
+test("native leave does not restore a stale highlight on the next frame", async () => {
+  let resolve;
+  const f = fixture(
+    new Promise((done) => {
+      resolve = done;
+    }),
+  );
+  try {
+    f.start();
+    f.move(2, 120);
+    f.drag.nativeEvent("over", 150, 120);
+    assert.ok(dropHint.value);
+    f.drag.nativeEvent("leave", 150, 120);
+    f.frame();
+    assert.equal(dropHint.value, undefined);
+    assert.equal(f.drag.value.target, undefined);
+    resolve(false);
+    await new Promise(setImmediate);
   } finally {
     f.dispose();
   }

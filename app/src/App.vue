@@ -9,6 +9,7 @@ import {
   onUnmounted,
   reactive,
   ref,
+  shallowRef,
   watch,
   watchEffect,
 } from "vue";
@@ -20,20 +21,18 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { projectLink } from "./projectPresentation";
 import {
   Plus,
-  Boxes,
-  Settings2,
+  PanelsTopLeft,
   UsersRound,
   UserRound,
   FolderOpen,
   Play,
+  Wrench,
   Download,
+  FileArchive,
   Square,
-  RefreshCw,
   ChevronDown,
   ChevronUp,
-  Terminal,
   X,
-  Copy,
   Trash2,
   ExternalLink,
   LoaderCircle,
@@ -57,6 +56,8 @@ import {
 import { version as launcherVersion } from "../package.json";
 import { prepareAndLaunch } from "./launch";
 import {
+  automaticRepairs,
+  type AutomaticRepair,
   recoveryActions,
   type LaunchRecovery,
   type RecoveryAction,
@@ -67,15 +68,32 @@ import {
 } from "./loaderCatalog";
 import { signInWithMicrosoft } from "./login";
 import { createAccountSkinLoader } from "./accountSkins";
+import { createAccountRefresher } from "./accountRefresh";
 import { builtinSkins } from "./builtinSkins";
 import type { SavedSkin } from "./skinLibrary";
 import type { LogLine } from "./logPresentation";
 import { createLogStore } from "./logStore";
 import LogPanel from "./components/LogPanel.vue";
 import GlassDialog from "./components/GlassDialog.vue";
+import SettingsBubble from "./components/SettingsBubble.vue";
+import AccountDropdown from "./components/AccountDropdown.vue";
+import HomeLayout from "./components/HomeLayout.vue";
+import HomeWidget from "./components/HomeWidget.vue";
+import HomeDashboardWidget from "./components/HomeDashboardWidget.vue";
+import {
+  addFavorite,
+  resolveShortcut,
+  type VersionShortcut,
+} from "./homeDashboard";
+import HomeToolbar from "./components/HomeToolbar.vue";
+import type { HomeTool } from "./homeToolbar";
+const ResourceStore = defineAsyncComponent(
+  () => import("./components/ResourceStore.vue"),
+);
 import DownloadWorkflow from "./components/DownloadWorkflow.vue";
 import ErrorNotice from "./components/ErrorNotice.vue";
 import FolderDrop from "./components/FolderDrop.vue";
+import ResourceRemovalConfirm from "./components/ResourceRemovalConfirm.vue";
 import InstanceTarget from "./components/InstanceTarget.vue";
 import { useFolderDrop } from "./useFolderDrop";
 import {
@@ -108,12 +126,18 @@ import VersionDownload from "./components/VersionDownload.vue";
 import ModpackImport from "./components/ModpackImport.vue";
 import ModpackMissing from "./components/ModpackMissing.vue";
 import type { ModpackPreview, ModpackStatus } from "./types";
-import VersionManager from "./components/VersionManager.vue";
+import ManagedVersions from "./components/ManagedVersions.vue";
+import ToolWindow from "./components/ToolWindow.vue";
+import WindowControls from "./components/WindowControls.vue";
+import { focusToolWindow, raiseToolWindow } from "./toolWindows";
+import { activateDialog } from "./dialogSurface";
 import ResourceTransferOverlay from "./components/ResourceTransferOverlay.vue";
 import DropTargetOverlay from "./components/DropTargetOverlay.vue";
 import { dropInteraction, showDropHint, clearDropHint } from "./dropSurface";
+import { nativeDropPoint } from "./dragCoordinates";
 import {
   useResourceTransfer,
+  resourceSourceKey,
   type ResourceCopySource,
   type ResourceDestination,
 } from "./useResourceTransfer";
@@ -129,6 +153,8 @@ import {
   resourceDropTarget,
   routeResourceDrop,
   resourceDropIssue,
+  resourceDropTypeMatches,
+  dedicatedDropTypeMatches,
   resourceKindLabel,
   type ResourceSession,
   type ResourceSelection,
@@ -172,16 +198,61 @@ import type {
   JavaInfo,
   MemoryMode,
   MemoryOptions,
-  ContentLoadOptions,
-  VersionContentCounts,
-  VersionMetadata,
   ContentKind,
-  ContentMetadata,
   CrashReport,
 } from "./types";
 
 const desktop = isTauri();
-const utility = ref<"accounts" | "downloads" | "settings" | null>(null);
+const utility = ref<"accounts" | "settings" | null>(null);
+const homeLayout = ref<InstanceType<typeof HomeLayout>>();
+const themePicker = ref<InstanceType<typeof ThemePicker>>();
+const layoutEditing = ref(false);
+const storeOpen = ref(false);
+const storeBusy = ref(false);
+function storeDownloadBusy(value: boolean) {
+  storeBusy.value = value;
+  libraryBusy.value = value;
+}
+function activateHomeTool(id: HomeTool) {
+  if (layoutEditing.value) return;
+  if (id === "resources") openResourceManager();
+  else if (id === "settings") toggleUtility("settings");
+  else if (id === "logs") openLogs();
+  else {
+    storeOpen.value = true;
+    void nextTick(() => focusToolWindow("store"));
+  }
+}
+async function downloadStorePack(
+  platform: ResourcePlatform,
+  project: string,
+  version: string,
+) {
+  if (busy.value || libraryBusy.value) return false;
+  newVersion(selectedInstance.value || null, "modpacks");
+  if (!selectedInstance.value) switchDownloadTarget(null);
+  additionSection.value = "modpacks";
+  storeOpen.value = false;
+  // Let the installer establish its modal session before starting the request.
+  await nextTick();
+  if (modal.value !== "version") return false;
+  return downloadOnlineModpack(platform, project, version);
+}
+function editHomeLayout() {
+  closeUtility();
+  dropVersionMenu.value?.endDrop();
+  themePicker.value?.close();
+  instanceDockExpanded.value = false;
+  hoveredInstance.value = null;
+  homeLayout.value?.begin();
+}
+function changeLayoutEditing(value: boolean) {
+  layoutEditing.value = value;
+  if (!value)
+    void nextTick(() => settingsAnchor.value?.focus({ preventScroll: true }));
+}
+const settingsAnchor = ref<HTMLElement>();
+const instanceSettingsAnchor = ref<HTMLElement>();
 const snapshot = ref<Snapshot>({
   root: "",
   system_locale: navigator.language,
@@ -510,6 +581,8 @@ let downloadDraftInitialized = false;
 const selectedInstanceId = ref("");
 const busy = ref(false);
 const launchingId = ref<string | null>(null);
+const startRequested = ref(false);
+const repairingTarget = ref<{ id: string; version: string } | null>(null);
 const loginBusy = ref(false);
 let loginSession: string | null = null;
 let loginCancellation: Promise<void> | null = null;
@@ -546,12 +619,14 @@ const visibleError = computed(
     error.value ||
     accountNameError.value ||
     settingsSaveError.value ||
+    instanceSaveFailure.value?.message ||
     proxyPasswordError.value,
 );
 function dismissError() {
   error.value = "";
   accountNameError.value = "";
   settingsSaveError.value = "";
+  instanceSaveErrors.clear();
   proxyPasswordError.value = "";
 }
 const logStore = createLogStore();
@@ -559,9 +634,17 @@ function appendLog(line: LogLine) {
   logStore.append(line);
 }
 const showLogs = ref(false);
+const showDownloads = ref(false);
+const libraryOpen = ref(false);
+function openDownloads() {
+  showDownloads.value = true;
+  void nextTick(() => focusToolWindow("downloads"));
+}
 const logScope = ref("all");
 const logSession = ref(0);
 const launchReports = reactive<Record<string, CrashReport | null>>({});
+const dismissedRecoveries = reactive<Record<string, number>>({});
+const reportLoads = new Map<string, Promise<void>>();
 const recoveries = computed<LaunchRecovery[]>(() =>
   snapshot.value.database.instances
     .flatMap((instance) => {
@@ -569,6 +652,7 @@ const recoveries = computed<LaunchRecovery[]>(() =>
       const version = instance.versions.find((v) => v.id === report?.version);
       if (
         !report ||
+        dismissedRecoveries[instance.id] === report.time ||
         !version ||
         snapshot.value.running.includes(instance.id) ||
         launchingId.value === instance.id
@@ -588,28 +672,35 @@ const recoveries = computed<LaunchRecovery[]>(() =>
 );
 function clearRecovery(scope: string) {
   for (const id of Object.keys(launchReports))
-    if (scope === "all" || scope === id) launchReports[id] = null;
+    if ((scope === "all" || scope === id) && launchReports[id])
+      dismissedRecoveries[id] = launchReports[id]!.time;
 }
 async function loadLaunchReport(id: string) {
   if (!desktop || launchReports[id] !== undefined) return;
-  try {
-    const report = await rpc<CrashReport | null>("crash_report", { id });
-    if (launchReports[id] === undefined) launchReports[id] = report;
-  } catch (e) {
-    appendLog({
-      time: stamp(),
-      kind: "warning",
-      instanceId: id,
-      message: message(e),
-    });
-  }
+  if (reportLoads.has(id)) return reportLoads.get(id);
+  const pending = (async () => {
+    try {
+      const report = await rpc<CrashReport | null>("crash_report", { id });
+      if (launchReports[id] === undefined) launchReports[id] = report;
+    } catch (e) {
+      appendLog({
+        time: stamp(),
+        kind: "warning",
+        instanceId: id,
+        message: message(e),
+      });
+    } finally {
+      reportLoads.delete(id);
+    }
+  })();
+  reportLoads.set(id, pending);
+  return pending;
 }
 function openLogs(scope = "all") {
-  modal.value = null;
-  utility.value = null;
   logScope.value = scope;
   logSession.value++;
   showLogs.value = true;
+  void nextTick(() => focusToolWindow("logs"));
   for (const instance of snapshot.value.database.instances)
     if (scope === "all" || scope === instance.id)
       void loadLaunchReport(instance.id);
@@ -635,10 +726,12 @@ async function recoverLaunch(
     return;
   }
   if (busy.value || snapshot.value.running.includes(id)) return;
-  if (operation === "repair") {
-    showLogs.value = false;
-    utility.value = "downloads";
-    await action("校验与修复", "install", { id, version, repair: true }, true);
+  if (operation === "dependencies" || operation === "repair") {
+    if (operation === "repair") {
+      showLogs.value = false;
+      openDownloads();
+    }
+    await repairLaunch(id, recovery.report, [operation]);
     return;
   }
   showLogs.value = false;
@@ -656,9 +749,67 @@ async function recoverLaunch(
         : null;
   if (target) document.getElementById(target)?.focus({ preventScroll: true });
 }
-const modal = ref<
-  "add" | "create" | "edit" | "delete" | "version" | "manage" | "library" | null
->(null);
+async function repairLaunch(
+  id: string,
+  report: CrashReport,
+  operations: AutomaticRepair[],
+): Promise<boolean> {
+  if (busy.value || snapshot.value.running.includes(id)) return false;
+  repairingTarget.value = { id, version: report.version };
+  try {
+    for (const operation of operations) {
+      if (operation === "repair") {
+        if (
+          (await action<boolean>(
+            "校验与修复",
+            "install",
+            { id, version: report.version, repair: true },
+            true,
+          )) !== true
+        )
+          return false;
+      } else {
+        const plan = await action<ResourcePlan>(
+          "修复缺失前置",
+          "prepare_missing_dependencies",
+          { id, version: report.version, time: report.time },
+          true,
+        );
+        if (!plan) return false;
+        if (plan.entries.length) {
+          if (!(await installResources(plan))) return false;
+          await resourcesInstalled(plan);
+        }
+        appendLog({
+          time: stamp(),
+          kind: "log",
+          instanceId: id,
+          message: t("缺失前置已安装，请重新启动游戏。"),
+        });
+      }
+      const currentReport = launchReports[id];
+      if (
+        currentReport?.version === report.version &&
+        currentReport.time === report.time
+      ) {
+        const findings = currentReport.findings.filter(
+          (f) =>
+            f.code !==
+            (operation === "repair" ? "files" : "missing_dependencies"),
+        );
+        launchReports[id] = findings.length
+          ? { ...currentReport, findings }
+          : null;
+      }
+    }
+    return true;
+  } finally {
+    repairingTarget.value = null;
+  }
+}
+const modal = ref<"add" | "create" | "edit" | "delete" | "version" | null>(
+  null,
+);
 watch(modal, () => modalSession++, { flush: "sync" });
 const modalTitles = {
   add: "添加游戏目录",
@@ -666,18 +817,54 @@ const modalTitles = {
   edit: "实例设置",
   delete: "移除实例",
   version: "添加新的版本",
-  manage: "管理版本",
-  library: "资源管理",
 };
 const suggestedInstances = ref<SuggestedInstance[]>([]);
 const discoveringInstances = ref(false);
 const linkingDirectory = ref("");
 let instanceDiscoveryRequest = 0;
 const editing = ref<Instance | null>(null);
-const managing = ref(false);
-const managedInstance = computed(() =>
-  snapshot.value.database.instances.find((i) => i.id === editing.value?.id),
+type ManagedWindow = {
+  id: string;
+  instanceId: string;
+  busy: boolean;
+  initialVersion?: string;
+  initialTab?: ContentKind;
+  selectionRevision?: number;
+};
+const managedWindows = ref<ManagedWindow[]>([]);
+let managedWindowSequence = 0;
+const managing = computed(() => managedWindows.value.some((item) => item.busy));
+const versionWindows = computed(() =>
+  managedWindows.value.flatMap((item) => {
+    const instance = snapshot.value.database.instances.find(
+      (i) => i.id === item.instanceId,
+    );
+    return instance ? [{ ...item, instance }] : [];
+  }),
 );
+watch(
+  () => snapshot.value.database.instances,
+  (items) => {
+    managedWindows.value = managedWindows.value.filter((item) =>
+      items.some((i) => i.id === item.instanceId),
+    );
+    const session = resourceSession.value;
+    if (session) {
+      const instance = items.find((item) => item.id === session.instance.id);
+      if (!instance?.versions.some((version) => version.id === session.version))
+        resourceSession.value = undefined;
+      else session.instance = instance;
+    }
+  },
+);
+function setManagedBusy(id: string, value: boolean) {
+  const entry = managedWindows.value.find((item) => item.id === id);
+  if (entry) entry.busy = value;
+}
+function closeManagedWindow(id: string) {
+  if (managedWindows.value.find((item) => item.id === id)?.busy) return;
+  managedWindows.value = managedWindows.value.filter((item) => item.id !== id);
+}
 const instanceWrites = reactive(new Set<string>());
 const instanceSaving = computed(
   () => !!editing.value && instanceWrites.has(editing.value.id),
@@ -698,6 +885,161 @@ const form = reactive({
   loader: "vanilla",
   loader_version: "",
 });
+function instancePreferences(instance: Instance) {
+  return {
+    name: instance.name,
+    icon: instanceMaterial(instance),
+    memory_mb: instance.memory_mb,
+    memory_mode: instance.memory_mode || ("auto" as MemoryMode),
+    java_path: instance.java_path || null,
+    launch: instanceLaunchOptions(instance.launch),
+  };
+}
+type InstancePreferences = ReturnType<typeof instancePreferences>;
+const pendingInstanceSettings = new Map<
+  string,
+  {
+    preferences: InstancePreferences;
+    isolationChanged: boolean;
+  }
+>();
+const instanceSavePromises = new Map<string, Promise<void>>();
+const instanceSaveErrors = reactive(new Map<string, string>());
+const instanceRevisions = new Map<string, number>();
+let hydratingInstance = false;
+const instanceSaveFailure = computed(() => {
+  const first = instanceSaveErrors.entries().next().value;
+  return first ? { id: first[0], message: first[1] } : null;
+});
+const instanceRetryId = computed(() =>
+  instanceSaveFailure.value?.message === visibleError.value
+    ? instanceSaveFailure.value.id
+    : null,
+);
+function reviseInstance(id: string) {
+  instanceRevisions.set(id, (instanceRevisions.get(id) || 0) + 1);
+}
+watch(
+  () => ({
+    name: form.name,
+    icon: form.icon,
+    memory_mb: form.memory_mb,
+    memory_mode: form.memory_mode,
+    java_path: form.java_path || null,
+    launch: JSON.stringify(form.launch),
+  }),
+  (value, previous) => {
+    if (hydratingInstance || modal.value !== "edit" || !editing.value) return;
+    const id = editing.value.id;
+    const instance =
+      snapshot.value.database.instances.find((item) => item.id === id) ||
+      editing.value;
+    const pending = pendingInstanceSettings.get(id);
+    const base = pending?.preferences || instancePreferences(instance);
+    const preferences = { ...base };
+    if (
+      value.name !== previous.name &&
+      value.name.trim() &&
+      [...value.name.trim()].length <= 80
+    )
+      preferences.name = value.name.trim();
+    if (value.icon !== previous.icon) preferences.icon = value.icon;
+    if (value.java_path !== previous.java_path)
+      preferences.java_path = value.java_path;
+    if (
+      (value.memory_mode !== previous.memory_mode ||
+        value.memory_mb !== previous.memory_mb) &&
+      !invalidCustomMemory.value
+    ) {
+      preferences.memory_mode = value.memory_mode;
+      preferences.memory_mb = validMemory(value.memory_mb)
+        ? value.memory_mb
+        : base.memory_mb;
+    }
+    if (value.launch !== previous.launch && validLaunchSize(form.launch)) {
+      preferences.launch = {
+        ...form.launch,
+        jvm_args: form.launch.jvm_args
+          .map((line) => line.trim())
+          .filter(Boolean),
+        game_args: form.launch.game_args
+          .map((line) => line.trim())
+          .filter(Boolean),
+        environment: form.launch.environment.filter((line) => line.trim()),
+      };
+    }
+    if (JSON.stringify(preferences) === JSON.stringify(base)) return;
+    pendingInstanceSettings.set(id, {
+      preferences,
+      isolationChanged:
+        !!pending?.isolationChanged ||
+        preferences.launch.isolation !== base.launch.isolation,
+    });
+    Object.assign(instance, preferences);
+    reviseInstance(id);
+    void persistInstanceSettings(id);
+  },
+  { flush: "sync" },
+);
+function persistInstanceSettings(id: string): Promise<void> {
+  const writing = instanceSavePromises.get(id);
+  if (writing) return writing;
+  if (!pendingInstanceSettings.has(id)) return Promise.resolve();
+  instanceWrites.add(id);
+  instanceSaveErrors.delete(id);
+  const request = Promise.resolve().then(async () => {
+    try {
+      while (pendingInstanceSettings.has(id)) {
+        const submitted = pendingInstanceSettings.get(id)!;
+        try {
+          await rpc("update", { id, ...submitted.preferences });
+        } catch (e) {
+          if (pendingInstanceSettings.get(id) !== submitted) continue;
+          const text = t("{name} 设置保存失败：{error}", {
+            name: submitted.preferences.name,
+            error: message(e),
+          });
+          instanceSaveErrors.set(id, text);
+          appendLog({
+            time: stamp(),
+            kind: "error",
+            instanceId: id,
+            message: text,
+          });
+          break;
+        }
+        // A reply must neither close an editor nor discard edits made in flight.
+        if (pendingInstanceSettings.get(id) === submitted)
+          pendingInstanceSettings.delete(id);
+        reviseInstance(id);
+        if (submitted.isolationChanged) {
+          loadVersionContent.invalidate(id);
+          try {
+            await refreshVersionManagers();
+          } catch (e) {
+            appendLog({
+              time: stamp(),
+              kind: "warning",
+              instanceId: id,
+              message: message(e),
+            });
+          }
+        }
+      }
+    } finally {
+      instanceWrites.delete(id);
+      instanceSavePromises.delete(id);
+    }
+  });
+  instanceSavePromises.set(id, request);
+  return request;
+}
+function retrySettingsSave() {
+  if (error.value === instanceSaveFailure.value?.message) error.value = "";
+  return instanceRetryId.value
+    ? persistInstanceSettings(instanceRetryId.value)
+    : persistSettings();
+}
 const gameImport = ref<DetectedResource>();
 const importPrefix = ref("");
 const importTargetId = ref<string | null>(null);
@@ -817,6 +1159,7 @@ const packPreview = ref<ModpackPreview | null>(null);
 const additionSection = ref<"game" | "modpacks" | "resources">("game");
 const onlinePack = ref(false);
 const selectedResources = ref<ResourceSelection[]>([]);
+const selectedLocalResources = ref<ResourceCopySource[]>([]);
 const resourceLoader = computed(() =>
   form.loader === "vanilla"
     ? null
@@ -825,8 +1168,9 @@ const resourceLoader = computed(() =>
 watch(
   () => [form.version, form.loader, form.loader_version],
   () => {
-    if (selectedResources.value.length) {
+    if (selectedResources.value.length || selectedLocalResources.value.length) {
       selectedResources.value = [];
+      selectedLocalResources.value = [];
       notify("版本或加载器已变化，请重新预选资源");
     }
   },
@@ -1050,9 +1394,6 @@ async function discoverJava() {
   }
 }
 const challenge = ref<Challenge | null>(null);
-const loginAddress = computed(() =>
-  challenge.value?.verification_uri.replace(/^https:\/\/(?:www\.)?/, ""),
-);
 const themes = backdropThemes;
 const theme = ref("tide");
 const hoveredInstance = ref<Instance | null>(null);
@@ -1104,10 +1445,10 @@ const {
   instances,
   computed(
     () =>
+      layoutEditing.value ||
       instanceOrderSaving.value ||
-      !!modal.value ||
-      !!utility.value ||
-      showLogs.value,
+      (!!modal.value && modal.value !== "version") ||
+      utility.value === "settings",
   ),
   (id, beforeId) => void reorderInstance(id, beforeId),
   () => {
@@ -1119,8 +1460,9 @@ const {
     export: openGameExport,
   },
 );
-watch([modal, utility, showLogs], ([dialog, panel, logs]) => {
-  if (dialog || panel || logs) instanceDockExpanded.value = false;
+watch([modal, utility], ([dialog, panel]) => {
+  if ((dialog && dialog !== "version") || panel === "settings")
+    instanceDockExpanded.value = false;
 });
 const dockLimit = computed(() => instanceVisibleLimit(instances.value.length));
 const dockSections = computed(() => [
@@ -1206,10 +1548,11 @@ watch(
 );
 let guestSkinWrite: Promise<void> = Promise.resolve();
 let accountProfileWrite: Promise<unknown> = Promise.resolve();
-function changeAccountProfile(
+let accountUpdatesDisposed = false;
+function changeAccountProfile<T extends Account | null>(
   account: string,
-  request: () => Promise<Account>,
-): Promise<Account> {
+  request: () => Promise<T>,
+): Promise<T> {
   const write = accountProfileWrite
     .catch(() => {})
     .then(async () => {
@@ -1217,15 +1560,52 @@ function changeAccountProfile(
       const index = snapshot.value.database.accounts.findIndex(
         (item) => item.id === account,
       );
-      if (index >= 0 && updated.id === account) {
+      if (!accountUpdatesDisposed && index >= 0 && updated?.id === account) {
         accountRevision++;
         snapshot.value.database.accounts[index] = updated;
+        accountRefresher.fresh(account);
       }
       return updated;
     });
   accountProfileWrite = write;
   return write;
 }
+const accountRefresher = createAccountRefresher({
+  selected: () => selectedAccount.value || null,
+  enabled: () =>
+    desktop &&
+    !document.hidden &&
+    !loginBusy.value &&
+    navigator.onLine !== false,
+  refresh: async (id) => {
+    const updated = await changeAccountProfile(id, async () => {
+      if (accountUpdatesDisposed || loginBusy.value) return null;
+      const revision = accountRevision;
+      const profile = await rpc<Account | null>("sync_account", { id });
+      // A newer login or identity change must win over a late background reply.
+      return revision === accountRevision ? profile : null;
+    });
+    return updated !== null;
+  },
+  failed: (problem) => {
+    // Preserve the last known avatar/profile and keep background errors in logs.
+    appendLog({
+      time: stamp(),
+      kind: "warning",
+      message: `${t("账户自动刷新失败")}：${message(problem)}`,
+    });
+  },
+});
+const refreshAccountAutomatically = () => accountRefresher.check();
+watch(
+  () => [
+    snapshot.value.database.selected_account,
+    selectedAccount.value?.expires_at,
+    windowHidden.value,
+    loginBusy.value,
+  ],
+  refreshAccountAutomatically,
+);
 function chooseSkin(id: string): Promise<Account | null> {
   const account = snapshot.value.database.selected_account;
   if (!account) return chooseGuestSkin(id).then(() => null);
@@ -1316,7 +1696,7 @@ async function loadAccountSkin() {
   try {
     const texture = await fetchAccountSkin(account.id);
     if (generation !== skinGeneration) return;
-    if (!texture) throw new Error("账户暂无皮肤资料，请刷新账户。");
+    if (!texture) throw new Error("账户暂无可用的皮肤资料。");
     skinTexture.value = texture;
   } catch (e) {
     if (generation === skinGeneration) {
@@ -1380,19 +1760,47 @@ const selectedStarting = computed(
     launchingId.value === selectedInstance.value.id &&
     !selectedRunning.value,
 );
+const selectedNeedsRepair = computed(() => {
+  const report =
+    selectedInstance.value && launchReports[selectedInstance.value.id];
+  return (
+    !!report &&
+    report.version === selectedVersion.value?.id &&
+    automaticRepairs(report).length > 0
+  );
+});
+const selectedRepairing = computed(
+  () =>
+    repairingTarget.value?.id === selectedInstance.value?.id &&
+    !!repairingTarget.value &&
+    repairingTarget.value.version === selectedVersion.value?.id,
+);
+const instanceProgress = computed(() => {
+  if (current.value && ["running", "paused"].includes(current.value.status))
+    return current.value;
+  if (repairingTarget.value)
+    return {
+      instance_id: repairingTarget.value.id,
+      status: "running",
+      title: "修复中",
+      message: "修复中",
+      progress: 0,
+      indeterminate: true,
+    };
+  return null;
+});
+watch(
+  () => selectedInstance.value?.id,
+  (id) => {
+    if (id) void loadLaunchReport(id);
+  },
+);
 const utilityTitles = {
   accounts: "账户",
-  downloads: "下载任务",
   settings: "全局设置",
 };
 const utilityTitle = computed(() =>
-  t(
-    utility.value === "accounts" && challenge.value
-      ? "微软登录"
-      : utility.value
-        ? utilityTitles[utility.value]
-        : "",
-  ),
+  t(utility.value ? utilityTitles[utility.value] : ""),
 );
 watch(utility, (panel) => {
   proxyPasswordRequest++;
@@ -1411,16 +1819,27 @@ watch(utility, (panel) => {
   }
 });
 function toggleUtility(panel: "accounts" | "downloads" | "settings") {
-  showLogs.value = false;
-  modal.value = null;
+  if (panel === "downloads") {
+    openDownloads();
+    return;
+  }
   if (utility.value === panel) closeUtility();
-  else utility.value = panel;
+  else {
+    utility.value = panel;
+    if (panel === "accounts") void refreshAccountAutomatically();
+  }
+}
+function setAccountsOpen(open: boolean) {
+  if (open) {
+    utility.value = "accounts";
+    void refreshAccountAutomatically();
+  } else if (utility.value === "accounts") closeUtility();
 }
 function closeUtility() {
-  if (utility.value === "accounts")
-    void endLogin().catch((e) => {
-      error.value = message(e);
-    });
+  // A pointer outside closes the dropdown before the input's native blur.
+  if (utility.value === "accounts" && guestNameEditing.value)
+    void finishGuestNameEdit();
+  // Closing the account list only hides it; the browser owns the sign-in UI.
   utility.value = null;
 }
 function instanceMaterial(instance: Instance) {
@@ -1605,12 +2024,27 @@ const dropVersionMenu = ref<{
 const dragBrowseInstance = ref<Instance>();
 let browseTimer: ReturnType<typeof setTimeout> | undefined;
 let browseKey = "";
+let browseWindowKey = "";
+let browseWindowTimer: ReturnType<typeof setTimeout> | undefined;
 let dockBeforeDrop = false;
 watch(dropInteraction, (active) => {
   document.documentElement.classList?.toggle("resource-transferring", active);
   if (active) dockBeforeDrop = instanceDockExpanded.value;
 });
 function browseDropTarget(element: Element | null) {
+  const windowSurface = element?.closest<HTMLElement>(".tool-window");
+  const windowKey = windowSurface?.dataset.windowId || "";
+  if (windowKey !== browseWindowKey) {
+    clearTimeout(browseWindowTimer);
+    browseWindowKey = windowKey;
+    if (windowKey)
+      browseWindowTimer = setTimeout(() => {
+        if (dropInteraction.value && windowSurface?.isConnected) {
+          raiseToolWindow(windowKey);
+          activateDialog(windowSurface);
+        }
+      }, 320);
+  }
   const dock = element?.closest<HTMLElement>(
     ".instance-dock [data-resource-instance]",
   );
@@ -1635,6 +2069,8 @@ function browseDropTarget(element: Element | null) {
     dropVersionMenu.value?.revealForDrop();
 }
 function finishDropBrowse() {
+  clearTimeout(browseWindowTimer);
+  browseWindowKey = "";
   clearTimeout(browseTimer);
   browseKey = "";
   dragBrowseInstance.value = undefined;
@@ -1693,6 +2129,11 @@ function versionCopyTarget(
 provide(gameTransferKey, {
   preview(id, version, element, x, y) {
     dropInteraction.value = true;
+    const favorite = element?.closest<HTMLElement>("[data-home-favorites]");
+    if (favorite) {
+      showDropHint(favorite, t("收藏此版本"));
+      return;
+    }
     // Only expand the instance overflow; do not replace the source version list.
     if (element?.closest("[data-drop-overflow]"))
       instanceDockExpanded.value = true;
@@ -1701,6 +2142,24 @@ provide(gameTransferKey, {
       return;
     }
     const target = versionCopyTarget(id, version, element);
+    if (
+      !target.instance ||
+      !resourceDropTypeMatches(
+        [
+          {
+            path: version,
+            name: version,
+            format: "version_directory",
+            kinds: [],
+            issue: null,
+          },
+        ],
+        dropScope(element).kind,
+      )
+    ) {
+      clearDropHint();
+      return;
+    }
     showDropHint(
       target.surface,
       target.issue ||
@@ -1709,12 +2168,36 @@ provide(gameTransferKey, {
     );
   },
   drop(id, version, element, x, y) {
+    if (element?.closest("[data-home-favorites]")) {
+      try {
+        if (resolveShortcut(instances.value, { instance: id, version }))
+          addFavorite({ instance: id, version });
+      } catch (e) {
+        error.value = message(e);
+      }
+      return true;
+    }
     if (exportEdge(x, y)) {
       openGameExport(id, version);
       return true;
     }
     const target = versionCopyTarget(id, version, element);
-    if (!target.instance) return false;
+    if (
+      !target.instance ||
+      !resourceDropTypeMatches(
+        [
+          {
+            path: version,
+            name: version,
+            format: "version_directory",
+            kinds: [],
+            issue: null,
+          },
+        ],
+        dropScope(element).kind,
+      )
+    )
+      return false;
     if (target.issue) {
       notify(target.issue);
       return true;
@@ -1754,16 +2237,17 @@ function useDroppedResource(
   projectPreview.value = undefined;
 }
 async function receiveProjectLink(event: DragEvent) {
+  if (layoutEditing.value) {
+    event.preventDefault();
+    return;
+  }
   const url = draggedProjectUrl(event.dataTransfer);
   if (!url) return;
   event.preventDefault();
   event.stopPropagation();
   const scope = dropScope(event.target as Element);
   endIncoming();
-  if (busy.value || resolvingProject) {
-    rejectDrop(scope.surface, t("请等待当前任务完成。"));
-    return;
-  }
+  if (resolvingProject) return;
   resolvingProject = true;
   try {
     const project = await rpc<DroppedProject>("resolve_project_link", { url });
@@ -1774,6 +2258,8 @@ async function receiveProjectLink(event: DragEvent) {
       kinds: project.kind === "modpack" ? [] : [project.kind as ResourceKind],
       issue: null,
     };
+    if (!resourceDropTypeMatches([detected], scope.kind)) return;
+    if (busy.value) throw new Error(t("请等待当前任务完成。"));
     const issue = resourceDropIssue([detected], scope.kind);
     if (issue) throw new Error(issue);
     if (project.kind === "modpack") {
@@ -1800,6 +2286,11 @@ async function receiveProjectLink(event: DragEvent) {
   }
 }
 function previewProjectLink(event: DragEvent) {
+  if (layoutEditing.value) {
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = "none";
+    return;
+  }
   // Browsers protect payload text during dragover; text types suffice to permit
   // the drop, while receiveProjectLink strictly validates both URL and API data.
   if (
@@ -1811,6 +2302,23 @@ function previewProjectLink(event: DragEvent) {
     return;
   event.preventDefault();
   if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+  if (
+    [
+      "metadata",
+      "libraries",
+      "cache",
+      "blocked",
+      "resources",
+      "skins",
+      "java",
+      "config",
+      "directory",
+      "selection",
+    ].includes(dropScope(event.target as Element).kind || "")
+  ) {
+    clearDropHint();
+    return;
+  }
   showDropHint(
     (event.target as Element)?.closest(
       "[data-drop-kind], [data-resource-instance]",
@@ -1819,20 +2327,48 @@ function previewProjectLink(event: DragEvent) {
   );
 }
 const resourceSession = ref<ResourceSession>();
-const versionManager = ref<{ refresh: () => Promise<void> }>();
+const versionManagers = new Map<
+  string,
+  { refresh: () => Promise<unknown> | undefined }
+>();
+function setVersionManager(id: string, component: unknown) {
+  if (component)
+    versionManagers.set(
+      id,
+      component as { refresh: () => Promise<unknown> | undefined },
+    );
+  else versionManagers.delete(id);
+}
+const loadVersionContent = createVersionContentLoader(rpc);
+async function refreshVersionManagers() {
+  await Promise.all(
+    [...versionManagers.values()].map((item) => item.refresh()),
+  );
+}
+async function syncManagedWindows() {
+  await sync();
+  await resourceManager.value?.refresh();
+}
 const resourceManager = ref<{
   drop: (paths: string[], kind?: string) => Promise<void>;
   refresh: () => Promise<void>;
+  resourceUpdated: (id: string, version: string) => Promise<void>;
 }>();
 const libraryBusy = ref(false);
-const librarySkinPreview = ref(false);
 const resourceTransfer = useResourceTransfer({
   instances: () => instances.value,
   running: () => snapshot.value.running,
   busy: () => busy.value || libraryBusy.value || managing.value,
   copy: copyDraggedResource,
   copyMany: copyDraggedResources,
+  remove: removeResources,
   preview: async (sources, target) => {
+    if (target.selection) {
+      const issue = selectionDropIssue(sources);
+      if (issue) throw new Error(issue);
+      return;
+    }
+    if (target.global) return;
     const preview = await rpc<{ existing: string[] }>("preview_resource_drop", {
       sources,
       id: target.instance,
@@ -1853,12 +2389,145 @@ const resourceTransfer = useResourceTransfer({
     error.value = message(problem);
   },
 });
+const resourceRemovalConfirmation = shallowRef<{
+  names: string[];
+  resolve: (confirmed: boolean) => void;
+}>();
+function finishResourceRemovalConfirmation(confirmed = false) {
+  const pending = resourceRemovalConfirmation.value;
+  resourceRemovalConfirmation.value = undefined;
+  pending?.resolve(confirmed);
+}
+async function removeResources(sources: ResourceCopySource[]) {
+  if (
+    !sources.length ||
+    sources.some((source) => source.removable === false) ||
+    busy.value ||
+    libraryBusy.value ||
+    managing.value
+  )
+    return;
+  libraryBusy.value = true;
+  try {
+    type RemovalResult = {
+      removed: ResourceCopySource[];
+      failed: { source: ResourceCopySource; message: string }[];
+      confirmation_required?: ResourceCopySource[];
+    };
+    let result = await rpc<RemovalResult>("remove_resources", { sources });
+    if (result.confirmation_required?.length) {
+      const required = new Set(
+        result.confirmation_required.map(resourceSourceKey),
+      );
+      const accepted = await new Promise<boolean>((resolve) => {
+        resourceRemovalConfirmation.value = {
+          names: sources
+            .filter((source) => required.has(resourceSourceKey(source)))
+            .map((source) => source.name || source.file),
+          resolve,
+        };
+      });
+      if (!accepted) return;
+      result = await rpc<RemovalResult>("remove_resources", {
+        sources,
+        confirmed: true,
+      });
+    }
+    if (result.removed.length) {
+      // Different versions and linked instances can share the same files.
+      for (const instance of instances.value)
+        loadVersionContent.invalidate(instance.id);
+      const removed = new Set(result.removed.map(resourceSourceKey));
+      selectedLocalResources.value = selectedLocalResources.value.filter(
+        (source) => !removed.has(resourceSourceKey(source)),
+      );
+      notify(
+        t("已移入回收站 {count} 项资源", { count: result.removed.length }),
+      );
+      await Promise.all([
+        refreshVersionManagers(),
+        resourceManager.value?.refresh(),
+      ]);
+    }
+    if (result.failed.length)
+      error.value = result.failed
+        .map(
+          ({ source, message: detail }) =>
+            `${source.file}: ${translateMessage(detail)}`,
+        )
+        .join("\n");
+  } catch (problem) {
+    error.value = message(problem);
+  } finally {
+    libraryBusy.value = false;
+  }
+}
+function selectionDropIssue(sources: ResourceCopySource[]) {
+  if (
+    modal.value !== "version" ||
+    busy.value ||
+    downloadSubmitting.value ||
+    !form.version ||
+    loaderLoading.value ||
+    loaderUnavailable.value
+  )
+    return t("请先选择游戏版本并等待当前操作完成");
+  if (sources.some((source) => source.kind === "datapacks"))
+    return t("数据包需要目标存档，请在版本安装后拖入存档");
+  if (
+    form.loader === "vanilla" &&
+    sources.some((source) => source.kind === "mods")
+  )
+    return t("请先选择 Mod 加载器");
+  const keys = new Set(
+    [...selectedLocalResources.value, ...sources].map(resourceSourceKey),
+  );
+  if (keys.size + selectedResources.value.length > 128)
+    return t("最多预选 128 项资源");
+}
+function removeSelectedLocalResource(source: ResourceCopySource) {
+  const key = resourceSourceKey(source);
+  selectedLocalResources.value = selectedLocalResources.value.filter(
+    (item) => resourceSourceKey(item) !== key,
+  );
+}
 async function copyDraggedResources(
   sources: ResourceCopySource[],
   target: ResourceDestination,
 ) {
+  if (target.selection) {
+    const issue = selectionDropIssue(sources);
+    if (issue) {
+      error.value = issue;
+      return;
+    }
+    selectedLocalResources.value = [
+      ...new Map(
+        [...selectedLocalResources.value, ...sources].map((source) => [
+          resourceSourceKey(source),
+          { ...source },
+        ]),
+      ).values(),
+    ];
+    return;
+  }
+  if (target.global) {
+    libraryBusy.value = true;
+    try {
+      await rpc("resource_manager", {
+        action: { kind: "cache_resources", sources },
+      });
+      await resourceManager.value?.refresh();
+    } catch (e) {
+      error.value = message(e);
+    } finally {
+      libraryBusy.value = false;
+    }
+    return;
+  }
   const copied = await action<boolean>("复制资源", "copy_resources", {
-    sources: sources.map(({ kind, instance, version, file }) => ({
+    sources: sources.map(({ global, kind, instance, version, file }) => ({
+      ...(global ? { global: true } : {}),
       kind,
       instance,
       version,
@@ -1870,7 +2539,7 @@ async function copyDraggedResources(
   });
   if (copied === undefined) return;
   if (copied) notify(t("已复制 {count} 项资源", { count: sources.length }));
-  await versionManager.value?.refresh();
+  await refreshVersionManagers();
   await resourceManager.value?.refresh();
   if (copied)
     announceResources(
@@ -1888,8 +2557,13 @@ async function copyDraggedResource(
   source: ResourceCopySource,
   target: ResourceDestination,
 ) {
+  if (target.global || target.selection) {
+    await copyDraggedResources([source], target);
+    return;
+  }
   const copied = await action<boolean>("复制资源", "copy_resource", {
     source: {
+      ...(source.global ? { global: true } : {}),
       kind: source.kind,
       instance: source.instance,
       version: source.version,
@@ -1910,7 +2584,7 @@ async function copyDraggedResource(
   );
   if (copied) {
     await Promise.all([
-      versionManager.value?.refresh(),
+      refreshVersionManagers(),
       resourceManager.value?.refresh(),
     ]);
     announceResources(target.instance, target.version, source.kind, [
@@ -1920,22 +2594,20 @@ async function copyDraggedResource(
     ]);
   }
 }
-const managedInitialVersion = ref<string>();
-const managedInitialTab = ref<ContentKind>();
 function openResourceManager() {
-  utility.value = null;
-  showLogs.value = false;
   error.value = "";
-  libraryBusy.value = false;
-  librarySkinPreview.value = false;
-  modal.value = "library";
+  libraryOpen.value = true;
+  void nextTick(() => focusToolWindow("library"));
 }
 function manageResourceVersion(id: string, version: string, kind: ContentKind) {
   const instance = instances.value.find((i) => i.id === id);
   if (!instance) return;
-  manageVersions(instance);
-  managedInitialVersion.value = version;
-  managedInitialTab.value = kind;
+  const entry = manageVersions(instance);
+  if (entry && !entry.busy) {
+    entry.initialVersion = version;
+    entry.initialTab = kind;
+    entry.selectionRevision = (entry.selectionRevision || 0) + 1;
+  }
 }
 function installGlobalJava(major: number) {
   return action(
@@ -1963,6 +2635,7 @@ function openResources(
     notify("请先结束游戏或当前任务");
     return false;
   }
+  void nextTick(() => focusToolWindow("resources"));
   resourceSession.value = {
     instance,
     version,
@@ -1999,7 +2672,7 @@ async function installResources(plan: ResourcePlan) {
 }
 async function resourcesInstalled(plan?: ResourcePlan) {
   await Promise.all([
-    versionManager.value?.refresh(),
+    refreshVersionManagers(),
     resourceManager.value?.refresh(),
   ]);
   if (plan)
@@ -2020,9 +2693,11 @@ async function handleResourceDrop(
 ) {
   folderDrop.handle({ type: "leave" });
   try {
+    if (kind === "selection") return;
     const files =
       inspected ||
       (await rpc<DetectedResource[]>("inspect_resources", { paths }));
+    if (!resourceDropTypeMatches(files, kind)) return;
     const issue = resourceDropIssue(files, kind);
     if (issue) throw new Error(issue);
     if (busy.value) throw new Error(t("请等待当前任务完成。"));
@@ -2100,6 +2775,7 @@ let unlistenDrop: UnlistenFn | undefined;
 let dropDisposed = false;
 let incomingPaths: string[] = [];
 let incomingFiles: Promise<DetectedResource[]> | undefined;
+let incomingDetected: DetectedResource[] | undefined;
 let incomingRevision = 0;
 const incomingPreviews = new Map<string, Promise<{ existing: string[] }>>();
 let lastDropPoint: { x: number; y: number } | undefined;
@@ -2115,20 +2791,27 @@ function dropScope(element: Element | null) {
     ) || null;
   const kind = surface?.dataset.dropKind;
   const manual = !!element?.closest("[data-manual-pack-drop]");
-  const fallback = resourceSession.value
-    ? {
-        instance: resourceSession.value.instance.id,
-        version: resourceSession.value.version,
-      }
-    : selectedInstance.value?.selected_version
+  const fallback =
+    resourceSession.value && element?.closest('[data-window-id="resources"]')
       ? {
-          instance: selectedInstance.value.id,
-          version: selectedInstance.value.selected_version,
+          instance: resourceSession.value.instance.id,
+          version: resourceSession.value.version,
         }
-      : undefined;
+      : selectedInstance.value?.selected_version
+        ? {
+            instance: selectedInstance.value.id,
+            version: selectedInstance.value.selected_version,
+          }
+        : undefined;
   return {
     surface,
     kind,
+    library:
+      element?.closest<HTMLElement>("[data-resource-library]")?.dataset
+        .resourceLibrary !== undefined &&
+      ["mods", "resourcepacks", "shaderpacks", "datapacks"].includes(
+        kind || "",
+      ),
     manual,
     target: resourceDropTarget(element, instances.value, fallback),
     destination: instances.value.find(
@@ -2145,6 +2828,10 @@ async function previewIncoming() {
   browseDropTarget(element);
   const scope = dropScope(element);
   manualPackDragging.value = scope.manual;
+  if (!scope.manual && !dedicatedDropTypeMatches(incomingPaths, scope.kind)) {
+    clearDropHint();
+    return;
+  }
   if (scope.manual) {
     showDropHint(scope.surface, t("导入缺失文件"));
     return;
@@ -2154,19 +2841,14 @@ async function previewIncoming() {
       ? t("请先结束游戏或当前任务")
       : incomingPaths.length !== 1
         ? t("请一次拖入一个配置文件")
-        : !/\.(json5?|toml|cfg|conf|properties|yaml|yml|ini)$/i.test(
-              incomingPaths[0] || "",
-            )
-          ? t("此处只接收配置文件")
-          : undefined;
+        : undefined;
     showDropHint(scope.surface, issue || t("比较并替换配置"), !!issue);
     return;
   }
   if (scope.kind === "skins" || scope.kind === "java") {
     const issue =
-      scope.kind === "skins" &&
-      !incomingPaths.every((path) => /\.png$/i.test(path))
-        ? t("请选择 PNG 皮肤文件")
+      scope.kind === "java" && incomingPaths.length !== 1
+        ? t("请一次拖入一个 Java 可执行文件")
         : undefined;
     showDropHint(
       scope.surface,
@@ -2175,19 +2857,27 @@ async function previewIncoming() {
     );
     return;
   }
-  showDropHint(scope.surface, t("识别文件内容…"));
+  // Wait for the type before highlighting a region. Keep the resolved result
+  // for dragover so a known mismatch never flashes a temporary outline.
+  if (!incomingDetected) clearDropHint();
   try {
-    const files = await incomingFiles;
+    const files = incomingDetected || (await incomingFiles);
     if (
       !files ||
       revision !== incomingRevision ||
       element !== incomingElement()
     )
       return;
+    if (!resourceDropTypeMatches(files, scope.kind)) {
+      clearDropHint();
+      return;
+    }
     const issue =
       resourceDropIssue(files, scope.kind) ||
       (busy.value ||
-      (scope.target &&
+      libraryBusy.value ||
+      (!scope.library &&
+        scope.target &&
         (snapshot.value.running.includes(scope.target.instance.id) ||
           hasInstanceTask(scope.target.instance.id)))
         ? t("请先结束游戏或当前任务")
@@ -2198,6 +2888,10 @@ async function previewIncoming() {
       )
         ? t("目标已有同名版本")
         : undefined);
+    if (scope.library) {
+      showDropHint(scope.surface, issue || t("缓存到启动器"), !!issue);
+      return;
+    }
     let duplicate: string | undefined;
     if (!issue && scope.target && files.every((f) => f.format === "resource")) {
       const args = {
@@ -2252,7 +2946,7 @@ async function previewIncoming() {
       !!issue,
     );
   } catch (error) {
-    if (revision === incomingRevision)
+    if (revision === incomingRevision && element === incomingElement())
       showDropHint(scope.surface, message(error), true);
   }
 }
@@ -2261,6 +2955,7 @@ function endIncoming() {
   incomingPreviews.clear();
   incomingPaths = [];
   incomingFiles = undefined;
+  incomingDetected = undefined;
   manualPackDragging.value = false;
   dropInteraction.value = false;
   packDragging.value = resourceDragging.value = false;
@@ -2275,6 +2970,7 @@ async function receiveFiles(
 ) {
   const manualTask = scope.manual ? displayedTask.value : null;
   endIncoming();
+  if (!scope.manual && !dedicatedDropTypeMatches(paths, scope.kind)) return;
   if (scope.manual) {
     if (manualTask?.modpack_status?.missing.length)
       await supplyPackFiles(paths, manualTask);
@@ -2291,17 +2987,24 @@ async function receiveFiles(
     return;
   }
   if (scope.kind === "java" || scope.kind === "skins") {
-    if (
-      scope.kind === "skins" &&
-      !paths.every((path) => /\.png$/i.test(path))
-    ) {
-      rejectDrop(scope.surface, t("请选择 PNG 皮肤文件"));
+    if (scope.kind === "java" && paths.length !== 1) {
+      rejectDrop(scope.surface, t("请一次拖入一个 Java 可执行文件"));
       return;
     }
     await resourceManager.value?.drop(paths, scope.kind);
     return;
   }
   try {
+    if (scope.library) {
+      const inspected =
+        (await files) ||
+        (await rpc<DetectedResource[]>("inspect_resources", { paths }));
+      if (!resourceDropTypeMatches(inspected, scope.kind)) return;
+      const issue = resourceDropIssue(inspected, scope.kind);
+      if (issue) throw new Error(issue);
+      await resourceManager.value?.drop(paths, scope.kind);
+      return;
+    }
     await handleResourceDrop(
       paths,
       scope.target,
@@ -2331,11 +3034,12 @@ async function listenForFolders() {
   try {
     const stop = await getCurrentWindow().onDragDropEvent((e) => {
       const payload = e.payload;
+      if (layoutEditing.value) {
+        endIncoming();
+        return;
+      }
       if ("position" in payload)
-        lastDropPoint = {
-          x: payload.position.x / window.devicePixelRatio,
-          y: payload.position.y / window.devicePixelRatio,
-        };
+        lastDropPoint = nativeDropPoint(payload.position);
       if (
         resourceTransfer.nativeEvent(
           payload.type,
@@ -2359,10 +3063,15 @@ async function listenForFolders() {
       if (payload.type === "enter") {
         clearTimeout(dropHintTimer);
         incomingRevision++;
+        const revision = incomingRevision;
+        incomingDetected = undefined;
         incomingPaths = payload.paths;
         dropInteraction.value = true;
         incomingFiles = rpc<DetectedResource[]>("inspect_resources", {
           paths: payload.paths,
+        }).then((files) => {
+          if (revision === incomingRevision) incomingDetected = files;
+          return files;
         });
         // Handle failures immediately even if the pointer leaves before preview awaits it.
         void incomingFiles.catch(() => {});
@@ -2387,6 +3096,7 @@ let portablePreferencesLoaded = false;
 async function sync() {
   const request = ++snapshotRequest;
   const accountsAtStart = accountRevision;
+  const instancesAtStart = new Map(instanceRevisions);
   const response = await rpc<{
     state: Snapshot;
     manifest: VersionManifest | null;
@@ -2407,6 +3117,18 @@ async function sync() {
     Object.assign(response.state.database.settings, {
       [key]: snapshot.value.database.settings[key],
     });
+  }
+  for (const instance of response.state.database.instances) {
+    const pending = pendingInstanceSettings.get(instance.id);
+    const local = snapshot.value.database.instances.find(
+      (item) => item.id === instance.id,
+    );
+    if (pending) Object.assign(instance, pending.preferences);
+    else if (
+      local &&
+      instancesAtStart.get(instance.id) !== instanceRevisions.get(instance.id)
+    )
+      Object.assign(instance, instancePreferences(local));
   }
   snapshot.value = response.state;
   if (snapshot.value.portable && !portablePreferencesLoaded) {
@@ -2467,16 +3189,18 @@ async function action<T>(
         JSON.stringify(previous.arguments) === JSON.stringify(data) &&
         ["error", "cancelled", "waiting"].includes(previous.status),
     );
-    const savedProgress = version
-      ? Math.max(
-          tasks.value.find(
-            (previous) =>
-              previous.instance_id === instance?.id &&
-              previous.version_id === version.id,
-          )?.download_progress ?? 0,
-          version.download_progress ?? 0,
-        )
-      : (previousTask?.download_progress ?? 0);
+    const savedProgress = data.repair
+      ? (previousTask?.download_progress ?? 0)
+      : version
+        ? Math.max(
+            tasks.value.find(
+              (previous) =>
+                previous.instance_id === instance?.id &&
+                previous.version_id === version.id,
+            )?.download_progress ?? 0,
+            version.download_progress ?? 0,
+          )
+        : (previousTask?.download_progress ?? 0);
     // Only the current workflow needs its detailed file list. Keep compact
     // history for per-version resume progress without retaining old file maps.
     for (const previous of tasks.value)
@@ -2497,6 +3221,7 @@ async function action<T>(
         "install",
         "launch",
         "install_resources",
+        "prepare_missing_dependencies",
         "download_modpack",
         "download_declared_mod",
         "resource_manager",
@@ -2536,7 +3261,23 @@ async function action<T>(
       await persistSettings();
       if (settingsSaveError.value) throw new Error(settingsSaveError.value);
     }
+    if (typeof data.id === "string") {
+      if (task) {
+        await persistInstanceSettings(data.id);
+        const failure = instanceSaveErrors.get(data.id);
+        if (failure) throw new Error(failure);
+      } else if (op === "delete") {
+        // Finish an in-flight write before removal, without requiring invalid
+        // preferences to be saved before the user can remove the instance.
+        await instanceSavePromises.get(data.id);
+      }
+    }
     const result = await rpc<T>(op, data);
+    if (op === "delete" && result && typeof data.id === "string") {
+      pendingInstanceSettings.delete(data.id);
+      instanceSaveErrors.delete(data.id);
+      instanceRevisions.delete(data.id);
+    }
     if (entry && op === "install" && result === false) {
       entry.status = "waiting";
       entry.indeterminate = false;
@@ -2625,7 +3366,6 @@ async function loadVersions() {
 }
 async function openInstancePicker() {
   utility.value = null;
-  showLogs.value = false;
   error.value = "";
   suggestedInstances.value = [];
   modal.value = "add";
@@ -2763,42 +3503,45 @@ async function chooseCreationDirectory(direct = false) {
   }
 }
 function hasInstanceTask(id: string) {
-  return (
-    current.value?.instance_id === id &&
-    ["running", "paused"].includes(current.value.status)
-  );
+  return instanceProgress.value?.instance_id === id;
 }
-async function openInstance(instance: Instance) {
+async function openInstance(instance: Instance, event?: Event) {
   if (snapshot.value.running.includes(instance.id)) {
     openLogs(instance.id);
     return;
   }
   if (hasInstanceTask(instance.id)) {
-    showLogs.value = false;
-    modal.value = null;
-    utility.value = "downloads";
+    openDownloads();
     return;
   }
-  await edit(instance);
+  await edit(instance, event);
 }
-async function edit(i: Instance) {
+async function edit(i: Instance, event?: Event) {
   // Switching directly between two editors also starts a fresh session.
   modalSession++;
+  instanceSettingsAnchor.value = event?.currentTarget as
+    HTMLElement | undefined;
   utility.value = null;
   error.value = "";
+  hydratingInstance = true;
   editing.value = i;
+  const preferences =
+    pendingInstanceSettings.get(i.id)?.preferences || instancePreferences(i);
   Object.assign(form, {
-    name: i.name,
+    ...preferences,
     version: i.selected_version || "",
-    memory_mb: i.memory_mb,
-    memory_mode: i.memory_mode || "auto",
-    java_path: i.java_path || "",
-    launch: instanceLaunchOptions(i.launch),
-    icon: instanceMaterial(i),
+    java_path: preferences.java_path || "",
+    launch: {
+      ...preferences.launch,
+      jvm_args: [...preferences.launch.jvm_args],
+      game_args: [...preferences.launch.game_args],
+      environment: [...preferences.launch.environment],
+    },
   });
   editingDirectory.value = "";
   directoryLoading.value = true;
   modal.value = "edit";
+  hydratingInstance = false;
   void loadMemoryOptions(i.id);
   void discoverJava();
   try {
@@ -2812,8 +3555,7 @@ async function edit(i: Instance) {
   }
 }
 async function chooseJava() {
-  if (javaPicking.value || instanceSaving.value || modal.value !== "edit")
-    return;
+  if (javaPicking.value || modal.value !== "edit") return;
   const session = modalSession;
   const instanceId = editing.value?.id;
   javaPicking.value = true;
@@ -2852,52 +3594,9 @@ async function chooseJava() {
   }
 }
 async function saveEditedInstance() {
-  if (modal.value !== "edit" || !editing.value || instanceSaving.value) return;
-  if (invalidCustomMemory.value || !validLaunchSize(form.launch)) return;
+  if (modal.value !== "edit" || !editing.value) return;
   if (instanceHeader.value?.finishRename() === false) return;
-  const id = editing.value.id;
-  const isolationChanged =
-    form.launch.isolation !== (editing.value.launch?.isolation ?? null);
-  const session = modalSession;
-  const isCurrentEditor = () =>
-    modal.value === "edit" &&
-    editing.value?.id === id &&
-    modalSession === session;
-  instanceWrites.add(id);
-  error.value = "";
-  try {
-    await rpc("update", {
-      id,
-      name: form.name,
-      memory_mb: validMemory(form.memory_mb)
-        ? form.memory_mb
-        : validMemory(editing.value.memory_mb)
-          ? editing.value.memory_mb
-          : 2048,
-      memory_mode: form.memory_mode,
-      java_path: form.java_path || null,
-      launch: {
-        ...form.launch,
-        jvm_args: form.launch.jvm_args
-          .map((line) => line.trim())
-          .filter(Boolean),
-        game_args: form.launch.game_args
-          .map((line) => line.trim())
-          .filter(Boolean),
-        environment: form.launch.environment.filter((line) => line.trim()),
-      },
-      icon: form.icon,
-    });
-    if (isolationChanged) loadVersionContent.invalidate(id);
-    await sync();
-    if (isCurrentEditor()) modal.value = null;
-  } catch (e) {
-    const text = message(e);
-    if (isCurrentEditor()) error.value = text;
-    appendLog({ time: stamp(), kind: "error", message: text });
-  } finally {
-    instanceWrites.delete(id);
-  }
+  await persistInstanceSettings(editing.value.id);
 }
 async function submit() {
   if (modal.value === "edit") {
@@ -2937,7 +3636,7 @@ async function submit() {
       // Use the existing task graph during extraction/copying. Closing it does
       // not cancel the operation; failed/cancelled imports can be retried there.
       modal.value = null;
-      utility.value = "downloads";
+      openDownloads();
       result = await importing;
     } else
       result = await action<Instance>("创建实例", "create", {
@@ -2959,6 +3658,7 @@ async function submitDownload() {
     loader: form.loader,
     loaderVersion: form.loader_version,
     resources: selectedResources.value.map((pick) => ({ ...pick })),
+    local: selectedLocalResources.value.map((source) => ({ ...source })),
   };
   downloadSubmitting.value = true;
   try {
@@ -2996,7 +3696,7 @@ async function submitDownload() {
             version: selection.game,
           });
     if (instance) {
-      if (selection.resources.length) {
+      if (selection.resources.length || selection.local.length) {
         const queued = await action<boolean>(
           "预选资源",
           "queue_version_resources",
@@ -3009,6 +3709,7 @@ async function submitDownload() {
                 ? null
                 : { kind: selection.loader, version: selection.loaderVersion },
             resources: selection.resources,
+            local: selection.local,
           },
         );
         if (!queued) return;
@@ -3195,9 +3896,7 @@ function showManualPack(task: Task) {
   if (current.value && current.value !== task) return;
   tasks.value = [task, ...tasks.value.filter((item) => item !== task)];
   modal.value = null;
-  showLogs.value = false;
-  resourceSession.value = undefined;
-  utility.value = "downloads";
+  openDownloads();
 }
 async function supplyPackFiles(
   dropped?: string[],
@@ -3245,14 +3944,18 @@ async function resumePack() {
     error.value = message(e);
   }
 }
-function newVersion(instance: Instance) {
+function newVersion(
+  instance: Instance | null,
+  section: "game" | "modpacks" = "game",
+) {
   droppedPack.value = undefined;
   packPreview.value = null;
   additionSection.value =
     current.value?.workflow.steps[0]?.id === "pack_archive_resolve"
       ? "modpacks"
-      : "game";
+      : section;
   selectedResources.value = [];
+  selectedLocalResources.value = [];
   onlinePack.value = false;
   error.value = "";
   utility.value = null;
@@ -3263,31 +3966,39 @@ function newVersion(instance: Instance) {
   form.loader = "vanilla";
   form.loader_version = "";
   modal.value = "version";
-  if (!manifest.value && desktop) void loadVersions();
+  if (!manifest.value && desktop && additionSection.value === "game")
+    void loadVersions();
+  void nextTick(() => focusToolWindow("installer"));
 }
 function manageVersions(instance: Instance) {
-  managedInitialVersion.value = undefined;
-  managedInitialTab.value = undefined;
+  let entry = managedWindows.value.find(
+    (item) => item.instanceId === instance.id,
+  );
+  if (!entry) {
+    entry = {
+      id: `versions-${++managedWindowSequence}`,
+      instanceId: instance.id,
+      busy: false,
+    };
+    managedWindows.value.push(entry);
+    entry = managedWindows.value.at(-1)!;
+  }
   error.value = "";
-  utility.value = null;
-  editing.value = instance;
-  managing.value = false;
-  modal.value = "manage";
+  const id = entry.id;
+  void nextTick(() => focusToolWindow(id));
+  return entry;
 }
-function switchManagedInstance(id: string) {
-  if (modal.value !== "manage" || managing.value) return;
-  const instance = instances.value.find((item) => item.id === id);
-  if (!instance) return;
-  error.value = "";
-  managedInitialVersion.value = undefined;
-  managedInitialTab.value = undefined;
-  editing.value = instance;
-}
-async function readVersionContentCounts(version: string) {
-  return rpc<VersionContentCounts>("version_content_counts", {
-    id: editing.value!.id,
-    version,
-  });
+function switchManagedInstance(windowId: string, id: string) {
+  const entry = managedWindows.value.find((item) => item.id === windowId);
+  if (!entry || entry.busy || !instances.value.some((i) => i.id === id)) return;
+  const existing = managedWindows.value.find((item) => item.instanceId === id);
+  if (existing) {
+    focusToolWindow(existing.id);
+    return;
+  }
+  entry.instanceId = id;
+  entry.initialVersion = undefined;
+  entry.initialTab = undefined;
 }
 const modActions = {
   download: (id: string, version: string, key: string) =>
@@ -3304,8 +4015,26 @@ const modActions = {
     current.value.arguments?.version === version &&
     current.value.arguments?.key === key,
 
-  setEnabled: (id: string, version: string, file: string, enabled: boolean) =>
-    rpc<string>("set_mod_enabled", { id, version, file, enabled }),
+  setEnabled: async (
+    id: string,
+    version: string,
+    file: string,
+    enabled: boolean,
+  ) => {
+    const result = await rpc<string>("set_mod_enabled", {
+      id,
+      version,
+      file,
+      enabled,
+    });
+    void Promise.all([
+      refreshVersionManagers(),
+      resourceManager.value?.resourceUpdated(id, version),
+    ]).catch((e) => {
+      error.value = message(e);
+    });
+    return result;
+  },
   list: (id: string, version: string, file: string) =>
     rpc<import("./modManagement").ModConfigFile[]>("mod_config_files", {
       id,
@@ -3336,68 +4065,6 @@ const modActions = {
       text,
     }),
 };
-const loadVersionContent = createVersionContentLoader(rpc);
-async function prefetchVersionContent(version: string, signal: AbortSignal) {
-  return loadVersionContent.preload(editing.value!.id, version, signal);
-}
-async function readVersionContent(
-  version: string,
-  kind: ContentKind,
-  options?: ContentLoadOptions,
-) {
-  return loadVersionContent(editing.value!.id, version, kind, options);
-}
-async function readContentMetadata(
-  id: string,
-  version: string,
-  kind: ContentKind,
-  file: string,
-) {
-  return rpc<ContentMetadata>("version_content_metadata", {
-    id,
-    version,
-    kind,
-    file,
-  });
-}
-async function readVersionMetadata(version: string) {
-  return rpc<VersionMetadata>("version_metadata", {
-    id: editing.value!.id,
-    version,
-  });
-}
-async function openContentFolder(
-  id: string,
-  version: string,
-  kind: ContentKind,
-  file?: string,
-  source?: string,
-) {
-  await rpc("open_content_folder", { id, version, kind, file, source });
-}
-async function readContentSource(
-  id: string,
-  version: string,
-  kind: ContentKind,
-  file: string,
-  source: string,
-) {
-  return rpc<string>("version_content_source", {
-    id,
-    version,
-    kind,
-    file,
-    source,
-  });
-}
-async function renameVersion(version: string, name: string) {
-  await rpc("rename_version", { id: editing.value!.id, version, name });
-  await sync();
-}
-async function deleteVersion(version: string) {
-  await rpc("delete_version", { id: editing.value!.id, version });
-  await sync();
-}
 async function selectVersion(instance: Instance, version: string) {
   if (instance.selected_version === version) return;
   await action("切换版本", "select_version", {
@@ -3429,8 +4096,7 @@ async function install(
       } catch (e) {
         error.value = message(e);
       }
-      if (!modal.value && !utility.value && !showLogs.value)
-        utility.value = "downloads";
+      if (!modal.value && !utility.value && !showLogs.value) openDownloads();
       if (
         result === false &&
         task.modpack_status &&
@@ -3443,28 +4109,85 @@ async function install(
   }
   return result;
 }
-async function startGame() {
-  if (busy.value || selectedRunning.value || !selectedInstance.value) return;
+async function startShortcut(target: VersionShortcut, server?: string) {
+  if (busy.value || startRequested.value || launchingId.value) return;
+  const resolved = resolveShortcut(instances.value, target);
+  if (!resolved || snapshot.value.running.includes(target.instance)) return;
+  selectInstance(target.instance);
+  await startGame(server, target);
+}
+async function startGame(server?: string, target?: VersionShortcut) {
+  const shortcut = target && resolveShortcut(instances.value, target);
+  const instance = shortcut
+    ? { ...shortcut.instance, selected_version: shortcut.version.id }
+    : selectedInstance.value;
+  const version = shortcut?.version.id || selectedVersion.value?.id;
+  if (target && !shortcut) return;
+  if (
+    busy.value ||
+    startRequested.value ||
+    !instance ||
+    snapshot.value.running.includes(instance.id) ||
+    !version
+  )
+    return;
   const waiting = tasks.value.find(
     (task) =>
       task.status === "waiting" &&
-      task.instance_id === selectedInstance.value!.id &&
-      task.version_id === selectedInstance.value!.selected_version,
+      task.instance_id === instance.id &&
+      task.version_id === version,
   );
   if (waiting) {
     showManualPack(waiting);
     return;
   }
-  await prepareAndLaunch(selectedInstance.value, { install, launch });
+  startRequested.value = true;
+  try {
+    if (launchReports[instance.id] === undefined)
+      await loadLaunchReport(instance.id);
+    const report = launchReports[instance.id];
+    const repairs = report?.version === version ? automaticRepairs(report) : [];
+    if (report && repairs.length) {
+      if (!(await repairLaunch(instance.id, report, repairs))) {
+        openLogs(instance.id);
+        return;
+      }
+      repairingTarget.value = null;
+    }
+    const currentInstance = snapshot.value.database.instances.find(
+      (i) => i.id === instance.id,
+    );
+    if (!currentInstance?.versions.some((v) => v.id === version)) return;
+    if (
+      currentInstance.selected_version !== version &&
+      (await action<boolean>("切换版本", "select_version", {
+        id: instance.id,
+        version,
+      })) !== true
+    )
+      return;
+    await prepareAndLaunch(
+      { ...currentInstance, selected_version: version },
+      { install, launch: (instance) => launch(instance, server) },
+    );
+  } finally {
+    repairingTarget.value = null;
+    startRequested.value = false;
+  }
 }
-async function launch(i: Instance) {
+async function launch(i: Instance, server?: string) {
   if (launchingId.value || busy.value) return;
   launchingId.value = i.id;
   launchReports[i.id] = null;
   try {
     if (guestNameWrite) await guestNameWrite;
     if (accountNameWrite) await accountNameWrite;
-    await action("启动游戏", "launch", { id: i.id }, true);
+    await action(
+      "启动游戏",
+      "launch",
+      { id: i.id, ...(server ? { server } : {}) },
+      true,
+    );
   } finally {
     launchingId.value = null;
   }
@@ -3537,21 +4260,18 @@ async function login() {
       showChallenge: (value) => {
         challenge.value = value;
       },
-      copyCode: writeClipboard,
-      copyFailed: () => {
-        error.value = "无法访问剪贴板，请手动选择并复制。";
-      },
       openBrowser: (url) => openUrl(url),
       browserFailed: () => {
-        error.value = "未能自动打开浏览器。请点击下方登录链接重试。";
+        error.value = "未能自动打开浏览器，请点击加号重试。";
       },
       waitForLogin: (value) =>
         rpc<Account>("wait_login", { session_id: value.session_id }),
     });
     if (!isCurrent() || !account) return;
-    // wait_login already persisted this account. Render it in the same update
-    // as dismissing the code, without an intervening stale list/full snapshot.
+    // wait_login already persisted this account. Update the existing avatar
+    // list in place without reopening a panel or requesting a stale snapshot.
     accountRevision++;
+    accountRefresher.fresh(account.id);
     snapshot.value.database.accounts = [
       ...snapshot.value.database.accounts.filter((a) => a.id !== account.id),
       account,
@@ -3660,7 +4380,7 @@ watch(utility, (panel) => {
 async function chooseIdentity(id: string | null) {
   if (busy.value || loginBusy.value) return;
   if (id === snapshot.value.database.selected_account) {
-    if (id !== null) utility.value = null;
+    utility.value = null;
     return;
   }
   busy.value = true;
@@ -3669,7 +4389,7 @@ async function chooseIdentity(id: string | null) {
     await rpc("select_account", { id });
     accountRevision++;
     snapshot.value.database.selected_account = id;
-    if (id !== null) utility.value = null;
+    utility.value = null;
   } catch (e) {
     error.value = message(e);
   } finally {
@@ -3789,8 +4509,10 @@ const launchWindowBehavior = createLaunchWindowBehavior(
   },
 );
 function onEvent(e: LauncherEvent) {
-  if (e.instance_id && ["game_crash", "launch_failed"].includes(e.kind))
+  if (e.instance_id && ["game_crash", "launch_failed"].includes(e.kind)) {
     launchReports[e.instance_id] = e.crash || null;
+    delete dismissedRecoveries[e.instance_id];
+  }
   if (e.instance_id && e.kind === "game_started") {
     launchReports[e.instance_id] = null;
     if (!snapshot.value.running.includes(e.instance_id))
@@ -3916,8 +4638,11 @@ async function refreshDirectories() {
     error.value = message(e);
   }
 }
+let accountRefreshTimer: ReturnType<typeof setInterval> | undefined;
 onMounted(async () => {
   window.addEventListener("focus", refreshDirectories);
+  window.addEventListener("focus", refreshAccountAutomatically);
+  window.addEventListener("online", refreshAccountAutomatically);
   document.addEventListener("visibilitychange", updateVisibility);
   try {
     selectedInstanceId.value =
@@ -3928,6 +4653,7 @@ onMounted(async () => {
     /* Fall back to the first instance. */
   }
   if (!desktop) return;
+  accountRefreshTimer = setInterval(refreshAccountAutomatically, 60_000);
   void listenForFolders();
   try {
     unlisten = await listen<LauncherEvent>("launcher-event", (e) =>
@@ -3948,15 +4674,20 @@ onMounted(async () => {
   }
 });
 onUnmounted(() => {
+  accountUpdatesDisposed = true;
+  accountRefresher.dispose();
+  clearInterval(accountRefreshTimer);
   void endLogin().catch(() => {});
   instanceDiscoveryRequest++;
   dropDisposed = true;
   unlistenDrop?.();
   folderDrop.dispose();
+  finishResourceRemovalConfirmation();
   clearTimeout(noticeTimer);
   clearTimeout(dropHintTimer);
   clearTimeout(browseTimer);
   clearDropHint();
+  clearTimeout(browseWindowTimer);
   dropInteraction.value = false;
   clearLoaderNotice();
   skinGeneration++;
@@ -3964,12 +4695,18 @@ onUnmounted(() => {
   unlisten?.();
   unlistenUpdate?.();
   window.removeEventListener("focus", refreshDirectories);
+  window.removeEventListener("focus", refreshAccountAutomatically);
+  window.removeEventListener("online", refreshAccountAutomatically);
   document.removeEventListener("visibilitychange", updateVisibility);
 });
 </script>
 
 <template>
-  <div class="shell" :data-theme="theme">
+  <div
+    class="shell"
+    :class="{ 'layout-editing': layoutEditing }"
+    :data-theme="theme"
+  >
     <Transition
       name="dialog"
       appear
@@ -4009,14 +4746,31 @@ onUnmounted(() => {
       />
     </Transition>
     <ResourceTransferOverlay :drag="resourceTransfer" />
+    <Transition
+      name="dialog"
+      @before-leave="prepareDialogLeave"
+      @after-leave="finishDialogLeave"
+    >
+      <ResourceRemovalConfirm
+        v-if="resourceRemovalConfirmation"
+        :names="resourceRemovalConfirmation.names"
+        @close="finishResourceRemovalConfirmation()"
+        @confirm="finishResourceRemovalConfirmation(true)"
+      />
+    </Transition>
     <DropTargetOverlay />
     <ErrorNotice
       :message="visibleError || loaderNotice"
       :informational="!visibleError && !!loaderNotice"
-      :retry="!!settingsSaveError && visibleError === settingsSaveError"
-      :retrying="settingsSaving"
+      :retry="
+        (!!settingsSaveError && visibleError === settingsSaveError) ||
+        !!instanceRetryId
+      "
+      :retrying="
+        instanceRetryId ? instanceWrites.has(instanceRetryId) : settingsSaving
+      "
       @dismiss="visibleError ? dismissError() : clearLoaderNotice()"
-      @retry="persistSettings"
+      @retry="retrySettingsSave"
     />
     <FolderDrop
       :controller="folderDrop"
@@ -4024,99 +4778,331 @@ onUnmounted(() => {
       :resource="resourceDragging"
     />
     <WorldBackdrop :key="theme" :theme="theme" :paused="windowHidden" />
-    <header class="topbar">
-      <button
-        class="account-card glass-surface ui-reveal-item"
-        :style="listRevealStyle(0)"
-        :aria-label="t('账户管理')"
-        @click="toggleUtility('accounts')"
-      >
-        <span class="account-avatar"
-          ><img v-if="avatar" :src="avatar" alt="" /><UsersRound
-            v-else
-            :size="25" /><UserRound
-            v-if="!selectedAccount"
-            class="guest-avatar-mark"
-            :size="11"
-            aria-hidden="true"
-        /></span>
-        <span class="account-identity">
-          <strong>{{ selectedAccount?.username || guestName }}</strong>
-          <span
-            v-if="selectedAccount"
-            class="account-status"
-            data-online="true"
-            >{{
-              selectedAccount.expires_at * 1000 > Date.now()
-                ? t("已登录")
-                : t("待刷新")
-            }}</span
-          >
-          <span v-else class="account-status"> {{ t("游客") }} </span>
-        </span>
-        <ChevronDown class="account-chevron" :size="14" />
-      </button>
-      <div class="global-tools">
-        <button
-          class="icon-button ui-reveal-item"
-          :style="listRevealStyle(1)"
-          :title="t('资源管理')"
-          :aria-label="t('资源管理')"
-          @click="openResourceManager"
-        >
-          <Boxes :size="20" />
-        </button>
-        <button
-          class="icon-button ui-reveal-item"
-          :style="listRevealStyle(2)"
-          :title="t('全局设置')"
-          :aria-label="t('全局设置')"
-          @click="toggleUtility('settings')"
-        >
-          <Settings2 :size="20" />
-        </button>
-        <button
-          class="icon-button ui-reveal-item"
-          :style="listRevealStyle(3)"
-          :title="t('运行日志')"
-          :aria-label="t('运行日志')"
-          @click="openLogs()"
-        >
-          <Terminal :size="20" />
-        </button>
-      </div>
-    </header>
-
-    <main
-      class="workspace"
-      :style="{ opacity: modal === 'library' && librarySkinPreview ? 0 : 1 }"
-      :aria-label="t('玩家皮肤预览')"
+    <HomeLayout
+      ref="homeLayout"
+      :instance-slots="Math.min(dockLimit, instances.length)"
+      :portable="snapshot.portable"
+      @editing="changeLayoutEditing"
     >
-      <SkinStage
-        idle
-        playful
-        :identity="selectedAccount?.id || `guest:${guestSkinId}`"
-        :direction="skinDirection"
-        :texture="skinTexture"
-        :slim="skinSlim"
-        :loading="skinLoading"
-        :paused="!!modal || !!utility || showLogs"
-        :caption="t(skinCaption)"
-        :issue="translateMessage(skinError)"
-        @avatar="updateAvatar"
-        @failed="skinError = $event"
-        @retry="selectedAccount ? loadAccountSkin() : loadGuestSkin()"
-      />
-    </main>
+      <template #quote="{ editing, quoteStyle, quoteAngle, quoteScale }"
+        ><HomeWidget
+          kind="quote"
+          :quote-style="quoteStyle"
+          :quote-angle="quoteAngle"
+          :quote-scale="quoteScale"
+          :editing="editing"
+          :rpc="rpc"
+          @link="openLink"
+      /></template>
+      <template #news="{ editing, newsSources, newsAlign }"
+        ><HomeWidget
+          kind="news"
+          :editing="editing"
+          :news-sources="newsSources"
+          :news-align="newsAlign"
+          :rpc="rpc"
+          @link="openLink"
+      /></template>
+      <template
+        v-for="kind in [
+          'servers',
+          'favorites',
+          'worlds',
+          'todos',
+          'clock',
+        ] as const"
+        :key="kind"
+        #[kind]="{ editing, clockScale, clockAngle, clockDate }"
+      >
+        <HomeDashboardWidget
+          :kind="kind"
+          :editing="editing"
+          :instances="instances"
+          :selected="selectedInstance"
+          :running="snapshot.running"
+          :busy="busy || startRequested || !!launchingId"
+          :rpc="rpc"
+          :clock-scale="clockScale"
+          :clock-angle="clockAngle"
+          :clock-date="clockDate"
+          @launch="startShortcut"
+          @manage="
+            manageResourceVersion($event.instance, $event.version, 'saves')
+          "
+          @error="error = message($event)"
+        />
+      </template>
+      <template #account>
+        <header
+          class="topbar"
+          :class="{ 'account-menu-open': utility === 'accounts' }"
+        >
+          <AccountDropdown
+            class="ui-reveal-item"
+            :style="listRevealStyle(0)"
+            :open="utility === 'accounts'"
+            @update:open="setAccountsOpen"
+          >
+            <template #trigger>
+              <button
+                class="account-card glass-surface"
+                :aria-expanded="utility === 'accounts'"
+                aria-controls="account-options"
+                :aria-label="t('账户管理')"
+                @click="toggleUtility('accounts')"
+              >
+                <span class="account-avatar"
+                  ><img v-if="avatar" :src="avatar" alt="" /><UsersRound
+                    v-else
+                    :size="25" /><UserRound
+                    v-if="!selectedAccount"
+                    class="guest-avatar-mark"
+                    :size="11"
+                    aria-hidden="true"
+                /></span>
+                <span class="account-identity">
+                  <strong>{{ selectedAccount?.username || guestName }}</strong>
+                  <span
+                    v-if="selectedAccount"
+                    class="account-status"
+                    data-online="true"
+                    >{{
+                      selectedAccount.expires_at * 1000 > Date.now()
+                        ? t("已登录")
+                        : t("待刷新")
+                    }}</span
+                  >
+                  <span v-else class="account-status"> {{ t("游客") }} </span>
+                </span>
+                <ChevronDown class="account-chevron" :size="14" />
+              </button>
+            </template>
+            <TransitionGroup
+              name="account-choice"
+              tag="div"
+              @before-leave="pinPanelLeave"
+              @after-leave="resetPanelLeave"
+              @leave-cancelled="resetPanelLeave"
+              class="account-list"
+              role="group"
+              :aria-label="t('选择启动账户')"
+            >
+              <div key="guest" class="account-choice account-guest">
+                <button
+                  class="account-select"
+                  :class="{
+                    current: snapshot.database.selected_account === null,
+                  }"
+                  :disabled="busy || loginBusy"
+                  :aria-pressed="snapshot.database.selected_account === null"
+                  :aria-label="
+                    t('以游客身份启动 · {name}', { name: guestName })
+                  "
+                  @click="chooseIdentity(null)"
+                >
+                  <span class="account-avatar-frame">
+                    <AccountAvatar
+                      :load-texture="fetchAccountSkin"
+                      :texture="guestTexture"
+                    />
+                    <UserRound
+                      class="guest-avatar-mark"
+                      :size="11"
+                      aria-hidden="true"
+                    />
+                  </span>
+                </button>
+                <input
+                  v-if="guestNameEditing"
+                  ref="guestNameInput"
+                  v-model="guestNameDraft"
+                  class="guest-name-input"
+                  :aria-label="t('游客名称')"
+                  :readonly="guestNameSaving"
+                  maxlength="16"
+                  autocomplete="off"
+                  autocapitalize="off"
+                  :spellcheck="false"
+                  @blur="finishGuestNameEdit"
+                  @keydown.enter.prevent="finishGuestNameEdit"
+                  @keydown.esc.stop.prevent="cancelGuestNameEdit"
+                />
+                <button
+                  v-else
+                  class="account-name guest-name-button"
+                  :disabled="busy || loginBusy || guestNameSaving"
+                  :aria-label="t('修改游客名称')"
+                  @click.stop="editGuestName"
+                >
+                  {{ t("游客 · {name}", { name: guestName }) }}
+                </button>
+              </div>
+              <div
+                v-for="account in snapshot.database.accounts"
+                :key="account.id"
+                class="account-choice"
+              >
+                <button
+                  class="account-select"
+                  :class="{
+                    current: account.id === snapshot.database.selected_account,
+                  }"
+                  :disabled="busy || loginBusy"
+                  :aria-pressed="
+                    account.id === snapshot.database.selected_account
+                  "
+                  :aria-label="
+                    t('使用 {name} 启动游戏', { name: account.username })
+                  "
+                  @click="chooseAccount(account)"
+                >
+                  <span class="account-avatar-frame">
+                    <AccountAvatar
+                      :account="account"
+                      :preview="
+                        account.id === selectedAccount?.id &&
+                        !skinLoading &&
+                        avatarTexture === skinTexture
+                          ? avatar
+                          : undefined
+                      "
+                      :load-texture="fetchAccountSkin"
+                    />
+                  </span>
+                </button>
+                <div
+                  v-if="accountNameEditing === account.id"
+                  class="account-name-editor"
+                  :aria-busy="accountNameSaving"
+                  @focusout="blurAccountName"
+                  @keydown.esc.stop.prevent="cancelAccountNameEdit"
+                >
+                  <input
+                    ref="accountNameInputs"
+                    v-model="accountNameDraft"
+                    :aria-label="t('Java 版玩家名称')"
+                    aria-describedby="account-name-hint"
+                    :readonly="accountNameSaving"
+                    maxlength="16"
+                    autocomplete="off"
+                    autocapitalize="off"
+                    :spellcheck="false"
+                    @keydown.enter.prevent="saveAccountName"
+                  />
+                  <button
+                    class="icon-button"
+                    :disabled="accountNameSaving"
+                    :title="t('确认改名')"
+                    :aria-label="t('确认改名')"
+                    @pointerdown.prevent
+                    @click.stop="saveAccountName"
+                  >
+                    <LoaderCircle
+                      v-if="accountNameSaving"
+                      :size="13"
+                      class="spin"
+                    />
+                    <Check v-else :size="13" />
+                  </button>
+                </div>
+                <button
+                  v-else
+                  class="account-name account-name-button"
+                  :disabled="busy || loginBusy || accountNameSaving"
+                  :aria-label="
+                    t('{name} · 点击修改名称', { name: account.username })
+                  "
+                  @click.stop="editAccountName(account)"
+                >
+                  {{ account.username }}
+                </button>
+                <button
+                  class="icon-button account-remove"
+                  :disabled="busy"
+                  :aria-label="t('移除账户 {name}', { name: account.username })"
+                  :title="t('移除账户')"
+                  @click="
+                    action('移除账户', 'remove_account', { id: account.id })
+                  "
+                >
+                  <X :size="14" />
+                </button>
+              </div>
+              <button
+                key="add-account"
+                class="account-add"
+                :disabled="busy"
+                :aria-busy="loginBusy"
+                :aria-label="t('添加微软账户')"
+                :title="t('添加微软账户')"
+                @click="login()"
+              >
+                <span class="account-add-icon"
+                  ><LoaderCircle
+                    v-if="loginBusy"
+                    :size="20"
+                    class="spin" /><Plus v-else :size="20"
+                /></span>
+                <span>{{ t("添加微软账户") }}</span>
+              </button>
+            </TransitionGroup>
+            <Transition name="selection-text">
+              <p
+                v-if="accountNameEditing"
+                id="account-name-hint"
+                class="account-name-hint"
+              >
+                {{ t("30天可修改一次") }}
+              </p>
+            </Transition>
+          </AccountDropdown>
+        </header>
+      </template>
+      <template #tools="{ tools, editing, orientation, updateTools }">
+        <HomeToolbar
+          :items="tools"
+          :editing="editing"
+          :orientation="orientation"
+          :settings-open="utility === 'settings'"
+          @update="updateTools"
+          @activate="activateHomeTool"
+          @edit="editHomeLayout"
+          @settings-anchor="settingsAnchor = $event"
+        />
+      </template>
 
-    <footer class="bottom-bar">
-      <ThemePicker
-        class="ui-reveal-item"
-        :style="listRevealStyle(3)"
-        :model-value="theme"
-        @update:model-value="setTheme"
-      />
-      <div class="game-controls">
+      <main
+        class="workspace"
+        :inert="layoutEditing"
+        :aria-label="t('玩家皮肤预览')"
+      >
+        <SkinStage
+          idle
+          playful
+          :identity="selectedAccount?.id || `guest:${guestSkinId}`"
+          :direction="skinDirection"
+          :texture="skinTexture"
+          :slim="skinSlim"
+          :loading="skinLoading"
+          :paused="windowHidden"
+          :caption="t(skinCaption)"
+          :issue="translateMessage(skinError)"
+          @avatar="updateAvatar"
+          @failed="skinError = $event"
+          @retry="selectedAccount ? loadAccountSkin() : loadGuestSkin()"
+        />
+      </main>
+
+      <template #themes>
+        <ThemePicker
+          ref="themePicker"
+          class="ui-reveal-item"
+          :style="listRevealStyle(3)"
+          :model-value="theme"
+          @update:model-value="setTheme"
+        />
+      </template>
+      <template #instances="{ orientation }">
         <nav
           class="instance-dock ui-reveal-item"
           :class="{
@@ -4200,6 +5186,9 @@ onUnmounted(() => {
               :id="section.id === 'overflow' ? 'instance-overflow' : undefined"
               :ref="(element) => instanceSort.setSurface(section.id, element)"
               class="instance-strip"
+              :data-orientation="
+                section.id === 'main' ? orientation : 'horizontal'
+              "
               :class="{
                 'instance-overflow glass-surface': section.id === 'overflow',
               }"
@@ -4233,10 +5222,10 @@ onUnmounted(() => {
                     :aria-label="
                       t(
                         snapshot.running.includes(instance.id)
-                          ? '{name}，{version}，双击查看运行日志，按 F2 设置，拖动或按 Alt 加左右方向键排序'
+                          ? '{name}，{version}，双击查看运行日志，按 F2 设置，拖动或按 Alt 加方向键排序'
                           : hasInstanceTask(instance.id)
-                            ? '{name}，{version}，双击查看下载进度，按 F2 设置，拖动或按 Alt 加左右方向键排序'
-                            : '{name}，{version}，双击或按 F2 设置，拖动或按 Alt 加左右方向键排序',
+                            ? '{name}，{version}，双击查看下载进度，按 F2 设置，拖动或按 Alt 加方向键排序'
+                            : '{name}，{version}，双击或按 F2 设置，拖动或按 Alt 加方向键排序',
                         {
                           name: instance.name,
                           version:
@@ -4249,13 +5238,13 @@ onUnmounted(() => {
                       )
                     "
                     :aria-pressed="selectedInstance?.id === instance.id"
-                    aria-keyshortcuts="Alt+ArrowLeft Alt+ArrowRight F2"
+                    aria-keyshortcuts="Alt+ArrowLeft Alt+ArrowRight Alt+ArrowUp Alt+ArrowDown F2"
                     @pointerdown="instanceSort.start($event, instance.id)"
                     @keydown="instanceSort.keyboard($event, instance.id)"
                     @click="selectInstance(instance.id)"
-                    @dblclick="openInstance(instance)"
-                    @contextmenu.prevent="edit(instance)"
-                    @keydown.f2.prevent="edit(instance)"
+                    @dblclick="openInstance(instance, $event)"
+                    @contextmenu.prevent="edit(instance, $event)"
+                    @keydown.f2.prevent="edit(instance, $event)"
                     @mouseenter="previewInstance($event, instance)"
                     @mouseleave="hoveredInstance = null"
                     @focus="previewInstance($event, instance)"
@@ -4268,15 +5257,13 @@ onUnmounted(() => {
                     />
                   </button>
                   <InstanceProgress
-                    v-if="
-                      current?.instance_id === instance.id &&
-                      ['running', 'paused'].includes(current.status)
-                    "
-                    :title="current.title"
-                    :message="current.message"
-                    :progress="current.progress"
+                    v-if="instanceProgress?.instance_id === instance.id"
+                    :title="instanceProgress.title"
+                    :message="instanceProgress.message"
+                    :progress="instanceProgress.progress"
                     :indeterminate="
-                      current.status === 'running' && current.indeterminate
+                      instanceProgress.status === 'running' &&
+                      instanceProgress.indeterminate
                     "
                     @open="openInstance(instance)"
                   />
@@ -4296,37 +5283,47 @@ onUnmounted(() => {
             </div>
           </Transition>
         </nav>
+      </template>
+      <template #launch>
         <div
           class="launch-control glass-surface ui-reveal-item"
           :style="listRevealStyle(5)"
           :class="{
-            running: selectedRunning || selectedStarting,
+            running: selectedRunning || selectedStarting || selectedRepairing,
             download: !selectedVersion,
           }"
         >
           <button
             class="launch-button"
             :class="{ unavailable: !selectedInstance }"
-            :disabled="busy || selectedStarting || !selectedInstance"
-            :aria-busy="selectedStarting"
+            :disabled="
+              busy || startRequested || selectedStarting || !selectedInstance
+            "
+            :aria-busy="selectedStarting || selectedRepairing"
             :title="
               !selectedInstance
                 ? t('请先新建实例')
-                : selectedStarting
-                  ? t('启动中')
-                  : !selectedVersion
-                    ? t('为 {name} 下载游戏版本', {
-                        name: selectedInstance.name,
-                      })
-                    : selectedRunning
-                      ? t('停止游戏')
-                      : selectedVersion.installed
-                        ? t('启动 {version}', {
-                            version: versionName(selectedVersion),
-                          })
-                        : t('下载并启动 {version}', {
-                            version: versionName(selectedVersion),
-                          })
+                : selectedRepairing
+                  ? t('修复中')
+                  : selectedStarting
+                    ? t('启动中')
+                    : !selectedVersion
+                      ? t('为 {name} 下载游戏版本', {
+                          name: selectedInstance.name,
+                        })
+                      : selectedRunning
+                        ? t('停止游戏')
+                        : selectedNeedsRepair
+                          ? t('修复并启动 {version}', {
+                              version: versionName(selectedVersion),
+                            })
+                          : selectedVersion.installed
+                            ? t('启动 {version}', {
+                                version: versionName(selectedVersion),
+                              })
+                            : t('下载并启动 {version}', {
+                                version: versionName(selectedVersion),
+                              })
             "
             @click="
               selectedRunning
@@ -4340,45 +5337,59 @@ onUnmounted(() => {
               <Transition name="launch-content">
                 <span
                   :key="
-                    selectedStarting
-                      ? 'starting'
-                      : selectedRunning
-                        ? 'stop'
-                        : selectedVersion
-                          ? selectedVersion.installed
-                            ? 'play'
-                            : 'install'
-                          : 'download'
+                    selectedRepairing
+                      ? 'repairing'
+                      : selectedStarting
+                        ? 'starting'
+                        : selectedRunning
+                          ? 'stop'
+                          : selectedVersion
+                            ? selectedNeedsRepair
+                              ? 'repair'
+                              : selectedVersion.installed
+                                ? 'play'
+                                : 'install'
+                            : 'download'
                   "
                   class="launch-content"
                   :class="{
                     'has-version': !!selectedVersion,
                     'needs-install':
                       selectedVersion &&
-                      !selectedVersion.installed &&
+                      (!selectedVersion.installed || selectedNeedsRepair) &&
                       !selectedRunning &&
-                      !selectedStarting,
+                      !selectedStarting &&
+                      !selectedRepairing,
                   }"
                 >
                   <span class="launch-primary">
                     <Square
-                      v-if="selectedRunning || selectedStarting"
+                      v-if="
+                        selectedRunning || selectedStarting || selectedRepairing
+                      "
                       class="stop-icon"
                       :size="16"
+                    /><Wrench
+                      v-else-if="selectedNeedsRepair"
+                      :size="18"
                     /><Download
                       v-else-if="!selectedVersion?.installed"
                       :size="18"
                     /><Play v-else :size="18" />
                     <span class="launch-label">{{
-                      selectedStarting
-                        ? t("启动中")
-                        : selectedRunning
-                          ? t("停止游戏")
-                          : selectedVersion
-                            ? selectedVersion.installed
-                              ? t("启动游戏")
-                              : t("下载并启动游戏")
-                            : t("下载游戏")
+                      selectedRepairing
+                        ? t("修复中")
+                        : selectedStarting
+                          ? t("启动中")
+                          : selectedRunning
+                            ? t("停止游戏")
+                            : selectedVersion
+                              ? selectedNeedsRepair
+                                ? t("修复并启动游戏")
+                                : selectedVersion.installed
+                                  ? t("启动游戏")
+                                  : t("下载并启动游戏")
+                              : t("下载游戏")
                     }}</span>
                   </span>
                   <Transition name="launch-version">
@@ -4402,7 +5413,9 @@ onUnmounted(() => {
               :locked="busy || selectedRunning || versionOrderSaving"
               :disabled="
                 !dropInteraction &&
-                (!selectedInstance || !!modal || !!utility || showLogs)
+                (!selectedInstance ||
+                  (modal && modal !== 'version') ||
+                  utility === 'settings')
               "
               :move-version="reorderVersion"
               :remove-version="removeDraggedVersion"
@@ -4414,8 +5427,8 @@ onUnmounted(() => {
             />
           </Transition>
         </div>
-      </div>
-    </footer>
+      </template>
+    </HomeLayout>
     <Transition name="instance-trash">
       <div
         v-if="instanceTrashVisible"
@@ -4452,7 +5465,11 @@ onUnmounted(() => {
       </div>
     </Transition>
     <div
-      v-if="hoveredInstance && !modal && !utility && !showLogs"
+      v-if="
+        hoveredInstance &&
+        (!modal || modal === 'version') &&
+        utility !== 'settings'
+      "
       class="instance-tooltip"
       role="tooltip"
       :style="instanceTipPosition"
@@ -4466,26 +5483,18 @@ onUnmounted(() => {
       @before-leave="prepareDialogLeave"
       @after-leave="finishDialogLeave"
     >
-      <GlassDialog
-        :notice="translateMessage(notice)"
-        v-if="utility"
+      <SettingsBubble
+        v-if="utility === 'settings'"
+        :anchor="settingsAnchor"
         :label="utilityTitle"
         @close="closeUtility"
       >
         <section
-          :key="utility"
-          v-panel-size="utility === 'settings'"
-          class="utility-panel glass-surface"
-          :class="{
-            'account-panel': utility === 'accounts',
-            'account-authorizing': utility === 'accounts' && !!challenge,
-            'global-settings': utility === 'settings',
-            'download-panel': utility === 'downloads',
-          }"
+          v-panel-size="true"
+          class="utility-panel glass-surface global-settings"
         >
-          <header v-if="utility !== 'downloads'" class="utility-panel-header">
+          <header class="utility-panel-header">
             <div
-              v-if="utility === 'settings'"
               class="settings-tabs dialog-heading"
               role="tablist"
               :aria-label="t('设置分类')"
@@ -4508,27 +5517,7 @@ onUnmounted(() => {
                 {{ t(tab.label) }}
               </button>
             </div>
-            <h2
-              v-else
-              class="dialog-heading selection-label"
-              tabindex="-1"
-              autofocus
-            >
-              <Transition name="selection-text"
-                ><span :key="utilityTitle">{{ utilityTitle }}</span></Transition
-              >
-            </h2>
             <div class="inline-actions">
-              <button
-                v-if="utility === 'accounts' && selectedAccount && !challenge"
-                class="icon-button"
-                :disabled="busy"
-                :aria-label="t('刷新账户与皮肤')"
-                :title="t('刷新账户与皮肤')"
-                @click="action('刷新账户', 'refresh_account')"
-              >
-                <RefreshCw :size="18" />
-              </button>
               <button
                 class="icon-button"
                 :aria-label="t('关闭面板')"
@@ -4539,322 +5528,7 @@ onUnmounted(() => {
             </div>
           </header>
           <div class="utility-panel-content">
-            <ContentSwitch
-              v-if="utility === 'accounts'"
-              class="page-inner account-pages"
-              :content-key="
-                challenge ? `login:${challenge.session_id}` : 'accounts'
-              "
-            >
-              <div v-if="challenge" class="login-panel">
-                <button
-                  type="button"
-                  class="device-code list-reveal-item"
-                  :style="listRevealStyle(0)"
-                  :title="t('复制验证码')"
-                  :aria-label="
-                    t('复制验证码 {code}', { code: challenge.user_code })
-                  "
-                  @click="copy(challenge.user_code)"
-                >
-                  <span class="device-code-value">{{
-                    challenge.user_code
-                  }}</span>
-                  <Copy :size="16" aria-hidden="true" />
-                </button>
-                <div
-                  class="login-status list-reveal-item"
-                  :style="listRevealStyle(1)"
-                >
-                  <span class="waiting" role="status">
-                    <LoaderCircle :size="12" class="spin" aria-hidden="true" />
-                    {{ t("等待授权…") }}
-                  </span>
-                  <span class="login-expiry">
-                    {{
-                      t("有效期约 {minutes} 分钟", {
-                        minutes: Math.ceil(challenge.expires_in / 60),
-                      })
-                    }}
-                  </span>
-                </div>
-                <div
-                  class="login-footer list-reveal-item"
-                  :style="listRevealStyle(2)"
-                >
-                  <a
-                    class="text-button login-address"
-                    :href="challenge.verification_uri"
-                    :title="challenge.verification_uri"
-                    :aria-label="t('打开微软登录页')"
-                    @click.prevent="openLink(challenge.verification_uri)"
-                  >
-                    <span>{{ loginAddress }}</span>
-                    <ExternalLink :size="12" aria-hidden="true" />
-                  </a>
-                </div>
-              </div>
-              <template v-else>
-                <TransitionGroup
-                  name="account-choice"
-                  tag="div"
-                  @before-leave="pinPanelLeave"
-                  @after-leave="resetPanelLeave"
-                  @leave-cancelled="resetPanelLeave"
-                  class="account-picker"
-                  role="group"
-                  :aria-label="t('选择启动账户')"
-                >
-                  <div
-                    key="guest"
-                    class="account-choice account-guest list-reveal-item"
-                    :style="listRevealStyle(0)"
-                  >
-                    <button
-                      class="account-select"
-                      :class="{
-                        current: snapshot.database.selected_account === null,
-                      }"
-                      :disabled="busy || loginBusy"
-                      :aria-pressed="
-                        snapshot.database.selected_account === null
-                      "
-                      :aria-label="
-                        t('以游客身份启动 · {name}', { name: guestName })
-                      "
-                      @click="chooseIdentity(null)"
-                    >
-                      <span class="account-avatar-frame">
-                        <AccountAvatar
-                          :load-texture="fetchAccountSkin"
-                          :texture="guestTexture"
-                        />
-                        <UserRound
-                          class="guest-avatar-mark"
-                          :size="14"
-                          aria-hidden="true"
-                        />
-                      </span>
-                    </button>
-                    <input
-                      v-if="guestNameEditing"
-                      ref="guestNameInput"
-                      v-model="guestNameDraft"
-                      class="guest-name-input"
-                      :aria-label="t('游客名称')"
-                      :readonly="guestNameSaving"
-                      maxlength="16"
-                      autocomplete="off"
-                      autocapitalize="off"
-                      :spellcheck="false"
-                      @blur="finishGuestNameEdit"
-                      @keydown.enter.prevent="finishGuestNameEdit"
-                      @keydown.esc.stop.prevent="cancelGuestNameEdit"
-                    />
-                    <button
-                      v-else
-                      class="account-name guest-name-button"
-                      :disabled="busy || loginBusy || guestNameSaving"
-                      :aria-label="t('修改游客名称')"
-                      @click.stop="editGuestName"
-                    >
-                      {{ t("游客 · {name}", { name: guestName }) }}
-                    </button>
-                  </div>
-                  <div
-                    v-for="(account, index) in snapshot.database.accounts"
-                    :key="account.id"
-                    class="account-choice list-reveal-item"
-                    :style="listRevealStyle(index + 1)"
-                  >
-                    <button
-                      class="account-select"
-                      :class="{
-                        current:
-                          account.id === snapshot.database.selected_account,
-                      }"
-                      :disabled="busy"
-                      :aria-pressed="
-                        account.id === snapshot.database.selected_account
-                      "
-                      :aria-label="
-                        t('使用 {name} 启动游戏', { name: account.username })
-                      "
-                      @click="chooseAccount(account)"
-                    >
-                      <span class="account-avatar-frame">
-                        <AccountAvatar
-                          :account="account"
-                          :preview="
-                            account.id === selectedAccount?.id &&
-                            !skinLoading &&
-                            avatarTexture === skinTexture
-                              ? avatar
-                              : undefined
-                          "
-                          :load-texture="fetchAccountSkin"
-                        />
-                      </span>
-                    </button>
-                    <div
-                      v-if="accountNameEditing === account.id"
-                      class="account-name-editor"
-                      :aria-busy="accountNameSaving"
-                      @focusout="blurAccountName"
-                      @keydown.esc.stop.prevent="cancelAccountNameEdit"
-                    >
-                      <input
-                        ref="accountNameInputs"
-                        v-model="accountNameDraft"
-                        :aria-label="t('Java 版玩家名称')"
-                        aria-describedby="account-name-hint"
-                        :readonly="accountNameSaving"
-                        maxlength="16"
-                        autocomplete="off"
-                        autocapitalize="off"
-                        :spellcheck="false"
-                        @keydown.enter.prevent="saveAccountName"
-                      />
-                      <button
-                        class="icon-button"
-                        :disabled="accountNameSaving"
-                        :title="t('确认改名')"
-                        :aria-label="t('确认改名')"
-                        @pointerdown.prevent
-                        @click.stop="saveAccountName"
-                      >
-                        <LoaderCircle
-                          v-if="accountNameSaving"
-                          :size="13"
-                          class="spin"
-                        />
-                        <Check v-else :size="13" />
-                      </button>
-                    </div>
-                    <button
-                      v-else
-                      class="account-name account-name-button"
-                      :disabled="busy || loginBusy || accountNameSaving"
-                      :aria-label="
-                        t('{name} · 点击修改名称', { name: account.username })
-                      "
-                      @click.stop="editAccountName(account)"
-                    >
-                      {{ account.username }}
-                    </button>
-                    <button
-                      class="icon-button account-remove"
-                      :disabled="busy"
-                      :aria-label="
-                        t('移除账户 {name}', { name: account.username })
-                      "
-                      :title="t('移除账户')"
-                      @click="
-                        action('移除账户', 'remove_account', { id: account.id })
-                      "
-                    >
-                      <X :size="14" />
-                    </button>
-                  </div>
-                  <button
-                    key="add-account"
-                    class="account-add list-reveal-item"
-                    :style="
-                      listRevealStyle(snapshot.database.accounts.length + 1)
-                    "
-                    :disabled="busy || loginBusy"
-                    :aria-busy="loginBusy"
-                    :aria-label="t('添加微软账户')"
-                    :title="t('添加微软账户')"
-                    @click="login"
-                  >
-                    <span class="account-add-icon"
-                      ><LoaderCircle
-                        v-if="loginBusy"
-                        :size="20"
-                        class="spin" /><Plus v-else :size="24"
-                    /></span>
-                  </button>
-                </TransitionGroup>
-                <Transition name="selection-text">
-                  <p
-                    v-if="accountNameEditing"
-                    id="account-name-hint"
-                    class="account-name-hint"
-                  >
-                    {{ t("30天可修改一次") }}
-                  </p>
-                </Transition>
-              </template>
-            </ContentSwitch>
-
-            <template v-if="utility === 'downloads'">
-              <DownloadWorkflow
-                v-if="displayedTask"
-                :task="displayedTask"
-                :control-pending="downloadControlBusy"
-                :retrying="retryingFile"
-                :retry-enabled="!busy && !downloadControlBusy"
-                @retry="retryDownloadFile"
-                @continue="continueDownloadTask"
-                :name="taskInstance?.name || t(displayedTask.title)"
-                :version="
-                  versionName(
-                    taskInstance?.versions.find(
-                      (v) =>
-                        v.id ===
-                        (displayedTask.version_id ||
-                          taskInstance?.selected_version),
-                    ),
-                  ) ||
-                  displayedTask.version_id ||
-                  taskInstance?.selected_version ||
-                  undefined
-                "
-                @close="utility = null"
-                @cancel="cancel"
-                @pause="setDownloadPaused(true)"
-                @resume="setDownloadPaused(false)"
-              >
-                <template #step-details="{ step }">
-                  <ModpackMissing
-                    v-if="
-                      displayedTask.modpack_status &&
-                      step.id ===
-                        (displayedTask.workflow.steps.some(
-                          (item) => item.id === 'pack_manual',
-                        )
-                          ? 'pack_manual'
-                          : 'pack_files') &&
-                      displayedTask.modpack_status.missing.length > 0
-                    "
-                    :status="displayedTask.modpack_status"
-                    :disabled="manualPackImporting"
-                    :dragging="manualPackDragging"
-                    :error="manualPackError"
-                    :running="
-                      ['running', 'paused'].includes(displayedTask.status)
-                    "
-                    @supply="supplyPackFiles()"
-                    @resume="resumePack"
-                    @link="openLink"
-                  />
-                </template>
-              </DownloadWorkflow>
-              <div v-else class="workflow-empty">
-                <span>{{ t("暂无下载任务") }}</span>
-                <button
-                  class="icon-button"
-                  :aria-label="t('关闭面板')"
-                  @click="utility = null"
-                >
-                  <X :size="16" />
-                </button>
-              </div>
-            </template>
-
             <form
-              v-if="utility === 'settings'"
               id="global-settings-form"
               class="page-inner settings-form"
               novalidate
@@ -4880,6 +5554,7 @@ onUnmounted(() => {
                         }}</label>
                         <GlassSelect
                           id="language"
+                          floating
                           compact
                           v-model="settings.language"
                           :options="languages"
@@ -5000,10 +5675,24 @@ onUnmounted(() => {
                         }}
                       </button>
                     </div>
+                    <div
+                      class="settings-layout list-reveal-item"
+                      :style="listRevealStyle(2)"
+                    >
+                      <span>{{ t("界面布局") }}</span>
+                      <button
+                        type="button"
+                        class="text-button"
+                        :disabled="dropInteraction"
+                        @click="editHomeLayout"
+                      >
+                        <PanelsTopLeft :size="15" />{{ t("编辑布局") }}
+                      </button>
+                    </div>
                     <button
                       type="button"
                       class="settings-directory list-reveal-item"
-                      :style="listRevealStyle(2)"
+                      :style="listRevealStyle(3)"
                       :disabled="!snapshot.root"
                       :title="snapshot.root"
                       :aria-label="t('打开启动器数据目录')"
@@ -5216,7 +5905,7 @@ onUnmounted(() => {
             </form>
           </div>
         </section>
-      </GlassDialog>
+      </SettingsBubble>
     </Transition>
     <Transition
       name="dialog"
@@ -5224,8 +5913,9 @@ onUnmounted(() => {
       @before-leave="prepareDialogLeave"
       @after-leave="finishDialogLeave"
     >
-      <GlassDialog
-        :notice="translateMessage(notice)"
+      <ToolWindow
+        window-id="logs"
+        :initial-size="{ width: 760, height: 480 }"
         v-if="showLogs"
         :label="t('运行日志')"
         @close="showLogs = false"
@@ -5242,8 +5932,197 @@ onUnmounted(() => {
           @copy="copy"
           @close="showLogs = false"
         />
-      </GlassDialog>
+      </ToolWindow>
     </Transition>
+
+    <Transition
+      name="dialog"
+      appear
+      @before-leave="prepareDialogLeave"
+      @after-leave="finishDialogLeave"
+    >
+      <ToolWindow
+        v-if="showDownloads"
+        window-id="downloads"
+        :initial-size="{ width: 640, height: 580 }"
+        :label="t('下载任务')"
+        @close="showDownloads = false"
+      >
+        <section class="utility-panel glass-surface download-panel">
+          <div class="utility-panel-content">
+            <DownloadWorkflow
+              v-if="displayedTask"
+              :task="displayedTask"
+              :control-pending="downloadControlBusy"
+              :retrying="retryingFile"
+              :retry-enabled="!busy && !downloadControlBusy"
+              @retry="retryDownloadFile"
+              @continue="continueDownloadTask"
+              :name="taskInstance?.name || t(displayedTask.title)"
+              :version="
+                versionName(
+                  taskInstance?.versions.find(
+                    (v) =>
+                      v.id ===
+                      (displayedTask.version_id ||
+                        taskInstance?.selected_version),
+                  ),
+                ) ||
+                displayedTask.version_id ||
+                taskInstance?.selected_version ||
+                undefined
+              "
+              @close="showDownloads = false"
+              @cancel="cancel"
+              @pause="setDownloadPaused(true)"
+              @resume="setDownloadPaused(false)"
+            >
+              <template #step-details="{ step }">
+                <ModpackMissing
+                  v-if="
+                    displayedTask.modpack_status &&
+                    step.id ===
+                      (displayedTask.workflow.steps.some(
+                        (item) => item.id === 'pack_manual',
+                      )
+                        ? 'pack_manual'
+                        : 'pack_files') &&
+                    displayedTask.modpack_status.missing.length > 0
+                  "
+                  :status="displayedTask.modpack_status"
+                  :disabled="manualPackImporting"
+                  :dragging="manualPackDragging"
+                  :error="manualPackError"
+                  :running="
+                    ['running', 'paused'].includes(displayedTask.status)
+                  "
+                  @supply="supplyPackFiles()"
+                  @resume="resumePack"
+                  @link="openLink"
+                />
+              </template>
+            </DownloadWorkflow>
+            <div v-else class="workflow-empty" data-window-title>
+              <span>{{ t("暂无下载任务") }}</span>
+              <WindowControls />
+              <button
+                class="icon-button"
+                :aria-label="t('关闭面板')"
+                @click="showDownloads = false"
+              >
+                <X :size="16" />
+              </button>
+            </div>
+          </div>
+        </section>
+      </ToolWindow>
+    </Transition>
+    <Transition
+      name="dialog"
+      appear
+      @before-leave="prepareDialogLeave"
+      @after-leave="finishDialogLeave"
+    >
+      <ToolWindow
+        v-if="libraryOpen"
+        window-id="library"
+        :initial-size="{ width: 940, height: 620 }"
+        :label="t('资源管理')"
+        :locked="libraryBusy"
+        @close="libraryOpen = false"
+      >
+        <ResourceManager
+          ref="resourceManager"
+          :rpc="rpc"
+          :manifest="manifest"
+          @link="openLink"
+          :busy="busy || libraryBusy"
+          :running="snapshot.running"
+          :mod-actions="modActions"
+          :install-java="installGlobalJava"
+          :accounts="snapshot.database.accounts"
+          :selected-account="snapshot.database.selected_account"
+          :guest-skin="guestSkinId"
+          :guest-name="guestName"
+          :select-skin="chooseSkin"
+          :load-account-skin="fetchAccountSkin"
+          @busy="libraryBusy = $event"
+          @skin-changed="refreshGuestSkin"
+          @java-changed="sync().catch((e) => (error = message(e)))"
+          @error="error = message($event)"
+          @close="libraryOpen = false"
+          @manage="manageResourceVersion"
+        />
+      </ToolWindow>
+    </Transition>
+    <Transition
+      name="dialog"
+      appear
+      @before-leave="prepareDialogLeave"
+      @after-leave="finishDialogLeave"
+    >
+      <ToolWindow
+        v-if="storeOpen"
+        window-id="store"
+        :initial-size="{ width: 860, height: 600 }"
+        :label="t('商城')"
+        :locked="storeBusy"
+        @close="storeOpen = false"
+      >
+        <ResourceStore
+          :rpc="rpc"
+          :manifest="manifest"
+          :busy="busy || libraryBusy"
+          :download-pack="downloadStorePack"
+          @close="storeOpen = false"
+          @busy="storeDownloadBusy"
+          @downloaded="resourceManager?.refresh()"
+          @error="error = message($event)"
+          @link="openLink"
+        />
+      </ToolWindow>
+    </Transition>
+    <TransitionGroup
+      name="dialog"
+      appear
+      @before-leave="prepareDialogLeave"
+      @after-leave="finishDialogLeave"
+    >
+      <ToolWindow
+        v-for="entry in versionWindows"
+        :key="entry.id"
+        :window-id="entry.id"
+        layout-key="versions"
+        :initial-size="{ width: 940, height: 560 }"
+        :label="`${t('管理版本')} · ${entry.instance.name}`"
+        :locked="entry.busy"
+        @close="closeManagedWindow(entry.id)"
+      >
+        <ManagedVersions
+          :ref="(component) => setVersionManager(entry.id, component)"
+          :instance="entry.instance"
+          :instances="instances"
+          :initial-version="entry.initialVersion"
+          :initial-tab="entry.initialTab"
+          :selection-revision="entry.selectionRevision"
+          :rpc="rpc"
+          :busy="busy || libraryBusy"
+          :running="snapshot.running"
+          :current="current"
+          :mod-actions="modActions"
+          :sync="syncManagedWindows"
+          :content-loader="loadVersionContent"
+          @select-instance="switchManagedInstance(entry.id, $event)"
+          @add-resources="
+            (version, kind) => openResources(entry.instance, version, kind)
+          "
+          @link="openLink"
+          @error="error = message($event)"
+          @busy="setManagedBusy(entry.id, $event)"
+          @close="closeManagedWindow(entry.id)"
+        />
+      </ToolWindow>
+    </TransitionGroup>
 
     <Transition name="toast"
       ><div v-if="notice" class="toast glass-surface" role="status">
@@ -5256,7 +6135,33 @@ onUnmounted(() => {
       @before-leave="prepareDialogLeave"
       @after-leave="finishDialogLeave"
     >
-      <GlassDialog
+      <component
+        :is="
+          modal === 'edit'
+            ? SettingsBubble
+            : ['version', 'add', 'create'].includes(modal || '')
+              ? ToolWindow
+              : GlassDialog
+        "
+        :key="
+          modal === 'version'
+            ? 'installer'
+            : modal === 'edit'
+              ? `settings:${editing?.id}`
+              : modal === 'add' || modal === 'create'
+                ? 'add-directory'
+                : 'modal'
+        "
+        :initial-size="
+          modal === 'version'
+            ? { width: 940, height: 600 }
+            : modal === 'add' || modal === 'create'
+              ? { width: 480, height: 360 }
+              : undefined
+        "
+        :window-id="modal === 'version' ? 'installer' : 'add-directory'"
+        :anchor="modal === 'edit' ? instanceSettingsAnchor : undefined"
+        placement="above"
         :notice="translateMessage(notice)"
         v-if="modal"
         :label="
@@ -5265,80 +6170,12 @@ onUnmounted(() => {
             : t(modal === 'create' ? creationTitle : modalTitles[modal])
         "
         :locked="
-          modal === 'library'
-            ? libraryBusy
-            : modal === 'manage'
-              ? managing
-              : modal === 'version'
-                ? downloadSubmitting
-                : modal !== 'edit' && busy
+          modal === 'version' ? downloadSubmitting : modal !== 'edit' && busy
         "
         @close="modal = null"
       >
-        <ResourceManager
-          v-if="modal === 'library'"
-          ref="resourceManager"
-          :rpc="rpc"
-          @link="openLink"
-          :busy="busy"
-          :running="snapshot.running"
-          :mod-actions="modActions"
-          :install-java="installGlobalJava"
-          :accounts="snapshot.database.accounts"
-          :selected-account="snapshot.database.selected_account"
-          :guest-skin="guestSkinId"
-          :guest-name="guestName"
-          :select-skin="chooseSkin"
-          :load-account-skin="fetchAccountSkin"
-          @busy="libraryBusy = $event"
-          @skin-preview="librarySkinPreview = $event"
-          @skin-changed="refreshGuestSkin"
-          @error="error = message($event)"
-          @close="modal = null"
-          @manage="manageResourceVersion"
-        />
-        <VersionManager
-          :rpc="rpc"
-          @link="openLink"
-          ref="versionManager"
-          v-else-if="modal === 'manage' && managedInstance"
-          :initial-version="managedInitialVersion"
-          :initial-tab="managedInitialTab"
-          :instance="managedInstance"
-          :instances="instances"
-          :locked="busy || snapshot.running.includes(managedInstance.id)"
-          :downloading="
-            busy &&
-            current?.instance_id === managedInstance.id &&
-            current?.status === 'running'
-          "
-          :download-version="
-            current?.version_id ||
-            (current?.operation === 'download_declared_mod'
-              ? String(current.arguments?.version || '')
-              : undefined)
-          "
-          :mod-actions="modActions"
-          :load-content="readVersionContent"
-          :prefetch-content="prefetchVersionContent"
-          :load-content-metadata="readContentMetadata"
-          :open-content-folder="openContentFolder"
-          :load-content-source="readContentSource"
-          :load-counts="readVersionContentCounts"
-          @select-instance="switchManagedInstance"
-          @add-resources="
-            (version, kind) =>
-              managedInstance && openResources(managedInstance, version, kind)
-          "
-          :load-metadata="readVersionMetadata"
-          :rename="renameVersion"
-          :remove="deleteVersion"
-          @error="error = message($event)"
-          @busy="managing = $event"
-          @close="modal = null"
-        />
         <ModpackImport
-          v-else-if="modal === 'version' && packPreview"
+          v-if="modal === 'version' && packPreview"
           :preview="packPreview"
           :online="onlinePack"
           @back="
@@ -5390,6 +6227,8 @@ onUnmounted(() => {
           @browse="chooseCreationDirectory(true)"
           @import-pack="openModpack()"
           :resources="selectedResources"
+          :local-resources="selectedLocalResources"
+          @remove-local-resource="removeSelectedLocalResource"
           @remove-resource="
             selectedResources = selectedResources.filter(
               (item) =>
@@ -5427,6 +6266,8 @@ onUnmounted(() => {
             <ResourcePicker
               v-else-if="additionSection === 'resources'"
               v-model="selectedResources"
+              :local-resources="selectedLocalResources"
+              @remove-local-resource="removeSelectedLocalResource"
               :minecraft="form.version"
               :loader="resourceLoader"
               :platform="
@@ -5457,7 +6298,7 @@ onUnmounted(() => {
               v-model:icon="form.icon"
               :directory="editingDirectory"
               :directory-loading="directoryLoading"
-              :disabled="instanceSaving"
+              :disabled="false"
               @open-directory="editing && openFolder(editing.id)"
             />
             <h2 v-else class="dialog-heading" tabindex="-1" autofocus>
@@ -5472,14 +6313,52 @@ onUnmounted(() => {
               :disabled="busy"
               @select="importTargetId = $event"
             />
-            <button
-              class="icon-button"
-              :disabled="modal !== 'edit' && busy"
-              :aria-label="t('关闭对话框')"
-              @click="modal = null"
+            <div
+              class="inline-actions"
+              :class="{ 'instance-header-actions': modal === 'edit' }"
             >
-              <X :size="16" />
-            </button>
+              <template v-if="modal === 'edit'">
+                <button
+                  type="button"
+                  class="icon-button"
+                  :disabled="busy"
+                  :title="t('导出 ZIP')"
+                  :aria-label="t('导出 ZIP')"
+                  @click="editing && openGameExport(editing.id)"
+                >
+                  <FileArchive :size="16" />
+                </button>
+                <button
+                  type="button"
+                  class="icon-button"
+                  :disabled="busy || !editing?.selected_version"
+                  :title="t('校验修复')"
+                  :aria-label="t('校验修复')"
+                  @click="editing && install(editing, true)"
+                >
+                  <Wrench :size="16" />
+                </button>
+                <button
+                  type="button"
+                  class="icon-button danger"
+                  :disabled="busy"
+                  :title="t('移除实例')"
+                  :aria-label="t('移除实例')"
+                  @click="modal = 'delete'"
+                >
+                  <Trash2 :size="16" />
+                </button>
+              </template>
+              <WindowControls v-if="modal === 'add' || modal === 'create'" />
+              <button
+                class="icon-button"
+                :disabled="modal !== 'edit' && busy"
+                :aria-label="t('关闭对话框')"
+                @click="modal = null"
+              >
+                <X :size="16" />
+              </button>
+            </div>
           </div>
           <InstancePicker
             v-if="modal === 'add'"
@@ -5594,7 +6473,6 @@ onUnmounted(() => {
                       :input-min="512"
                       :input-max="65536"
                       :options="memoryChoices"
-                      :disabled="instanceSaving"
                       literal-labels
                       floating
                       compact
@@ -5613,7 +6491,9 @@ onUnmounted(() => {
                     id="instance-java"
                     v-model="form.java_path"
                     class="java-select"
-                    :disabled="instanceSaving || javaPicking"
+                    floating
+                    compact
+                    :disabled="javaPicking"
                     :options="javaChoices"
                     :action-label="t('选择文件…')"
                     @action="chooseJava"
@@ -5632,44 +6512,16 @@ onUnmounted(() => {
                     (hasInstanceTask(editing.id) ||
                       snapshot.running.includes(editing.id))
                   "
-                  :disabled="instanceSaving"
                   class="list-reveal-item"
                   :style="listRevealStyle(2)"
                 />
               </template>
             </div>
             <div
+              v-if="modal !== 'edit'"
               class="modal-actions list-reveal-item"
               :style="listRevealStyle(2)"
             >
-              <div v-if="modal === 'edit'" class="instance-maintenance-actions">
-                <button
-                  type="button"
-                  class="text-button"
-                  :disabled="busy || instanceSaving"
-                  @click="editing && openGameExport(editing.id)"
-                >
-                  <Download :size="16" />{{ t("导出 ZIP") }}
-                </button>
-                <button
-                  type="button"
-                  class="text-button"
-                  :disabled="
-                    busy || instanceSaving || !editing?.selected_version
-                  "
-                  @click="editing && install(editing, true)"
-                >
-                  <RefreshCw :size="16" /> {{ t("校验修复") }}
-                </button>
-                <button
-                  type="button"
-                  class="text-button danger"
-                  :disabled="busy || instanceSaving"
-                  @click="modal = 'delete'"
-                >
-                  <Trash2 :size="16" /> {{ t("移除实例") }}
-                </button>
-              </div>
               <button
                 v-if="modal === 'create'"
                 type="button"
@@ -5682,7 +6534,7 @@ onUnmounted(() => {
               <button
                 type="button"
                 class="button"
-                :disabled="modal !== 'edit' && busy"
+                :disabled="busy"
                 @click="modal = null"
               >
                 {{ t("取消") }}</button
@@ -5690,32 +6542,20 @@ onUnmounted(() => {
                 type="submit"
                 class="button primary"
                 :disabled="
-                  modal === 'edit'
-                    ? instanceSaving ||
-                      invalidCustomMemory ||
-                      !validLaunchSize(form.launch)
-                    : busy ||
-                      loaderUnavailable ||
-                      invalidCreationLocation ||
-                      (modal === 'create' && directoryPicking)
+                  busy ||
+                  loaderUnavailable ||
+                  invalidCreationLocation ||
+                  (modal === 'create' && directoryPicking)
                 "
               >
-                <LoaderCircle
-                  v-if="modal === 'edit' ? instanceSaving : busy"
-                  class="spin"
-                  :size="16"
-                />{{
-                  modal === "edit"
-                    ? t("保存")
-                    : gameImport
-                      ? t("导入")
-                      : t("创建实例")
+                <LoaderCircle v-if="busy" class="spin" :size="16" />{{
+                  gameImport ? t("导入") : t("创建实例")
                 }}
               </button>
             </div>
           </form>
         </section>
-      </GlassDialog>
+      </component>
     </Transition>
     <Transition
       name="dialog"
@@ -5723,7 +6563,9 @@ onUnmounted(() => {
       @before-leave="prepareDialogLeave"
       @after-leave="finishDialogLeave"
     >
-      <GlassDialog
+      <ToolWindow
+        window-id="resources"
+        :initial-size="{ width: 820, height: 580 }"
         v-if="resourceSession"
         :label="t('添加资源')"
         :locked="busy && !current?.resource_task"
@@ -5750,7 +6592,7 @@ onUnmounted(() => {
           @resume="setDownloadPaused(false)"
           @cancel="cancel"
         />
-      </GlassDialog>
+      </ToolWindow>
     </Transition>
   </div>
 </template>

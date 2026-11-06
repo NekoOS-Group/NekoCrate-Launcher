@@ -371,10 +371,9 @@ test("旧配置的 Client ID 为空时直接开始登录，授权期间仍能自
     const signIn = deferred();
     const challenge = {
       session_id: "test-session",
-      user_code: "TEST-CODE",
-      verification_uri: "https://www.microsoft.com/link",
+      verification_uri:
+        "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize?prompt=select_account",
       expires_in: 900,
-      interval: 5,
     };
     fixture.handlers.begin_login = () => challenge;
     fixture.handlers.wait_login = () => signIn.promise;
@@ -391,9 +390,8 @@ test("旧配置的 Client ID 为空时直接开始登录，授权期间仍能自
         .slice(requestStart)
         .filter((call) => call.op !== "snapshot")
         .map((call) => call.op),
-      ["begin_login", "wait_login", "copy_text"],
+      ["begin_login", "wait_login"],
     );
-    assert.equal(fixture.clipboard, challenge.user_code);
     ui.toggleUtility("settings");
     await flush();
     ui.settings.language = "en-US";

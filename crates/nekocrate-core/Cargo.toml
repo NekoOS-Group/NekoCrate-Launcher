@@ -17,6 +17,8 @@ rustls = { version = "0.23", default-features = false, features = ["std", "ring"
 # Keep the faster SHA-1 backend; reuse TLS's SHA-256/SHA-512 implementation.
 sha1 = { version = "0.10", default-features = false }
 ring = "0.17.14"
+base64 = "0.23.1"
+httparse = "1.10"
 hex = "0.4"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 directories = "6"
