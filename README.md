@@ -2,7 +2,7 @@
 
 基于 Rust、Tauri 2 和 Vue 3 的 Minecraft Java 版启动器，支持多游戏目录、加载器与整合包安装、资源管理和可自定义的桌面布局。
 
-[下载](https://github.com/NekoOS-Group/NekoCrate-Launcher/releases) · [反馈问题](https://github.com/NekoOS-Group/NekoCrate-Launcher/issues) · [架构说明](docs/architecture.md) · [发布说明](docs/releases)
+[下载官网](https://nekoos-group.github.io/NekoCrate-Launcher/) · [功能与设计](https://nekoos-group.github.io/NekoCrate-Launcher/features/) · [使用文档](https://nekoos-group.github.io/NekoCrate-Launcher/docs/) · [反馈问题](https://github.com/NekoOS-Group/NekoCrate-Launcher/issues) · [发布说明](docs/releases)
 
 项目仍在开发中，当前开发分支为 `neko_dev`。桌面应用与 CLI 共用 Rust 核心、数据格式和资源索引。
 
@@ -114,6 +114,8 @@ macOS `.app`、Windows 安装版与便携版、Linux ELF 支持应用内下载�
 
 ## 开发
 
+下载官网与使用文档的前端位于 [`site/`](site/README.md)，独立构建并部署到 GitHub Pages。运行 `npm --prefix site ci`、`npm --prefix site run dev` 可本地预览。
+
 需要 Rust 1.93 或更新的 stable、Node.js 22，以及 [Tauri 系统依赖](https://v2.tauri.app/start/prerequisites/)。macOS 本地签名还需要 Python 3。
 
 以下命令均在仓库根目录执行。
@@ -205,6 +207,7 @@ crates/nekocrate-core/   账户、下载、Java、元数据、实例、启动与
 crates/nekocrate-cli/    命令行入口
 app/src/                Vue / TypeScript 界面
 app/src-tauri/          Tauri IPC 与桌面打包
+site/                   下载官网、功能介绍与使用文档
 xtask/                  cargo ui 开发入口
 docs/                   架构、认证、构建与发布说明
 scripts/                构建、签名与验证工具

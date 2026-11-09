@@ -1,0 +1,21 @@
+{
+  "name": "nekocrate-website",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 1422 --strictPort",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 1423 --strictPort",
+    "test": "node --test tests/*.test.mjs",
+    "sync-release": "node scripts/sync-release.mjs"
+  },
+  "dependencies": {
+    "lucide-vue-next": "0.468.0",
+    "vue": "3.5.44"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "5.2.4",
+    "vite": "6.4.5"
+  }
+}

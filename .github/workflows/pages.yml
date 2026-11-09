@@ -1,0 +1,81 @@
+name: Publish website
+
+on:
+  push:
+    branches: [neko_dev]
+    paths:
+      - "site/**"
+      - ".github/workflows/pages.yml"
+      - "app/src/components/WorldBackdrop.vue"
+      - "app/src/backdropThemes.ts"
+      - "app/src/flow*.ts"
+      - "app/src/hex*.ts"
+      - "app/src/assets/blocks/**"
+  pull_request:
+    paths:
+      - "site/**"
+      - ".github/workflows/pages.yml"
+      - "app/src/components/WorldBackdrop.vue"
+      - "app/src/backdropThemes.ts"
+      - "app/src/flow*.ts"
+      - "app/src/hex*.ts"
+  workflow_dispatch:
+  # Releases are published by another workflow. workflow_run also fires for
+  # GITHUB_TOKEN-created releases, unlike an ordinary release event.
+  workflow_run:
+    workflows: ["Build and publish preview release"]
+    types: [completed]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: website-${{ github.event.pull_request.number || 'production' }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Never execute a workflow_run's untrusted head or downloaded scripts.
+          ref: ${{ github.event_name == 'workflow_run' && 'neko_dev' || github.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - run: npm ci --no-audit --no-fund
+        working-directory: site
+      - name: Update the downloadable release snapshot
+        run: npm run sync-release
+        working-directory: site
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - run: npm test
+        working-directory: site
+      - run: npm run build
+        working-directory: site
+        env:
+          SITE_BASE: /NekoCrate-Launcher/
+      - uses: actions/upload-pages-artifact@v4
+        if: github.event_name != 'pull_request'
+        with:
+          path: site/dist
+
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/neko_dev'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/configure-pages@v5
+      - uses: actions/deploy-pages@v4
+        id: deployment

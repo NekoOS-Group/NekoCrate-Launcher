@@ -1,0 +1,49 @@
+{
+  "tag": "dev0.9.9",
+  "name": "拖动万物的更新",
+  "url": "https://github.com/NekoOS-Group/NekoCrate-Launcher/releases/tag/dev0.9.9",
+  "publishedAt": "2026-11-06T17:25:11Z",
+  "prerelease": true,
+  "assets": [
+    {
+      "name": "BUILDINFO.json",
+      "url": "https://github.com/NekoOS-Group/NekoCrate-Launcher/releases/download/dev0.9.9/BUILDINFO.json",
+      "size": 2638
+    },
+    {
+      "name": "latest.json",
+      "url": "https://github.com/NekoOS-Group/NekoCrate-Launcher/releases/download/dev0.9.9/latest.json",
+      "size": 7206
+    },
+    {
+      "name": "NekoCrate-Launcher-dev0.9.9-linux-amd64.deb",
+      "url": "https://github.com/NekoOS-Group/NekoCrate-Launcher/releases/download/dev0.9.9/NekoCrate-Launcher-dev0.9.9-linux-amd64.deb",
+      "size": 9380078
+    },
+    {
+      "name": "NekoCrate-Launcher-dev0.9.9-linux-amd64.elf",
+      "url": "https://github.com/NekoOS-Group/NekoCrate-Launcher/releases/download/dev0.9.9/NekoCrate-Launcher-dev0.9.9-linux-amd64.elf",
+      "size": 19695296
+    },
+    {
+      "name": "NekoCrate-Launcher-dev0.9.9-mac-appsilicon.app.tar.gz",
+      "url": "https://github.com/NekoOS-Group/NekoCrate-Launcher/releases/download/dev0.9.9/NekoCrate-Launcher-dev0.9.9-mac-appsilicon.app.tar.gz",
+      "size": 8165989
+    },
+    {
+      "name": "NekoCrate-Launcher-dev0.9.9-mac-appsilicon.dmg",
+      "url": "https://github.com/NekoOS-Group/NekoCrate-Launcher/releases/download/dev0.9.9/NekoCrate-Launcher-dev0.9.9-mac-appsilicon.dmg",
+      "size": 9155492
+    },
+    {
+      "name": "NekoCrate-Launcher-dev0.9.9-win-amd64-setup.exe",
+      "url": "https://github.com/NekoOS-Group/NekoCrate-Launcher/releases/download/dev0.9.9/NekoCrate-Launcher-dev0.9.9-win-amd64-setup.exe",
+      "size": 6185289
+    },
+    {
+      "name": "NekoCrate-Launcher-dev0.9.9-win-amd64.exe",
+      "url": "https://github.com/NekoOS-Group/NekoCrate-Launcher/releases/download/dev0.9.9/NekoCrate-Launcher-dev0.9.9-win-amd64.exe",
+      "size": 20409856
+    }
+  ]
+}
