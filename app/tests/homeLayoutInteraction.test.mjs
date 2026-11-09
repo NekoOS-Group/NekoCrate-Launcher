@@ -435,18 +435,21 @@ test("news edge docking and alignment preview, persist, cancel and undock withou
   try {
     f.ui.begin();
     f.ui.toggleWidget("news");
-    f.ui.toggleNewsAlignment();
+    f.ui.edgePanels.news.toggleAlignment();
     const before = { ...f.ui.rects.value.account };
     f.ui.start(f.event(750, 200), "news");
     f.ui.move(f.event(1000, 200));
     f.tick();
-    assert.equal(f.ui.newsDock.value, "right");
+    assert.equal(f.ui.newsDock.value, null);
+    assert.equal(f.ui.dockCandidate("news"), "right");
     f.ui.cancelDrag();
     assert.equal(f.ui.newsDock.value, null);
     f.ui.start(f.event(750, 200), "news");
     f.ui.move(f.event(1000, 200));
     f.tick();
     f.ui.release(f.event(1000, 200));
+    assert.equal(f.ui.newsDock.value, null);
+    f.ui.edgePanels.news.toggleDock(f.ui.rects.value.news, f.ui.area.value);
     assert.equal(f.ui.newsDock.value, "right");
     assert.deepEqual(f.ui.rects.value.account, before);
     f.ui.end(true);
@@ -457,7 +460,7 @@ test("news edge docking and alignment preview, persist, cancel and undock withou
       height: 244,
     });
     f.ui.begin();
-    f.ui.undockNews();
+    f.ui.edgePanels.news.toggleDock(f.ui.rects.value.news, f.ui.area.value);
     assert.equal(f.ui.newsDock.value, null);
     f.ui.end(false);
     assert.equal(f.ui.newsDock.value, "right");
@@ -468,9 +471,12 @@ test("news edge docking and alignment preview, persist, cancel and undock withou
   try {
     assert.equal(loaded.ui.newsDock.value, "right");
     assert.equal(loaded.ui.newsLayout.value.align, "right");
-    assert.equal(loaded.ui.newsOpen.value, false);
+    assert.equal(loaded.ui.edgePanels.news.open.value, false);
     loaded.ui.begin();
-    loaded.ui.undockNews();
+    loaded.ui.edgePanels.news.toggleDock(
+      loaded.ui.rects.value.news,
+      loaded.ui.area.value,
+    );
     loaded.ui.end(true);
     assert.equal(
       JSON.parse(loaded.storage.get(HOME_LAYOUT_KEY)).news.dock,
@@ -595,14 +601,24 @@ test("Trends resizes with pointer and keyboard, cancels gestures, preserves dock
     f.ui.move(f.event(x, 220));
     f.tick();
     f.ui.release(f.event(x, 220));
+    f.ui.edgePanels.news.toggleAlignment();
+    f.ui.edgePanels.news.toggleDock(f.ui.rects.value.news, f.ui.area.value);
     assert.equal(f.ui.newsDock.value, "right");
-    f.ui.nudgeNewsSize({ key: "ArrowDown", preventDefault() {} }, "bottom");
+    f.ui.nudgeWidgetSize(
+      { key: "ArrowDown", preventDefault() {} },
+      "news",
+      "bottom",
+    );
     assert.equal(f.ui.newsLayout.value.height, 352);
     assert.equal(f.ui.newsDock.value, "right");
     f.ui.end(true);
     stored = f.storage.get(HOME_LAYOUT_KEY);
     f.ui.begin();
-    f.ui.nudgeNewsSize({ key: "ArrowDown", preventDefault() {} }, "top");
+    f.ui.nudgeWidgetSize(
+      { key: "ArrowDown", preventDefault() {} },
+      "news",
+      "top",
+    );
     f.ui.end(false);
     assert.equal(f.ui.newsLayout.value.height, 352);
   } finally {
@@ -616,6 +632,128 @@ test("Trends resizes with pointer and keyboard, cancels gestures, preserves dock
     restored.ui.nudge({ key: "ArrowLeft", preventDefault() {} }, "news");
     assert.equal(restored.ui.newsDock.value, null);
     restored.ui.end(true);
+  } finally {
+    restored.dispose();
+  }
+});
+
+test("server and world heights resize without jumps, preserve siblings, save, cancel and reset", () => {
+  for (const id of ["servers", "worlds"]) {
+    const f = fixture();
+    let stored, height;
+    try {
+      f.ui.begin();
+      f.ui.toggleWidget(id);
+      const before = structuredClone(f.ui.rects.value);
+      const box = before[id];
+      f.ui.start(f.event(box.x, box.y), id, "top");
+      f.ui.move(f.event(box.x, box.y - 30));
+      f.tick();
+      assert.equal(f.ui.rects.value[id].height, box.height + 30);
+      assert.equal(f.ui.rects.value[id].y, box.y - 30);
+      f.ui.cancelDrag();
+      assert.deepEqual(f.ui.rects.value, before);
+      assert.equal(f.ui.edgePanels[id].layout.value.height, null);
+
+      // Grow through nearby controls; release must not move the panel or its neighbours.
+      f.ui.start(f.event(box.x, box.y + box.height), id, "bottom");
+      f.ui.move(f.event(box.x, box.y + box.height + 300));
+      f.tick();
+      const preview = JSON.parse(JSON.stringify(f.ui.rects.value));
+      f.ui.release(f.event(box.x, box.y + box.height + 300));
+      assert.deepEqual(f.ui.rects.value, preview);
+      for (const [other, rect] of Object.entries(before))
+        if (other !== id) assert.deepEqual(f.ui.rects.value[other], rect);
+      const bottom = preview[id].y + preview[id].height;
+      f.ui.nudgeWidgetSize(
+        { key: "ArrowUp", shiftKey: true, preventDefault() {} },
+        id,
+        "top",
+      );
+      height = preview[id].height + 1;
+      assert.equal(f.ui.rects.value[id].height, height);
+      assert.equal(f.ui.rects.value[id].y + height, bottom);
+      f.ui.end(true);
+      stored = f.storage.get(HOME_LAYOUT_KEY);
+      assert.equal(JSON.parse(stored)[id].height, height);
+      f.ui.begin();
+      f.ui.reset();
+      assert.equal(f.ui.edgePanels[id].layout.value.height, null);
+      f.ui.end(false);
+      assert.equal(f.ui.rects.value[id].height, height);
+    } finally {
+      f.dispose();
+    }
+    const restored = fixture(stored);
+    try {
+      assert.equal(restored.ui.rects.value[id].height, height);
+      Object.assign(restored.window, { innerHeight: 400 });
+      restored.ui.resize();
+      assert.ok(restored.ui.rects.value[id].height <= 376);
+      assert.equal(restored.ui.edgePanels[id].layout.value.height, height);
+      Object.assign(restored.window, { innerHeight: 600 });
+      restored.ui.resize();
+      assert.equal(restored.ui.rects.value[id].height, height);
+      restored.ui.begin();
+      restored.ui.reset();
+      restored.ui.end(true);
+      assert.equal(restored.ui.edgePanels[id].layout.value.height, null);
+    } finally {
+      restored.dispose();
+    }
+  }
+});
+
+test("wheel edges resize independently, preserve the anchor and other controls, and save or cancel with layout", () => {
+  const f = fixture();
+  let saved;
+  try {
+    f.ui.begin();
+    f.ui.setOrientation("instances", "wheel");
+    f.ui.start(f.event(600, 400), "instances");
+    f.ui.move(f.event(600, 200));
+    f.tick();
+    f.ui.release(f.event(600, 200));
+    const before = structuredClone(f.ui.rects.value);
+    f.ui.start(f.event(600, 200), "instances", "top");
+    f.ui.move(f.event(600, 260));
+    f.tick();
+    assert.deepEqual(f.ui.wheelBounds.value, { above: 180, below: 140 });
+    assert.deepEqual(f.ui.rects.value, before);
+    assert.ok(f.classes.has("home-layout-resizing"));
+    f.ui.cancelDrag();
+    assert.deepEqual(f.ui.wheelBounds.value, { above: 240, below: 140 });
+    assert.equal(f.captures.size, 0);
+    f.ui.start(f.event(600, 450), "instances", "bottom");
+    f.ui.move(f.event(600, 480));
+    f.tick();
+    f.ui.release(f.event(600, 480));
+    assert.deepEqual(f.ui.wheelBounds.value, { above: 240, below: 170 });
+    f.ui.nudgeWheelSize({ key: "ArrowDown", preventDefault() {} }, "top");
+    f.ui.nudgeWheelSize(
+      { key: "ArrowDown", shiftKey: true, preventDefault() {} },
+      "bottom",
+    );
+    assert.deepEqual(f.ui.wheelBounds.value, { above: 232, below: 171 });
+    assert.deepEqual(f.ui.rects.value, before);
+    f.ui.end(true);
+    saved = f.storage.get(HOME_LAYOUT_KEY);
+    assert.deepEqual(JSON.parse(saved).instanceWheel, {
+      above: 232,
+      below: 171,
+    });
+    f.ui.begin();
+    f.ui.reset();
+    assert.deepEqual(f.ui.wheelBounds.value, { above: 240, below: 140 });
+    f.ui.end(false);
+    assert.deepEqual(f.ui.wheelBounds.value, { above: 232, below: 171 });
+  } finally {
+    f.dispose();
+  }
+  const restored = fixture(saved);
+  try {
+    assert.deepEqual(restored.ui.wheelBounds.value, { above: 232, below: 171 });
+    assert.equal(restored.ui.orientation("instances"), "wheel");
   } finally {
     restored.dispose();
   }
@@ -678,17 +816,21 @@ test("Trends dismisses on pointer leave even when WebKit retains focus-visible o
   );
   try {
     globalThis.document.activeElement = { matches: () => true };
-    f.ui.newsHost.value = { contains: () => true };
-    f.ui.showNews();
-    assert.equal(f.ui.newsOpen.value, true);
-    f.ui.leaveNews();
+    f.ui.edgePanels.news.host.value = { contains: () => true };
+    f.ui.edgePanels.news.show();
+    assert.equal(f.ui.edgePanels.news.open.value, true);
+    f.ui.edgePanels.news.leave();
     await new Promise((resolve) => setTimeout(resolve, 220));
-    assert.equal(f.ui.newsOpen.value, false);
-    f.ui.showNews();
-    f.ui.leaveNews();
-    f.ui.showNews();
+    assert.equal(f.ui.edgePanels.news.open.value, false);
+    f.ui.edgePanels.news.show();
+    f.ui.edgePanels.news.leave();
+    f.ui.edgePanels.news.show();
     await new Promise((resolve) => setTimeout(resolve, 220));
-    assert.equal(f.ui.newsOpen.value, true, "re-entry cancels a pending close");
+    assert.equal(
+      f.ui.edgePanels.news.open.value,
+      true,
+      "re-entry cancels a pending close",
+    );
   } finally {
     f.dispose();
   }
@@ -697,7 +839,7 @@ test("Trends dismisses on pointer leave even when WebKit retains focus-visible o
 test("all dashboard widgets and clock preferences follow layout save/cancel, removal preserves note data", () => {
   const f = fixture();
   try {
-    f.storage.set("nekocrate.home-dashboard.v1", "keep-note-and-favorite-data");
+    f.storage.set("nekocrate.home-dashboard.v1", "keep-note-data");
     f.ui.begin();
     for (const id of homeWidgets) f.ui.toggleWidget(id);
     assert.deepEqual(f.ui.availableWidgets.value, []);
@@ -717,7 +859,7 @@ test("all dashboard widgets and clock preferences follow layout save/cancel, rem
     f.ui.end(true);
     assert.equal(
       f.storage.get("nekocrate.home-dashboard.v1"),
-      "keep-note-and-favorite-data",
+      "keep-note-data",
     );
   } finally {
     f.dispose();
@@ -815,5 +957,160 @@ test("portable dock removal persists, follows late mode detection, and reset res
     assert.equal(loaded.storage.has(HOME_LAYOUT_KEY), false);
   } finally {
     loaded.dispose();
+  }
+});
+
+test("edge hiding is opt-in, alignment-gated and shared by Trends, servers and worlds", () => {
+  for (const id of ["news", "servers", "worlds"]) {
+    const f = fixture();
+    try {
+      f.ui.begin();
+      f.ui.toggleWidget(id);
+      const panel = f.ui.edgePanels[id];
+      const moveTo = (x) => {
+        const rect = f.ui.rects.value[id];
+        f.ui.start(f.event(rect.x, rect.y), id);
+        f.ui.move(f.event(x, rect.y));
+        f.tick();
+        f.ui.release(f.event(x, rect.y));
+      };
+      // The wrong edge never offers hiding, even if the toggle is called.
+      moveTo(900 - f.ui.rects.value[id].width - 12);
+      assert.equal(f.ui.dockCandidate(id), null);
+      panel.toggleDock(f.ui.rects.value[id], f.ui.area.value);
+      assert.equal(panel.dock.value, null);
+      panel.toggleAlignment();
+      assert.equal(f.ui.dockCandidate(id), "right");
+      assert.equal(panel.dock.value, null);
+      panel.toggleDock(f.ui.rects.value[id], f.ui.area.value);
+      assert.equal(panel.dock.value, "right");
+      f.ui.end(true);
+      assert.equal(
+        JSON.parse(f.storage.get(HOME_LAYOUT_KEY))[id].dock,
+        "right",
+      );
+      panel.show();
+      assert.equal(panel.open.value, true);
+      f.ui.begin();
+      assert.equal(panel.open.value, false);
+      panel.toggleAlignment();
+      assert.equal(panel.dock.value, null);
+      assert.equal(f.ui.dockCandidate(id), null);
+      f.ui.end(false);
+      assert.equal(panel.layout.value.align, "right");
+      assert.equal(panel.dock.value, "right");
+      f.ui.begin();
+      moveTo(240);
+      assert.equal(panel.dock.value, null);
+      moveTo(900 - f.ui.rects.value[id].width - 12);
+      assert.equal(
+        panel.dock.value,
+        null,
+        "returning to edge does not re-enable hiding",
+      );
+      panel.toggleAlignment();
+      moveTo(12);
+      assert.equal(f.ui.dockCandidate(id), "left");
+      panel.toggleDock(f.ui.rects.value[id], f.ui.area.value);
+      assert.equal(panel.dock.value, "left");
+      f.ui.end(true);
+      f.ui.begin();
+      f.ui.reset();
+      f.ui.end(true);
+      assert.equal(panel.dock.value, null);
+      assert.equal(panel.layout.value.align, "left");
+    } finally {
+      f.dispose();
+    }
+  }
+});
+
+test("the editor toolbar never participates in layout collisions", () => {
+  const f = fixture();
+  try {
+    f.ui.begin();
+    f.ui.toggleWidget("quote");
+    f.ui.start(f.event(0, 0), "quote");
+    const rect = f.ui.rects.value.quote;
+    f.ui.move(f.event(588 - rect.x, 12 - rect.y));
+    f.tick();
+    f.ui.release(f.event(588 - rect.x, 12 - rect.y));
+    assert.equal(f.ui.rects.value.quote.x, 588);
+    assert.equal(f.ui.rects.value.quote.y, 12);
+    f.ui.end(true);
+    const before = structuredClone(f.ui.rects.value);
+    f.ui.begin();
+    assert.deepEqual(f.ui.rects.value, before);
+    f.ui.end(false);
+    assert.deepEqual(f.ui.rects.value, before);
+  } finally {
+    f.dispose();
+  }
+});
+
+test("retired favorite layouts disappear while remaining widgets keep their saved position", () => {
+  const f = fixture(
+    JSON.stringify({
+      version: 1,
+      widgets: ["favorites", "worlds"],
+      positions: {
+        account: { x: 0, y: 0 },
+        tools: { x: 0.4, y: 0 },
+        themes: { x: 0, y: 1 },
+        instances: { x: 0.4, y: 1 },
+        launch: { x: 1, y: 1 },
+        favorites: { x: 0.5, y: 0.5 },
+        worlds: { x: 1, y: 0.4 },
+      },
+      worlds: { align: "right", dock: "right" },
+    }),
+  );
+  try {
+    assert.deepEqual(f.ui.widgets.value, ["worlds"]);
+    assert.equal(f.ui.edgePanels.worlds.dock.value, "right");
+    const before = { ...f.ui.rects.value.worlds };
+    f.ui.begin();
+    assert.ok(!f.ui.availableWidgets.value.includes("favorites"));
+    assert.deepEqual(f.ui.rects.value.worlds, before);
+    f.ui.end(true);
+    assert.deepEqual(JSON.parse(f.storage.get(HOME_LAYOUT_KEY)).widgets, [
+      "worlds",
+    ]);
+  } finally {
+    f.dispose();
+  }
+});
+
+test("instance wheel is a third saved layout style with a fixed footprint, independent of the toolbar", () => {
+  const f = fixture();
+  let saved;
+  try {
+    f.ui.begin();
+    assert.equal(f.ui.nextOrientation("instances"), "vertical");
+    f.ui.setOrientation("instances", "vertical");
+    assert.equal(f.ui.nextOrientation("instances"), "wheel");
+    f.ui.setOrientation("instances", "wheel");
+    assert.equal(f.ui.nextOrientation("instances"), "horizontal");
+    assert.deepEqual(f.ui.sizes.value.instances, { width: 64, height: 64 });
+    f.ui.setOrientation("tools", "wheel");
+    assert.equal(f.ui.orientations.value.tools, "horizontal");
+    f.ui.end(true);
+    saved = f.storage.get(HOME_LAYOUT_KEY);
+    f.ui.begin();
+    f.ui.setOrientation("instances", "horizontal");
+    f.ui.end(false);
+    assert.equal(f.ui.orientations.value.instances, "wheel");
+  } finally {
+    f.dispose();
+  }
+  const reloaded = fixture(saved);
+  try {
+    assert.equal(reloaded.ui.orientations.value.instances, "wheel");
+    reloaded.ui.begin();
+    reloaded.ui.reset();
+    reloaded.ui.end(true);
+    assert.equal(reloaded.ui.orientations.value.instances, "horizontal");
+  } finally {
+    reloaded.dispose();
   }
 });

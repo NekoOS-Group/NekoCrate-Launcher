@@ -1324,19 +1324,24 @@ impl Launcher {
         cancel: &CancellationToken,
         sink: EventSink,
     ) -> Result<u32> {
-        self.launch_to_server(id, None, cancel, sink).await
+        self.launch_with_target(id, None, None, cancel, sink).await
     }
-    pub async fn launch_to_server(
+    pub async fn launch_with_target(
         &self,
         id: &str,
         server: Option<&str>,
+        world: Option<&str>,
         cancel: &CancellationToken,
         sink: EventSink,
     ) -> Result<u32> {
+        anyhow::ensure!(
+            server.is_none() || world.is_none(),
+            "不能同时进入服务器和单人存档"
+        );
         if let Some(address) = server {
             home_dashboard::ServerAddress::parse(address)?;
         }
-        let result = Box::pin(self.launch_inner(id, server, cancel, sink.clone())).await;
+        let result = Box::pin(self.launch_inner(id, server, world, cancel, sink.clone())).await;
         if let Err(error) = &result
             && !cancel.is_cancelled()
         {
@@ -1356,6 +1361,7 @@ impl Launcher {
         &self,
         id: &str,
         server: Option<&str>,
+        world: Option<&str>,
         cancel: &CancellationToken,
         sink: EventSink,
     ) -> Result<u32> {
@@ -1382,6 +1388,16 @@ impl Launcher {
         let working_directory =
             version::instance_working_directory(&game, &instance, &selected.id)?;
         let mut resolved = version::resolve(self.root(), &game, &selected.id)?;
+        if let Some(world) = world {
+            if let Some(notice) = home_dashboard::apply_world_launch(
+                &mut instance,
+                &resolved,
+                &working_directory,
+                world,
+            )? {
+                sink(Event::new("launch_notice", notice));
+            }
+        }
         let settings = self.settings();
         let downloader = download::Downloader::new(self.root(), settings.clone())?
             .for_installation(self.root(), id, &game, &selected.id, "launch")?;
@@ -2331,9 +2347,15 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn no_account_launch_reaches_game_process_and_keeps_guest_logs_intact() {
-        verify_guest_launch_directory(false, false).await;
-        verify_guest_launch_directory(true, false).await;
-        verify_guest_launch_directory(true, true).await;
+        verify_guest_launch_directory(false, false, false).await;
+        verify_guest_launch_directory(true, false, false).await;
+        verify_guest_launch_directory(true, true, false).await;
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn world_shortcuts_reach_the_process_in_shared_and_isolated_directories() {
+        verify_guest_launch_directory(false, false, true).await;
+        verify_guest_launch_directory(true, true, true).await;
     }
 
     #[tokio::test]
@@ -2406,7 +2428,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    async fn verify_guest_launch_directory(linked: bool, isolated: bool) {
+    async fn verify_guest_launch_directory(linked: bool, isolated: bool, quick_play: bool) {
         use std::os::unix::fs::PermissionsExt;
         let temp = tempfile::tempdir().unwrap();
         let launcher = Launcher::open(Some(temp.path().join("launcher"))).unwrap();
@@ -2484,7 +2506,16 @@ printf '%s\n' 'offline session 0 started'
                 )
                 .unwrap();
         }
-        let version = test_http::version_fixture("1.21.1");
+        let mut version = test_http::version_fixture("1.21.1");
+        if quick_play {
+            version.arguments.as_mut().unwrap().game.push(
+                serde_json::from_value(serde_json::json!({
+                    "rules":[{"action":"allow","features":{"is_quick_play_singleplayer":true}}],
+                    "value":["--quickPlaySingleplayer","${quickPlaySingleplayer}"]
+                }))
+                .unwrap(),
+            );
+        }
         let game = launcher.game_dir(&instance.id).unwrap();
         if linked {
             assert_eq!(game, source.canonicalize().unwrap());
@@ -2493,6 +2524,24 @@ printf '%s\n' 'offline session 0 started'
         fs::create_dir_all(&version_dir).unwrap();
         storage::write_json(&version_dir.join("1.21.1.json"), &version).unwrap();
         fs::write(version_dir.join("1.21.1.jar"), b"fixture client").unwrap();
+        let working = if isolated {
+            version_dir.clone()
+        } else {
+            game.clone()
+        };
+        let world_name = "小屋 New World";
+        if quick_play {
+            let world = working.join("saves").join(world_name);
+            fs::create_dir_all(&world).unwrap();
+            fs::write(
+                world.join("level.dat"),
+                fastnbt::to_bytes(&serde_json::json!({
+                    "Data":{"LevelName":"Display name", "Version":{"Name":"1.21.1"}}
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        }
         launcher
             .mutate(|db| {
                 db.instances[0].versions[0].installed = true;
@@ -2501,7 +2550,13 @@ printf '%s\n' 'offline session 0 started'
             .unwrap();
         let sink: EventSink = Arc::new(|_| {});
         let pid = launcher
-            .launch(&instance.id, &CancellationToken::new(), sink)
+            .launch_with_target(
+                &instance.id,
+                None,
+                quick_play.then_some(world_name),
+                &CancellationToken::new(),
+                sink,
+            )
             .await
             .unwrap();
         assert!(pid > 0);
@@ -2526,10 +2581,27 @@ printf '%s\n' 'offline session 0 started'
                 fs::read_to_string(working.join("launch-environment.txt")).unwrap(),
                 "one=two $HOME\n"
             );
-            assert!(text.contains("mc.example.org;$(echo literal)"));
+            assert_eq!(text.contains("mc.example.org;$(echo literal)"), !quick_play);
             assert!(!game.join("launch-arguments.txt").exists());
             assert!(game.join("saves").is_dir());
             assert!(std::env::var_os("NEKO_LAUNCH_TEST").is_none());
+        }
+        if quick_play {
+            let at = args
+                .iter()
+                .position(|arg| *arg == "--quickPlaySingleplayer")
+                .unwrap();
+            assert_eq!(args[at + 1], world_name);
+            assert!(!args.contains(&"--server"));
+            assert!(
+                !launcher
+                    .instance(&instance.id)
+                    .unwrap()
+                    .launch
+                    .game_args
+                    .iter()
+                    .any(|arg| arg == "--quickPlaySingleplayer")
+            );
         }
         if linked {
             assert!(

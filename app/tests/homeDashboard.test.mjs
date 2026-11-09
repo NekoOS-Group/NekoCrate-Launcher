@@ -4,7 +4,6 @@ import {
   dashboard,
   readDashboard,
   saveDashboard,
-  addFavorite,
   normalizeServerAddress,
   loadLocalWidgets,
   localWidgetData,
@@ -44,7 +43,6 @@ test("address normalization, old preferences, deduplication and bounded notes", 
   ])
     assert.equal(normalizeServerAddress(address), null);
   assert.deepEqual(readDashboard("bad"), {
-    favorites: [],
     servers: [],
     hiddenServers: [],
     todos: [],
@@ -63,7 +61,7 @@ test("address normalization, old preferences, deduplication and bounded notes", 
       ],
     }),
   );
-  assert.deepEqual(data.favorites, [{ instance: "a", version: "b" }]);
+  assert.equal("favorites" in data, false, "retired favorite data is ignored");
   assert.deepEqual(data.todos, [{ id: "c", text: "hello", done: true }]);
   assert.deepEqual(
     readClockLayout(
@@ -79,7 +77,7 @@ test("address normalization, old preferences, deduplication and bounded notes", 
   assert.notEqual(pixelTimePath("12:34"), pixelTimePath("12:35"));
 });
 
-test("favorites and notes persist, deduplicate and do not disappear if storage fails", () => {
+test("notes persist and do not disappear if storage fails", () => {
   const previous = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
   const storage = new Map();
   Object.defineProperty(globalThis, "localStorage", {
@@ -91,19 +89,18 @@ test("favorites and notes persist, deduplicate and do not disappear if storage f
   });
   try {
     saveDashboard({
-      favorites: [],
       servers: [],
       hiddenServers: [],
       todos: [{ id: "todo", text: "build", done: false }],
     });
-    assert.equal(addFavorite({ instance: "a", version: "b" }), true);
-    assert.equal(addFavorite({ instance: "a", version: "b" }), false);
     assert.equal(readDashboard([...storage.values()][0]).todos.length, 1);
     localStorage.setItem = () => {
       throw Error("disk unavailable");
     };
-    assert.throws(() => addFavorite({ instance: "c", version: "d" }));
-    assert.equal(dashboard.value.favorites.length, 1);
+    assert.throws(() => saveDashboard({ ...dashboard.value, todos: [] }));
+    assert.deepEqual(dashboard.value.todos, [
+      { id: "todo", text: "build", done: false },
+    ]);
   } finally {
     if (previous) Object.defineProperty(globalThis, "localStorage", previous);
     else delete globalThis.localStorage;
@@ -144,56 +141,61 @@ test("local/status requests coalesce and keep cached data; unavailable servers a
   assert.match(serverStatuses.value.localhost.error, /offline/);
 });
 
-test("shortcut launch holds the clicked version and server through preparation, and stops on failed selection", async () => {
-  const f = await settingsFixture();
-  try {
-    const instance = f.state.database.instances[0];
-    instance.versions[0].installed = true;
-    instance.versions.push({ id: "favorite", installed: true });
-    f.state.database.instances.push({
-      ...instance,
-      id: "other",
-      name: "Other",
-    });
-    await f.context.sync();
-    f.handlers.select_version = ({ version }) => {
-      instance.selected_version = version;
-      return true;
-    };
-    f.handlers.launch = () => 123;
-    f.context.launchReports[instance.id] = null;
-    const select = deferred();
-    f.handlers.select_version = async ({ version }) => {
-      await select.promise;
-      instance.selected_version = version;
-      return true;
-    };
-    const work = f.context.startShortcut(
-      { instance: instance.id, version: "favorite" },
-      "localhost:25566",
-    );
-    await flush();
-    assert.equal(f.context.startRequested.value, true);
-    f.context.selectInstance(f.state.database.instances[1].id);
-    select.resolve();
-    await work;
-    assert.deepEqual(
-      f.calls.find((c) => c.op === "launch"),
-      { op: "launch", id: instance.id, server: "localhost:25566" },
-    );
-    f.calls.length = 0;
-    instance.selected_version = instance.versions[0].id;
-    await f.context.sync();
-    f.handlers.select_version = () => false;
-    await f.context.startShortcut(
-      { instance: instance.id, version: "favorite" },
-      "localhost",
-    );
-    assert.equal(
-      f.calls.some((c) => c.op === "launch"),
-      false,
-    );
-  } finally {
-    f.dispose();
+test("shortcut launch holds the clicked version and destination through preparation, and stops on failed selection", async () => {
+  for (const destination of [
+    { server: "localhost:25566" },
+    { world: "小屋 New World" },
+  ]) {
+    const f = await settingsFixture();
+    try {
+      const instance = f.state.database.instances[0];
+      instance.versions[0].installed = true;
+      instance.versions.push({ id: "favorite", installed: true });
+      f.state.database.instances.push({
+        ...instance,
+        id: "other",
+        name: "Other",
+      });
+      await f.context.sync();
+      f.handlers.select_version = ({ version }) => {
+        instance.selected_version = version;
+        return true;
+      };
+      f.handlers.launch = () => 123;
+      f.context.launchReports[instance.id] = null;
+      const select = deferred();
+      f.handlers.select_version = async ({ version }) => {
+        await select.promise;
+        instance.selected_version = version;
+        return true;
+      };
+      const work = f.context.startShortcut(
+        { instance: instance.id, version: "favorite" },
+        destination,
+      );
+      await flush();
+      assert.equal(f.context.startRequested.value, true);
+      f.context.selectInstance(f.state.database.instances[1].id);
+      select.resolve();
+      await work;
+      assert.deepEqual(
+        f.calls.find((c) => c.op === "launch"),
+        { op: "launch", id: instance.id, ...destination },
+      );
+      f.calls.length = 0;
+      instance.selected_version = instance.versions[0].id;
+      await f.context.sync();
+      f.handlers.select_version = () => false;
+      await f.context.startShortcut(
+        { instance: instance.id, version: "favorite" },
+        destination,
+      );
+      assert.equal(
+        f.calls.some((c) => c.op === "launch"),
+        false,
+      );
+    } finally {
+      f.dispose();
+    }
   }
 });

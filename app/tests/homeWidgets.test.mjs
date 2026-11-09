@@ -6,6 +6,7 @@ import {
   readQuoteAngles,
   readQuoteScales,
   readNewsLayout,
+  readListWidgetLayout,
   HITOKOTO_URL,
   readFeedSources,
   presetFeeds,
@@ -25,7 +26,7 @@ test("optional widgets and subscriptions tolerate old/corrupt preferences", () =
   });
   assert.deepEqual(
     readNewsLayout('{"version":1,"news":{"align":"right","dock":"left"}}'),
-    { align: "right", dock: "left", height: 244 },
+    { align: "right", dock: null, height: 244 },
   );
   assert.deepEqual(
     readNewsLayout('{"version":1,"news":{"align":"invalid","dock":"center"}}'),
@@ -211,4 +212,59 @@ test("requests coalesce, reuse fresh cache, retain content on failure, and repla
     if (previous) Object.defineProperty(globalThis, "localStorage", previous);
     else delete globalThis.localStorage;
   }
+});
+
+test("list alignment and edge visibility survive reload and reject mismatched edges", () => {
+  for (const widget of ["servers", "worlds"]) {
+    for (const side of ["left", "right"]) {
+      assert.deepEqual(
+        readListWidgetLayout(
+          JSON.stringify({ version: 1, [widget]: { align: side, dock: side } }),
+          widget,
+        ),
+        { align: side, dock: side, height: null },
+      );
+    }
+    assert.deepEqual(readListWidgetLayout(null, widget), {
+      align: "left",
+      dock: null,
+      height: null,
+    });
+    assert.deepEqual(
+      readListWidgetLayout(
+        JSON.stringify({
+          version: 1,
+          [widget]: { align: "left", dock: "right" },
+        }),
+        widget,
+      ),
+      { align: "left", dock: null, height: null },
+    );
+    for (const [input, height] of [
+      [360.4, 360],
+      [0, 120],
+      [9000, 4096],
+      ["300", null],
+      [null, null],
+    ])
+      assert.equal(
+        readListWidgetLayout(
+          JSON.stringify({ version: 1, [widget]: { height: input } }),
+          widget,
+        ).height,
+        height,
+      );
+  }
+});
+
+test("retired favorite widgets are ignored without removing other saved widgets", () => {
+  assert.deepEqual(
+    readHomeWidgets(
+      JSON.stringify({
+        version: 1,
+        widgets: ["servers", "favorites", "worlds", "todos"],
+      }),
+    ),
+    ["servers", "worlds", "todos"],
+  );
 });

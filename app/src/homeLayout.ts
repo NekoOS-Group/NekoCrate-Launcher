@@ -1,7 +1,8 @@
 import {
   homeWidgets,
   defaultNewsHeight,
-  minNewsHeight,
+  minWidgetHeight,
+  type ListWidgetHeights,
   type HomeWidget,
   type NewsDock,
 } from "./homeWidgets.ts";
@@ -40,7 +41,11 @@ export type SavedHomePositions = Omit<HomePositions, "tools"> & {
 export type HomeRects = Record<HomeGroup, Rect> &
   Partial<Record<HomeWidget, Rect>>;
 export type HomeOrientation = "horizontal" | "vertical";
-export type HomeOrientations = Record<"tools" | "instances", HomeOrientation>;
+export type InstanceLayout = HomeOrientation | "wheel";
+export type HomeOrientations = {
+  tools: HomeOrientation;
+  instances: InstanceLayout;
+};
 type Attachment = {
   side: "left" | "right" | "top" | "bottom";
   gap: number;
@@ -66,6 +71,7 @@ export function homeSizes(
   quoteScale = 1,
   newsHeight = defaultNewsHeight,
   clockScale = 1,
+  listHeights: ListWidgetHeights = {},
 ) {
   const edge = area.width <= 1000 || area.height <= 660 ? 24 : 32;
   const compactWidgets = area.height <= 600;
@@ -77,24 +83,26 @@ export function homeSizes(
         ? { width: 64, height: toolLength }
         : { width: toolLength, height: 64 },
     instances:
-      orientations.instances === "vertical"
-        ? {
-            width: 64,
-            height: Math.min(
-              slots ? slots * 60 + 56 : 64,
-              Math.max(64, area.height - edge * 2 - 76),
-            ),
-          }
-        : {
-            width: Math.max(
-              44,
-              Math.min(
-                slots ? slots * 60 + 56 : 44,
-                area.width - edge * 2 - 36 - 16 - 206 - 12,
+      orientations.instances === "wheel"
+        ? { width: 64, height: 64 }
+        : orientations.instances === "vertical"
+          ? {
+              width: 64,
+              height: Math.min(
+                slots ? slots * 60 + 56 : 64,
+                Math.max(64, area.height - edge * 2 - 76),
               ),
-            ),
-            height: 64,
-          },
+            }
+          : {
+              width: Math.max(
+                44,
+                Math.min(
+                  slots ? slots * 60 + 56 : 44,
+                  area.width - edge * 2 - 36 - 16 - 206 - 12,
+                ),
+              ),
+              height: 64,
+            },
     themes: { width: 44, height: 64 },
     launch: { width: 206, height: 56 },
     quote: { width: 300 * quoteScale, height: 112 * quoteScale },
@@ -102,9 +110,20 @@ export function homeSizes(
       width: 300,
       height: Math.min(newsHeight, Math.max(1, area.height - margin * 2)),
     },
-    servers: { width: 244, height: compactWidgets ? 164 : 214 },
-    favorites: { width: 244, height: compactWidgets ? 104 : 124 },
-    worlds: { width: 250, height: compactWidgets ? 132 : 190 },
+    servers: {
+      width: 244,
+      height: Math.min(
+        listHeights.servers ?? (compactWidgets ? 164 : 214),
+        Math.max(1, area.height - margin * 2),
+      ),
+    },
+    worlds: {
+      width: 250,
+      height: Math.min(
+        listHeights.worlds ?? (compactWidgets ? 132 : 190),
+        Math.max(1, area.height - margin * 2),
+      ),
+    },
     todos: { width: 244, height: compactWidgets ? 120 : 174 },
     clock: { width: 156 * clockScale, height: 66 * clockScale },
   } satisfies Record<HomeItem, Area>;
@@ -118,8 +137,7 @@ export function defaultHomeLayout(
   const widgetPosition: Record<HomeWidget, Point> = {
     quote: { x: edge, y: edge + 112 },
     news: { x: area.width - edge - sizes.news.width, y: edge + 64 },
-    favorites: { x: edge, y: edge + 100 },
-    servers: { x: edge, y: edge + sizes.favorites.height + 126 },
+    servers: { x: edge, y: edge + 100 },
     worlds: { x: area.width - edge - sizes.worlds.width, y: edge + 110 },
     todos: {
       x: area.width - edge - sizes.todos.width,
@@ -197,7 +215,7 @@ function closestSpace(rect: Rect, occupied: Rect[], area: Area) {
     }
   return best || origin;
 }
-/** Interactive groups avoid each other; text overlays only avoid editor chrome. */
+/** Interactive groups avoid each other; text widgets can overlap controls. */
 export function arrangeHomeLayout(
   requested: HomeRects,
   area: Area,
@@ -205,6 +223,8 @@ export function arrangeHomeLayout(
   obstacles: Rect[] = [],
   newsDock: NewsDock = null,
   hidden: readonly HomeGroup[] = [],
+  listDocks: Partial<Record<"servers" | "worlds", NewsDock>> = {},
+  listHeights: ListWidgetHeights = {},
 ): HomeRects {
   const order: HomeItem[] = [
     "account",
@@ -222,21 +242,30 @@ export function arrangeHomeLayout(
       result[id] = fitHomeRect(requested[id]!, area);
       continue;
     }
-    if (id === "news" && newsDock) {
+    const dock =
+      id === "news"
+        ? newsDock
+        : id === "servers" || id === "worlds"
+          ? listDocks[id]
+          : null;
+    if (dock) {
       // Edge panels do not push controls away when expanded or resized.
       const rect = fitHomeRect(requested[id]!, area);
       result[id] = {
         ...rect,
-        x: newsDock === "left" ? margin : area.width - margin - rect.width,
+        x: dock === "left" ? margin : area.width - margin - rect.width,
       };
       continue;
     }
-    // Text widgets may overlap controls without displacing them. Trends can
-    // grow vertically; its resize edge must not cause a positional jump.
-    const overlay = ["quote", "news", "clock"].includes(id);
+    // Resized panels keep their chosen edges on release, even over controls.
+    // Untouched lists retain their original automatic placement.
+    const resizedPanel =
+      id === "news" ||
+      ((id === "servers" || id === "worlds") && listHeights[id] != null);
+    const overlay = resizedPanel || ["quote", "clock"].includes(id);
     result[id] = closestSpace(
       requested[id]!,
-      id === "news" ? [] : overlay ? obstacles : occupied,
+      resizedPanel ? [] : overlay ? obstacles : occupied,
       area,
     );
     if (!overlay) occupied.push(result[id]!);
@@ -258,15 +287,15 @@ export function newsDockTarget(
     return "right";
   return null;
 }
-export type NewsResizeEdge = "top" | "bottom";
-export function resizeNewsRect(
+export type WidgetResizeEdge = "top" | "bottom";
+export function resizeWidgetRect(
   rect: Rect,
-  edge: NewsResizeEdge,
+  edge: WidgetResizeEdge,
   delta: number,
   area: Area,
 ): Rect {
   const base = fitHomeRect(rect, area);
-  const minimum = Math.min(minNewsHeight, base.height);
+  const minimum = Math.min(minWidgetHeight, base.height);
   if (edge === "top") {
     const bottom = base.y + base.height;
     const y = Math.max(margin, Math.min(bottom - minimum, base.y + delta));
@@ -497,9 +526,11 @@ export function readHomeOrientations(value: string | null): HomeOrientations {
         tools:
           data.orientations?.tools === "vertical" ? "vertical" : "horizontal",
         instances:
-          data.orientations?.instances === "vertical"
-            ? "vertical"
-            : "horizontal",
+          data.orientations?.instances === "wheel"
+            ? "wheel"
+            : data.orientations?.instances === "vertical"
+              ? "vertical"
+              : "horizontal",
       };
   } catch {
     /* A damaged preference must not prevent the home screen from opening. */

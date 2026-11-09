@@ -26,10 +26,10 @@ import {
   Sparkles,
   Type,
   Rows3,
+  GalleryVertical,
   Settings2,
   Terminal,
   Server,
-  Bookmark,
   Map,
   ListTodo,
   Clock,
@@ -39,6 +39,14 @@ import {
 } from "lucide-vue-next";
 import LayoutSlider from "./LayoutSlider.vue";
 import NewsSources from "./NewsSources.vue";
+import { useEdgeWidget } from "../useEdgeWidget";
+import {
+  defaultInstanceWheelBounds,
+  readInstanceWheelBounds,
+  instanceWheelFrame,
+  resizeInstanceWheelBounds,
+  type InstanceWheelBounds,
+} from "../instanceWheel";
 import {
   defaultHomeTools,
   homeToolLabels,
@@ -61,9 +69,9 @@ import {
   readFeedSources,
   NEWS_SOURCES_KEY,
   readNewsLayout,
+  readListWidgetLayout,
   defaultNewsHeight,
   readClockLayout,
-  type NewsDock,
   type FeedSource,
   type QuoteStyle,
   type HomeWidget,
@@ -81,16 +89,15 @@ import {
   readHomeOrientations,
   defaultHomeOrientations,
   snapHomeRect,
-  newsDockTarget,
-  resizeNewsRect,
+  resizeWidgetRect,
   inferHomeAttachments,
   readHomeAttachments,
-  type NewsResizeEdge,
+  type WidgetResizeEdge,
   type HomeItem,
   type SavedHomePositions,
   type HomeRects,
   type Point,
-  type HomeOrientation,
+  type InstanceLayout,
   type HomeOrientations,
 } from "../homeLayout";
 
@@ -105,6 +112,7 @@ function storedLayout(key = HOME_LAYOUT_KEY) {
   }
 }
 const stored = storedLayout();
+const editing = ref(false);
 const saved = ref<SavedHomePositions | null>(readHomeLayout(stored));
 const savedHiddenGroups = ref(readHiddenHomeGroups(stored));
 const draftHiddenGroups = ref([...savedHiddenGroups.value]);
@@ -120,24 +128,48 @@ const clockLayout = computed(() =>
 );
 const savedOrientations = ref(readHomeOrientations(stored));
 const draftOrientations = ref({ ...savedOrientations.value });
+const savedWheelBounds = ref(readInstanceWheelBounds(stored));
+const draftWheelBounds = ref({ ...savedWheelBounds.value });
+const previewWheelBounds = ref<InstanceWheelBounds>();
+const wheelBounds = computed(
+  () =>
+    previewWheelBounds.value ??
+    (editing.value ? draftWheelBounds.value : savedWheelBounds.value),
+);
 const savedTools = ref(readHomeTools(stored));
 const draftTools = ref([...savedTools.value]);
 const toolsMenu = ref(false);
 const widgetsMenu = ref(false);
-const savedNewsLayout = ref(readNewsLayout(stored));
-const draftNewsLayout = ref({ ...savedNewsLayout.value });
-const previewNewsDock = ref<NewsDock>();
-const newsLayout = computed(() =>
-  editing.value ? draftNewsLayout.value : savedNewsLayout.value,
-);
-const newsDock = computed(() =>
-  editing.value && previewNewsDock.value !== undefined
-    ? previewNewsDock.value
-    : newsLayout.value.dock,
-);
-const newsOpen = ref(false);
-const newsHost = ref<HTMLElement>();
-let newsHideTimer: ReturnType<typeof setTimeout> | undefined;
+const edgePanels = {
+  news: useEdgeWidget(readNewsLayout(stored), editing),
+  servers: useEdgeWidget(readListWidgetLayout(stored, "servers"), editing),
+  worlds: useEdgeWidget(readListWidgetLayout(stored, "worlds"), editing),
+};
+const listDocks = computed(() => ({
+  servers: edgePanels.servers.dock.value,
+  worlds: edgePanels.worlds.dock.value,
+}));
+const listHeights = computed(() => ({
+  servers: edgePanels.servers.layout.value.height,
+  worlds: edgePanels.worlds.layout.value.height,
+}));
+const {
+  saved: savedNewsLayout,
+  draft: draftNewsLayout,
+  layout: newsLayout,
+  dock: newsDock,
+} = edgePanels.news;
+function edgePanel(id: HomeItem) {
+  return id === "news" || id === "servers" || id === "worlds"
+    ? edgePanels[id]
+    : undefined;
+}
+function dockCandidate(id: HomeItem) {
+  return edgePanel(id)?.candidate(rects.value[id], area.value);
+}
+function closeEdgePanels() {
+  Object.values(edgePanels).forEach((panel) => panel.close());
+}
 const savedNewsSources = ref(readFeedSources(storedLayout(NEWS_SOURCES_KEY)));
 const draftNewsSources = ref([...savedNewsSources.value]);
 const newsSources = computed(() =>
@@ -183,7 +215,6 @@ const widgetIcons = {
   quote: Quote,
   news: Rss,
   servers: Server,
-  favorites: Bookmark,
   worlds: Map,
   todos: ListTodo,
   clock: Clock,
@@ -203,9 +234,9 @@ const toolIcons = {
   store: Download,
 };
 const draft = ref<SavedHomePositions | null>(null);
-const editing = ref(false);
 const dragging = ref<HomeItem>();
-const resizingNews = ref(false);
+const resizingPanel = ref(false);
+const resizingWheel = ref(false);
 const preview = ref<HomeRects>();
 const guides = ref<{ x?: number; y?: number }>({});
 const handles = ref<HTMLButtonElement[]>([]);
@@ -221,6 +252,7 @@ const sizes = computed(() =>
     quoteScale.value / 100,
     newsLayout.value.height,
     clockLayout.value.scale / 100,
+    listHeights.value,
   ),
 );
 const savedAttachments = ref(
@@ -250,9 +282,11 @@ const rects = computed(
       ),
       area.value,
       undefined,
-      editing.value ? [toolbarRect()] : [],
+      [],
       newsDock.value,
       hiddenGroups.value,
+      listDocks.value,
+      listHeights.value,
     ),
 );
 const labels: Record<HomeItem, string> = {
@@ -263,6 +297,20 @@ const labels: Record<HomeItem, string> = {
   launch: "启动与版本",
   ...homeWidgetLabels,
 };
+const wheelFrame = computed(() => {
+  const box = rects.value.instances;
+  return instanceWheelFrame(
+    { left: box.x, top: box.y, width: box.width, height: box.height },
+    area.value,
+    wheelBounds.value,
+  );
+});
+const wheelBoundaryStyle = computed(() => ({
+  left: `${wheelFrame.value.left}px`,
+  top: `${wheelFrame.value.top}px`,
+  width: `${wheelFrame.value.width}px`,
+  height: `${wheelFrame.value.height}px`,
+}));
 let pointer:
   | {
       id: number;
@@ -270,15 +318,13 @@ let pointer:
       origin: Point;
       base: HomeRects;
       target: HTMLElement;
-      resizeEdge?: NewsResizeEdge;
+      resizeEdge?: WidgetResizeEdge;
+      wheelBounds: InstanceWheelBounds;
     }
   | undefined;
 let pending: Point | undefined;
 let frame: number | undefined;
 let disposed = false;
-function toolbarRect() {
-  return { x: area.value.width - 222, y: 12, width: 210, height: 36 };
-}
 function changed() {
   // Anchored settings may be open while the application window is resized.
   window.dispatchEvent(new Event("nekocrate-home-layout"));
@@ -298,14 +344,16 @@ function begin() {
   draftClock.value = { ...savedClock.value };
   draftAttachments.value = { ...savedAttachments.value };
   draftOrientations.value = { ...savedOrientations.value };
+  draftWheelBounds.value = { ...savedWheelBounds.value };
   draftTools.value = [...savedTools.value];
   draftWidgets.value = [...savedWidgets.value];
   draftQuoteStyle.value = savedQuoteStyle.value;
   draftQuoteAngles.value = { ...savedQuoteAngles.value };
   draftQuoteScales.value = { ...savedQuoteScales.value };
   draftNewsSources.value = [...savedNewsSources.value];
-  draftNewsLayout.value = { ...savedNewsLayout.value };
-  closeNews();
+  for (const panel of Object.values(edgePanels))
+    panel.draft.value = { ...panel.saved.value };
+  closeEdgePanels();
   toolsMenu.value = false;
   widgetsMenu.value = false;
   editing.value = true;
@@ -321,7 +369,8 @@ function stopPointer() {
   if (previous?.target.hasPointerCapture(previous.id))
     previous.target.releasePointerCapture(previous.id);
   dragging.value = undefined;
-  resizingNews.value = false;
+  resizingPanel.value = false;
+  resizingWheel.value = false;
   guides.value = {};
   document.documentElement.classList.remove("home-layout-dragging");
   document.documentElement.classList.remove("home-layout-resizing");
@@ -334,7 +383,10 @@ function stopPointer() {
 function cancelDrag() {
   stopPointer();
   preview.value = undefined;
-  previewNewsDock.value = undefined;
+  previewWheelBounds.value = undefined;
+  Object.values(edgePanels).forEach((panel) => {
+    panel.previewDock.value = undefined;
+  });
 }
 function end(commit: boolean) {
   cancelDrag();
@@ -346,13 +398,15 @@ function end(commit: boolean) {
     savedClock.value = { ...draftClock.value };
     savedAttachments.value = { ...draftAttachments.value };
     savedOrientations.value = { ...draftOrientations.value };
+    savedWheelBounds.value = { ...draftWheelBounds.value };
     savedTools.value = [...draftTools.value];
     savedWidgets.value = [...draftWidgets.value];
     savedQuoteStyle.value = draftQuoteStyle.value;
     savedQuoteAngles.value = { ...draftQuoteAngles.value };
     savedQuoteScales.value = { ...draftQuoteScales.value };
     savedNewsSources.value = [...draftNewsSources.value];
-    savedNewsLayout.value = { ...draftNewsLayout.value };
+    for (const panel of Object.values(edgePanels))
+      panel.saved.value = { ...panel.draft.value };
     try {
       const sources = JSON.stringify(savedNewsSources.value);
       if (sources === JSON.stringify(readFeedSources(null)))
@@ -370,10 +424,20 @@ function end(commit: boolean) {
         savedNewsLayout.value.align !== "left" ||
         savedNewsLayout.value.dock !== null ||
         savedNewsLayout.value.height !== defaultNewsHeight ||
+        edgePanels.servers.saved.value.align !== "left" ||
+        edgePanels.servers.saved.value.dock !== null ||
+        edgePanels.servers.saved.value.height !== null ||
+        edgePanels.worlds.saved.value.align !== "left" ||
+        edgePanels.worlds.saved.value.dock !== null ||
+        edgePanels.worlds.saved.value.height !== null ||
         savedClock.value.scale !== 100 ||
         savedClock.value.angle !== 0 ||
+        savedWheelBounds.value.above !== defaultInstanceWheelBounds.above ||
+        savedWheelBounds.value.below !== defaultInstanceWheelBounds.below ||
         !savedClock.value.date ||
-        Object.values(savedOrientations.value).includes("vertical") ||
+        Object.values(savedOrientations.value).some(
+          (value) => value !== "horizontal",
+        ) ||
         savedTools.value.join() !== defaultHomeTools.join()
       )
         localStorage.setItem(
@@ -384,12 +448,15 @@ function end(commit: boolean) {
             hiddenGroups: savedHiddenGroups.value,
             attachments: savedAttachments.value,
             orientations: savedOrientations.value,
+            instanceWheel: savedWheelBounds.value,
             tools: savedTools.value,
             widgets: savedWidgets.value,
             quoteStyle: savedQuoteStyle.value,
             quoteAngles: savedQuoteAngles.value,
             quoteScales: savedQuoteScales.value,
             news: savedNewsLayout.value,
+            servers: edgePanels.servers.saved.value,
+            worlds: edgePanels.worlds.saved.value,
             clock: savedClock.value,
           }),
         );
@@ -399,7 +466,7 @@ function end(commit: boolean) {
     }
   }
   editing.value = false;
-  closeNews();
+  closeEdgePanels();
   emit("editing", false);
 }
 function reset() {
@@ -407,6 +474,7 @@ function reset() {
   draft.value = null;
   draftHiddenGroups.value = [];
   draftClock.value = readClockLayout(null);
+  draftWheelBounds.value = { ...defaultInstanceWheelBounds };
   draftAttachments.value = {};
   draftOrientations.value = { ...defaultHomeOrientations };
   draftTools.value = [...defaultHomeTools];
@@ -416,6 +484,8 @@ function reset() {
   draftQuoteScales.value = { ...defaultQuoteScales };
   draftNewsSources.value = readFeedSources(null);
   draftNewsLayout.value = readNewsLayout(null);
+  edgePanels.servers.draft.value = readListWidgetLayout(null, "servers");
+  edgePanels.worlds.draft.value = readListWidgetLayout(null, "worlds");
   toolsMenu.value = false;
   widgetsMenu.value = false;
 }
@@ -440,53 +510,6 @@ function setQuoteScale(value: number) {
 function setNewsSources(value: FeedSource[]) {
   if (editing.value)
     draftNewsSources.value = readFeedSources(JSON.stringify(value));
-}
-function toggleNewsAlignment() {
-  if (editing.value)
-    draftNewsLayout.value = {
-      ...draftNewsLayout.value,
-      align: draftNewsLayout.value.align === "left" ? "right" : "left",
-    };
-}
-function undockNews() {
-  if (editing.value)
-    draftNewsLayout.value = { ...draftNewsLayout.value, dock: null };
-}
-function setNewsHost(element: unknown) {
-  newsHost.value = element instanceof HTMLElement ? element : undefined;
-}
-function showNews() {
-  clearTimeout(newsHideTimer);
-  if (!editing.value && newsDock.value) newsOpen.value = true;
-}
-function closeNews() {
-  clearTimeout(newsHideTimer);
-  newsOpen.value = false;
-}
-function leaveNews() {
-  clearTimeout(newsHideTimer);
-  newsHideTimer = setTimeout(() => {
-    // Pointer movement does not clear :focus-visible in WebKit. A previously
-    // focused link must not pin the panel open after the pointer leaves.
-    // Focus moving between links stays open through showNews / blurNews.
-    newsOpen.value = false;
-  }, 180);
-}
-function blurNews(event: FocusEvent) {
-  if (
-    !(event.relatedTarget instanceof Node) ||
-    !newsHost.value?.contains(event.relatedTarget)
-  )
-    leaveNews();
-}
-function escapeNews(event: KeyboardEvent) {
-  if (editing.value || !newsDock.value) return;
-  event.stopPropagation();
-  event.preventDefault();
-  newsHost.value
-    ?.querySelector<HTMLButtonElement>(".news-edge-trigger")
-    ?.focus({ preventScroll: true });
-  closeNews();
 }
 function removable(id: HomeItem) {
   return (
@@ -545,37 +568,72 @@ function setTools(value: HomeTool[]) {
       },
       area.value,
       "tools",
-      [toolbarRect()],
+      [],
       newsDock.value,
       hiddenGroups.value,
+      listDocks.value,
+      listHeights.value,
     ),
   );
   toolsMenu.value = false;
   widgetsMenu.value = false;
 }
-function setOrientation(group: keyof HomeOrientations, value: HomeOrientation) {
+function nextOrientation(group: keyof HomeOrientations): InstanceLayout {
+  const current = orientations.value[group];
+  return current === "horizontal"
+    ? "vertical"
+    : group === "instances" && current === "vertical"
+      ? "wheel"
+      : "horizontal";
+}
+function orientationHint(group: keyof HomeOrientations) {
+  const next = nextOrientation(group);
+  return next === "wheel"
+    ? t("切换为滚轮选择器")
+    : next === "vertical"
+      ? t("切换为竖排")
+      : t("切换为横排");
+}
+function setOrientation(group: keyof HomeOrientations, value: InstanceLayout) {
   if (!editing.value || orientations.value[group] === value) return;
+  if (group === "tools" && value === "wheel") return;
   cancelDrag();
   toolsMenu.value = false;
   widgetsMenu.value = false;
   const before = rects.value;
   draftOrientations.value = { ...draftOrientations.value, [group]: value };
   const size = sizes.value[group];
-  // Rotate around the existing centre, then fit the frame and its neighbours.
+  // Keep the instance dock's nearest edge anchored while its footprint changes;
+  // cycling through vertical must not pull the compact wheel away from Launch.
+  // Tools retain their existing centre when rotating.
+  const xShift =
+    group === "instances"
+      ? before[group].x + before[group].width / 2 > area.value.width / 2
+        ? before[group].width - size.width
+        : 0
+      : (before[group].width - size.width) / 2;
+  const yShift =
+    group === "instances"
+      ? before[group].y + before[group].height / 2 > area.value.height / 2
+        ? before[group].height - size.height
+        : 0
+      : (before[group].height - size.height) / 2;
   const arranged = arrangeHomeLayout(
     {
       ...before,
       [group]: {
         ...size,
-        x: before[group].x + (before[group].width - size.width) / 2,
-        y: before[group].y + (before[group].height - size.height) / 2,
+        x: before[group].x + xShift,
+        y: before[group].y + yShift,
       },
     },
     area.value,
     group,
-    [toolbarRect()],
+    [],
     newsDock.value,
     hiddenGroups.value,
+    listDocks.value,
+    listHeights.value,
   );
   rememberLayout(arranged);
 }
@@ -585,7 +643,7 @@ function preventSelection(event: Event) {
 function start(
   event: PointerEvent,
   group: HomeItem,
-  resizeEdge?: NewsResizeEdge,
+  resizeEdge?: WidgetResizeEdge,
 ) {
   if (!editing.value || event.button !== 0 || !event.isPrimary || pointer)
     return;
@@ -602,9 +660,11 @@ function start(
     base: rects.value,
     target,
     resizeEdge,
+    wheelBounds: { ...wheelBounds.value },
   };
   dragging.value = group;
-  resizingNews.value = !!resizeEdge;
+  resizingPanel.value = !!resizeEdge && !!edgePanel(group);
+  resizingWheel.value = !!resizeEdge && group === "instances";
   target.setPointerCapture(event.pointerId);
   document.documentElement.classList.add("home-layout-dragging");
   if (resizeEdge)
@@ -617,12 +677,7 @@ function start(
 }
 function place(group: HomeItem, point: Point, base: HomeRects, snap = true) {
   const proposed = { ...base[group]!, ...point };
-  if (group === "news")
-    previewNewsDock.value = newsDockTarget(
-      proposed,
-      area.value,
-      newsDock.value,
-    );
+  edgePanel(group)?.move(proposed, area.value);
   const result = snap
     ? snapHomeRect(
         proposed,
@@ -634,9 +689,11 @@ function place(group: HomeItem, point: Point, base: HomeRects, snap = true) {
     { ...base, [group]: result.rect },
     area.value,
     group,
-    [toolbarRect()],
+    [],
     newsDock.value,
     hiddenGroups.value,
+    listDocks.value,
+    listHeights.value,
   );
   preview.value = arranged;
   guides.value = {
@@ -649,10 +706,21 @@ function draw() {
   if (!pointer || !pending) return;
   const { base, origin, group } = pointer;
   if (pointer.resizeEdge) {
+    if (group === "instances") {
+      const box = base.instances;
+      previewWheelBounds.value = resizeInstanceWheelBounds(
+        pointer.wheelBounds,
+        pointer.resizeEdge,
+        pending.y - origin.y,
+        { left: box.x, top: box.y, width: box.width, height: box.height },
+        area.value,
+      );
+      return;
+    }
     preview.value = {
       ...base,
-      news: resizeNewsRect(
-        base.news!,
+      [group]: resizeWidgetRect(
+        base[group]!,
         pointer.resizeEdge,
         pending.y - origin.y,
         area.value,
@@ -683,17 +751,22 @@ function release(event: PointerEvent) {
     pending = { x: event.clientX, y: event.clientY };
     draw();
     if (preview.value) rememberLayout(preview.value);
-    if (pointer.group === "news")
-      draftNewsLayout.value = {
-        ...draftNewsLayout.value,
-        ...(pointer.resizeEdge
-          ? { height: preview.value!.news!.height }
-          : { dock: previewNewsDock.value ?? null }),
+    if (pointer.resizeEdge && pointer.group === "instances")
+      draftWheelBounds.value = { ...previewWheelBounds.value! };
+    else if (pointer.resizeEdge) {
+      const panel = edgePanel(pointer.group)!;
+      panel.draft.value = {
+        ...panel.draft.value,
+        height: preview.value![pointer.group]!.height,
       };
+    } else edgePanel(pointer.group)?.commitMove();
   }
   stopPointer();
   preview.value = undefined;
-  previewNewsDock.value = undefined;
+  previewWheelBounds.value = undefined;
+  Object.values(edgePanels).forEach((panel) => {
+    panel.previewDock.value = undefined;
+  });
 }
 function nudge(event: KeyboardEvent, group: HomeItem) {
   if (
@@ -704,17 +777,18 @@ function nudge(event: KeyboardEvent, group: HomeItem) {
   event.preventDefault();
   const step = event.shiftKey ? 1 : 8,
     origin = rects.value[group]!;
+  const panel = edgePanel(group);
   // A docked panel is pinned at the inset; let keyboard movement detach it
   // without repeatedly losing its progress inside the pointer hysteresis zone.
   if (
-    group === "news" &&
-    ((newsDock.value === "left" && event.key === "ArrowRight") ||
-      (newsDock.value === "right" && event.key === "ArrowLeft"))
+    panel &&
+    ((panel.dock.value === "left" && event.key === "ArrowRight") ||
+      (panel.dock.value === "right" && event.key === "ArrowLeft"))
   ) {
     const x =
-      newsDock.value === "left" ? 36 : area.value.width - origin.width - 36;
-    draftNewsLayout.value = { ...draftNewsLayout.value, dock: null };
-    rememberLayout({ ...rects.value, news: { ...origin, x } });
+      panel.dock.value === "left" ? 36 : area.value.width - origin.width - 36;
+    panel.draft.value = { ...panel.draft.value, dock: null };
+    rememberLayout({ ...rects.value, [group]: { ...origin, x } });
     return;
   }
   place(
@@ -739,23 +813,39 @@ function nudge(event: KeyboardEvent, group: HomeItem) {
     false,
   );
   rememberLayout(preview.value!);
-  if (group === "news")
-    draftNewsLayout.value = {
-      ...draftNewsLayout.value,
-      dock: previewNewsDock.value ?? null,
-    };
+  panel?.commitMove();
   preview.value = undefined;
-  previewNewsDock.value = undefined;
+  Object.values(edgePanels).forEach((panel) => {
+    panel.previewDock.value = undefined;
+  });
   guides.value = {};
 }
-function nudgeNewsSize(event: KeyboardEvent, edge: NewsResizeEdge) {
-  if (!editing.value || !["ArrowUp", "ArrowDown"].includes(event.key)) return;
+function nudgeWidgetSize(
+  event: KeyboardEvent,
+  id: HomeItem,
+  edge: WidgetResizeEdge,
+) {
+  const panel = edgePanel(id);
+  if (!editing.value || !panel || !["ArrowUp", "ArrowDown"].includes(event.key))
+    return;
   event.preventDefault();
   const delta = (event.key === "ArrowUp" ? -1 : 1) * (event.shiftKey ? 1 : 8);
   const before = rects.value;
-  const news = resizeNewsRect(before.news!, edge, delta, area.value);
-  draftNewsLayout.value = { ...draftNewsLayout.value, height: news.height };
-  rememberLayout({ ...before, news });
+  const box = resizeWidgetRect(before[id]!, edge, delta, area.value);
+  panel.draft.value = { ...panel.draft.value, height: box.height };
+  rememberLayout({ ...before, [id]: box });
+}
+function nudgeWheelSize(event: KeyboardEvent, edge: WidgetResizeEdge) {
+  if (!editing.value || !["ArrowUp", "ArrowDown"].includes(event.key)) return;
+  event.preventDefault();
+  const box = rects.value.instances;
+  draftWheelBounds.value = resizeInstanceWheelBounds(
+    wheelBounds.value,
+    edge,
+    (event.key === "ArrowUp" ? -1 : 1) * (event.shiftKey ? 1 : 8),
+    { left: box.x, top: box.y, width: box.width, height: box.height },
+    area.value,
+  );
 }
 function keyboard(event: KeyboardEvent) {
   if (!editing.value || event.key !== "Escape") return;
@@ -785,15 +875,15 @@ function style(id: HomeItem) {
 onMounted(() => {
   window.addEventListener("resize", resize);
   document.addEventListener("keydown", keyboard);
-  window.addEventListener("blur", closeNews);
+  window.addEventListener("blur", closeEdgePanels);
 });
 onBeforeUnmount(() => {
   disposed = true;
   cancelDrag();
   window.removeEventListener("resize", resize);
   document.removeEventListener("keydown", keyboard);
-  window.removeEventListener("blur", closeNews);
-  closeNews();
+  window.removeEventListener("blur", closeEdgePanels);
+  closeEdgePanels();
 });
 defineExpose({ begin });
 </script>
@@ -887,7 +977,7 @@ defineExpose({ begin });
     <div
       v-for="id in groups"
       :key="id"
-      :ref="id === 'news' ? setNewsHost : undefined"
+      :ref="edgePanel(id)?.setHost"
       class="home-layout-item"
       :data-layout-group="id"
       :data-home-widget="
@@ -897,11 +987,13 @@ defineExpose({ begin });
       :class="{
         'layout-editing': editing,
         'layout-dragging': dragging === id,
-        'layout-resizing': id === 'news' && resizingNews,
-        'news-docked': id === 'news' && newsDock && !editing,
-        'news-revealed': id === 'news' && newsOpen,
+        'layout-resizing':
+          (dragging === id && resizingPanel) ||
+          (id === 'instances' && resizingWheel),
+        'widget-docked': edgePanel(id)?.dock.value && !editing,
+        'widget-revealed': edgePanel(id)?.open.value,
       }"
-      :data-news-dock="id === 'news' ? newsDock : undefined"
+      :data-edge-dock="edgePanel(id)?.dock.value"
       :data-vertical="
         rects[id]!.y + rects[id]!.height / 2 < area.height / 2
           ? 'top'
@@ -912,35 +1004,39 @@ defineExpose({ begin });
       "
       :style="style(id)"
       @transitionend.self="changed"
-      @pointerenter="id === 'news' && showNews()"
-      @pointerleave="id === 'news' && leaveNews()"
-      @focusin="id === 'news' && showNews()"
-      @focusout="id === 'news' && blurNews($event)"
-      @keydown.esc="id === 'news' && escapeNews($event)"
+      @pointerenter="edgePanel(id)?.show()"
+      @pointerleave="edgePanel(id)?.leave()"
+      @focusin="edgePanel(id)?.show()"
+      @focusout="edgePanel(id)?.blur($event)"
+      @keydown.esc="edgePanel(id)?.escape($event)"
     >
       <button
-        v-if="id === 'news' && newsDock && !editing"
-        class="news-edge-trigger"
-        :aria-label="t('展开 Trends')"
-        :aria-expanded="newsOpen"
-        @click="showNews"
+        v-if="edgePanel(id)?.dock.value && !editing"
+        class="widget-edge-trigger"
+        :aria-label="t('展开 {name}', { name: t(labels[id]) })"
+        :aria-expanded="edgePanel(id)?.open.value"
+        @click="edgePanel(id)?.show()"
       />
       <div
         class="home-layout-content"
         :inert="
           (editing && id !== 'tools') ||
-          (id === 'news' && !!newsDock && !editing && !newsOpen)
+          (!!edgePanel(id)?.dock.value &&
+            !editing &&
+            !edgePanel(id)?.open.value)
         "
       >
         <slot
           :name="id"
           :orientation="orientation(id)"
+          :instance-wheel-bounds="wheelBounds"
           :editing="editing"
           :quote-style="quoteStyle"
           :quote-angle="quoteAngle"
           :quote-scale="quoteScale"
           :news-sources="newsSources"
           :news-align="newsLayout.align"
+          :widget-align="edgePanel(id)?.layout.value.align"
           :clock-scale="clockLayout.scale"
           :clock-angle="clockLayout.angle"
           :clock-date="clockLayout.date"
@@ -971,24 +1067,16 @@ defineExpose({ begin });
           v-if="id === 'instances' || id === 'tools'"
           type="button"
           class="layout-orientation"
-          :title="
-            orientation(id) === 'horizontal' ? t('切换为竖排') : t('切换为横排')
-          "
-          :aria-label="
-            orientation(id) === 'horizontal' ? t('切换为竖排') : t('切换为横排')
-          "
+          :title="orientationHint(id)"
+          :aria-label="orientationHint(id)"
           @pointerdown.stop
-          @click.stop="
-            setOrientation(
-              id,
-              orientation(id) === 'horizontal' ? 'vertical' : 'horizontal',
-            )
-          "
+          @click.stop="setOrientation(id, nextOrientation(id))"
         >
-          <Columns3 v-if="orientation(id) === 'horizontal'" :size="14" /><Rows3
-            v-else
+          <GalleryVertical v-if="orientation(id) === 'wheel'" :size="14" />
+          <Columns3
+            v-else-if="orientation(id) === 'horizontal'"
             :size="14"
-          />
+          /><Rows3 v-else :size="14" />
         </button>
         <button
           v-if="id === 'quote'"
@@ -1062,28 +1150,45 @@ defineExpose({ begin });
           <CalendarDays :size="14" />
         </button>
         <button
-          v-if="id === 'news'"
+          v-if="edgePanel(id)"
           class="layout-orientation"
-          :title="t(newsLayout.align === 'left' ? '文字靠右' : '文字靠左')"
-          :aria-label="t(newsLayout.align === 'left' ? '文字靠右' : '文字靠左')"
+          :title="
+            t(
+              edgePanel(id)?.layout.value.align === 'left'
+                ? '文字靠右'
+                : '文字靠左',
+            )
+          "
+          :aria-label="
+            t(
+              edgePanel(id)?.layout.value.align === 'left'
+                ? '文字靠右'
+                : '文字靠左',
+            )
+          "
           @pointerdown.stop
-          @click.stop="toggleNewsAlignment"
+          @click.stop="edgePanel(id)?.toggleAlignment()"
         >
-          <AlignLeft v-if="newsLayout.align === 'left'" :size="14" /><AlignRight
-            v-else
+          <AlignLeft
+            v-if="edgePanel(id)?.layout.value.align === 'left'"
             :size="14"
-          />
+          /><AlignRight v-else :size="14" />
         </button>
         <button
-          v-if="id === 'news' && newsDock"
+          v-if="dockCandidate(id)"
           class="layout-orientation"
-          :title="t('取消边缘隐藏')"
-          :aria-label="t('取消边缘隐藏')"
+          :title="
+            t(edgePanel(id)?.dock.value ? '取消边缘隐藏' : '启用边缘隐藏')
+          "
+          :aria-label="
+            t(edgePanel(id)?.dock.value ? '取消边缘隐藏' : '启用边缘隐藏')
+          "
+          :aria-pressed="!!edgePanel(id)?.dock.value"
           @pointerdown.stop
-          @click.stop="undockNews"
+          @click.stop="edgePanel(id)?.toggleDock(rects[id], area)"
         >
           <PanelLeftClose
-            v-if="newsDock === 'left'"
+            v-if="dockCandidate(id) === 'left'"
             :size="14"
           /><PanelRightClose v-else :size="14" />
         </button>
@@ -1124,7 +1229,36 @@ defineExpose({ begin });
           </button>
         </div>
       </div>
-      <template v-if="editing && id === 'news'">
+      <div
+        v-if="editing && id === 'instances' && orientation(id) === 'wheel'"
+        class="layout-wheel-boundaries"
+        :style="wheelBoundaryStyle"
+      >
+        <button
+          v-for="edge in ['top', 'bottom'] as const"
+          :key="edge"
+          class="layout-wheel-boundary"
+          :data-edge="edge"
+          :title="
+            t(
+              edge === 'top'
+                ? '拖动调整实例列表上边界'
+                : '拖动调整实例列表下边界',
+            )
+          "
+          :aria-label="
+            t(
+              edge === 'top'
+                ? '拖动调整实例列表上边界'
+                : '拖动调整实例列表下边界',
+            )
+          "
+          @pointerdown="start($event, 'instances', edge)"
+          @keydown="nudgeWheelSize($event, edge)"
+          @dragstart.prevent
+        />
+      </div>
+      <template v-if="editing && edgePanel(id)">
         <button
           v-for="edge in ['top', 'bottom'] as const"
           :key="edge"
@@ -1133,19 +1267,21 @@ defineExpose({ begin });
           :title="
             t(
               edge === 'top'
-                ? '拖动上边缘调整 Trends 高度'
-                : '拖动下边缘调整 Trends 高度',
+                ? '拖动上边缘调整 {name} 高度'
+                : '拖动下边缘调整 {name} 高度',
+              { name: t(labels[id]) },
             )
           "
           :aria-label="
             t(
               edge === 'top'
-                ? '拖动上边缘调整 Trends 高度'
-                : '拖动下边缘调整 Trends 高度',
+                ? '拖动上边缘调整 {name} 高度'
+                : '拖动下边缘调整 {name} 高度',
+              { name: t(labels[id]) },
             )
           "
-          @pointerdown.stop="start($event, 'news', edge)"
-          @keydown="nudgeNewsSize($event, edge)"
+          @pointerdown.stop="start($event, id, edge)"
+          @keydown="nudgeWidgetSize($event, id, edge)"
           @dragstart.prevent
         />
       </template>
@@ -1185,13 +1321,13 @@ defineExpose({ begin });
   width: 100%;
   height: 100%;
 }
-.home-layout-item.news-docked {
+.home-layout-item.widget-docked {
   pointer-events: none;
 }
-.home-layout-item.news-docked.news-revealed {
+.home-layout-item.widget-docked.widget-revealed {
   pointer-events: auto;
 }
-.news-docked > .home-layout-content {
+.widget-docked > .home-layout-content {
   opacity: 0;
   pointer-events: none;
   transform: translateX(calc(-100% - 24px));
@@ -1199,15 +1335,15 @@ defineExpose({ begin });
     transform 360ms var(--motion-ease),
     opacity 220ms var(--motion-ease);
 }
-.news-docked[data-news-dock="right"] > .home-layout-content {
+.widget-docked[data-edge-dock="right"] > .home-layout-content {
   transform: translateX(calc(100% + 24px));
 }
-.news-docked.news-revealed > .home-layout-content {
+.widget-docked.widget-revealed > .home-layout-content {
   opacity: 1;
   pointer-events: auto;
   transform: translateX(0);
 }
-.news-edge-trigger {
+.widget-edge-trigger {
   position: absolute;
   left: -12px;
   top: 0;
@@ -1220,11 +1356,11 @@ defineExpose({ begin });
   pointer-events: auto;
   cursor: pointer;
 }
-[data-news-dock="right"] > .news-edge-trigger {
+[data-edge-dock="right"] > .widget-edge-trigger {
   left: auto;
   right: -12px;
 }
-.news-edge-trigger::after {
+.widget-edge-trigger::after {
   content: "";
   position: absolute;
   left: 5px;
@@ -1236,14 +1372,14 @@ defineExpose({ begin });
   opacity: 0.45;
   transition: opacity 160ms;
 }
-.news-edge-trigger:is(:hover, :focus-visible)::after {
+.widget-edge-trigger:is(:hover, :focus-visible)::after {
   opacity: 1;
 }
-.news-edge-trigger:focus-visible {
+.widget-edge-trigger:focus-visible {
   outline: none;
 }
 @media (prefers-reduced-motion: reduce) {
-  .news-docked > .home-layout-content {
+  .widget-docked > .home-layout-content {
     transition: none;
   }
 }
@@ -1271,6 +1407,15 @@ defineExpose({ begin });
 }
 .home-layout-item.layout-editing {
   z-index: 151;
+}
+.home-layout-item.layout-editing:where(
+    :focus-within,
+    :has(.layout-orientation[aria-expanded="true"])
+  ) {
+  z-index: 152;
+}
+.home-layout-item.layout-editing:hover {
+  z-index: 153;
 }
 /* Moving a whole dock is not a reorder: FLIP would make its tiles trail it. */
 .home-layout-item.layout-editing .instance-sort-move {
@@ -1320,8 +1465,8 @@ defineExpose({ begin });
   outline: none;
   text-shadow: 0 0 8px var(--glow);
 }
-.home-layout-item.layout-dragging {
-  z-index: 152;
+.home-layout-item.layout-editing.layout-dragging {
+  z-index: 153;
   transition: none;
 }
 .home-layout-content[inert] {
@@ -1371,6 +1516,8 @@ defineExpose({ begin });
   cursor: grab;
   touch-action: none;
   user-select: none;
+  /* Keep glyphs on one raster layer when a slider's glass layer is created. */
+  transform: translateZ(0);
 }
 .layout-label > span {
   display: flex;
@@ -1407,6 +1554,7 @@ defineExpose({ begin });
   filter: none;
   transition: color 160ms;
 }
+.layout-label .layout-orientation[aria-pressed="true"],
 .layout-label .layout-orientation:is(:hover, :focus-visible, :active) {
   outline: none;
   color: var(--blue);
@@ -1469,6 +1617,54 @@ defineExpose({ begin });
   outline: none;
   filter: none;
   transform: none;
+}
+.layout-wheel-boundaries {
+  position: absolute;
+  z-index: 2;
+  pointer-events: none;
+}
+.layout-wheel-boundary {
+  position: absolute;
+  left: 0;
+  top: -8px;
+  width: 100%;
+  height: 16px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  pointer-events: auto;
+  cursor: ns-resize;
+  touch-action: none;
+}
+.layout-wheel-boundary[data-edge="bottom"] {
+  top: auto;
+  bottom: -8px;
+}
+.layout-wheel-boundary::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 7px;
+  border-top: 1px dashed currentColor;
+  opacity: 0.45;
+}
+.layout-wheel-boundary::after {
+  content: "";
+  position: absolute;
+  left: calc(50% - 14px);
+  top: 6px;
+  width: 28px;
+  height: 3px;
+  background: currentColor;
+}
+.layout-wheel-boundary:is(:hover, :focus-visible),
+.layout-resizing .layout-wheel-boundary {
+  outline: none;
+  transform: none;
+  color: var(--blue);
+  filter: drop-shadow(0 0 4px var(--glow));
 }
 .layout-guide {
   position: absolute;

@@ -53,7 +53,6 @@ export const homeWidgetLabels = {
   quote: "一言",
   news: "Trends",
   servers: "服务器列表",
-  favorites: "收藏版本",
   worlds: "最近存档",
   todos: "待办便签",
   clock: "像素时钟",
@@ -83,8 +82,36 @@ export function readClockLayout(value: string | null) {
   };
 }
 export type NewsDock = "left" | "right" | null;
+export type EdgeWidgetLayout = { align: "left" | "right"; dock: NewsDock };
+export type ListWidget = "servers" | "worlds";
+export type ListWidgetHeights = Partial<Record<ListWidget, number | null>>;
+export const minWidgetHeight = 120;
+function widgetHeight(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.round(Math.max(minWidgetHeight, Math.min(4096, value)))
+    : null;
+}
+function edgeWidgetLayout(settings: any): EdgeWidgetLayout {
+  const align = settings?.align === "right" ? "right" : "left";
+  return { align, dock: settings?.dock === align ? align : null };
+}
+export function readListWidgetLayout(
+  value: string | null,
+  widget: ListWidget,
+): EdgeWidgetLayout & { height: number | null } {
+  try {
+    const data = JSON.parse(value || "null");
+    if (data?.version === 1)
+      return {
+        ...edgeWidgetLayout(data[widget]),
+        height: widgetHeight(data[widget]?.height),
+      };
+  } catch {
+    /* Older layouts keep lists visible and left aligned. */
+  }
+  return { ...edgeWidgetLayout(null), height: null };
+}
 export const defaultNewsHeight = 244;
-export const minNewsHeight = 120;
 export type NewsLayout = {
   align: "left" | "right";
   dock: NewsDock;
@@ -95,17 +122,8 @@ export function readNewsLayout(value: string | null): NewsLayout {
     const data = JSON.parse(value || "null");
     if (data?.version === 1)
       return {
-        align: data.news?.align === "right" ? "right" : "left",
-        dock: ["left", "right"].includes(data.news?.dock)
-          ? data.news.dock
-          : null,
-        height:
-          typeof data.news?.height === "number" &&
-          Number.isFinite(data.news.height)
-            ? Math.round(
-                Math.max(minNewsHeight, Math.min(4096, data.news.height)),
-              )
-            : defaultNewsHeight,
+        ...edgeWidgetLayout(data.news),
+        height: widgetHeight(data.news?.height) ?? defaultNewsHeight,
       };
   } catch {
     /* Older layouts keep news visible and left aligned. */

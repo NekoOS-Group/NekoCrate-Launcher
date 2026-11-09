@@ -235,8 +235,9 @@ export function useInstanceSorting(
       opacity: "1",
     };
     if (!dropAllowed.value) return;
-    const vertical = list.dataset?.orientation === "vertical";
-    if (zone === "overflow" || vertical) {
+    const wheel = list.dataset?.orientation === "wheel";
+    const vertical = wheel || list.dataset?.orientation === "vertical";
+    if (zone === "overflow" || (vertical && !wheel)) {
       const delta =
         pointer.y < box.top + 28
           ? pointer.y - box.top - 28
@@ -247,15 +248,28 @@ export function useInstanceSorting(
     }
     const positions = Array.from(
       list.querySelectorAll<HTMLElement>("[data-instance-id]"),
-      (item) => ({
-        id: item.dataset.instanceId!,
-        // Ignore FLIP transforms so the target does not oscillate as tiles move.
-        left: box.left + item.offsetLeft - list.scrollLeft,
-        top: box.top + item.offsetTop - list.scrollTop,
-        width: item.offsetWidth,
-        height: item.offsetHeight,
-      }),
-    );
+    ).flatMap((item) => {
+      const row = wheel
+        ? item.closest<HTMLElement>(".instance-wheel-row")
+        : undefined;
+      if (row?.dataset.wheelVisible === "false") return [];
+      return [
+        {
+          id: item.dataset.instanceId!,
+          // Ignore FLIP transforms so the target does not oscillate as tiles move.
+          left:
+            box.left +
+            (row ? Number(row.dataset.wheelX) : item.offsetLeft) -
+            list.scrollLeft,
+          top:
+            box.top +
+            (row ? Number(row.dataset.wheelY) : item.offsetTop) -
+            list.scrollTop,
+          width: item.offsetWidth,
+          height: item.offsetHeight,
+        },
+      ];
+    });
     let target = instanceGridDropTarget(
       positions,
       draggedId.value,
@@ -263,6 +277,21 @@ export function useInstanceSorting(
       pointer.y,
       vertical ? "vertical" : "horizontal",
     );
+    if (wheel) {
+      // The wheel shows a moving window of the complete order, not the first
+      // eight dock slots. Dropping after its last row inserts before the next
+      // off-screen instance, rather than jumping to the end of the list.
+      if (target === null && positions.length) {
+        const last = order.findIndex(
+          (item) => item.id === positions.at(-1)!.id,
+        );
+        target =
+          order.slice(last + 1).find((item) => item.id !== draggedId.value)
+            ?.id ?? null;
+      }
+      beforeId.value = target;
+      return;
+    }
     if (zone === "main" && target === null)
       target =
         order
@@ -424,6 +453,7 @@ export function useInstanceSorting(
     if (index < 0 || nextIndex < 0 || nextIndex >= instances.value.length)
       return;
     if (
+      strip.value?.dataset?.orientation !== "wheel" &&
       Math.max(index, nextIndex) >= instanceVisibleLimit(instances.value.length)
     )
       expanded.value = true;

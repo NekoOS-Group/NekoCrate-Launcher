@@ -458,3 +458,47 @@ test("hovering the arrow expands overflow during dragging; it collapses when onl
     f.dispose();
   }
 });
+
+test("wheel reorder uses its visible rows beyond the ninth instance without jumping to the end", async () => {
+  const f = draggingFixture(Array.from({ length: 16 }, (_, i) => String(i)));
+  try {
+    Object.assign(f.ui.strip.value, {
+      dataset: { orientation: "wheel" },
+      getBoundingClientRect: () => ({
+        left: 100,
+        right: 360,
+        top: 300,
+        bottom: 620,
+        width: 260,
+        height: 320,
+      }),
+      querySelectorAll: () =>
+        [9, 10, 11, 12, 13].map((id, index) => ({
+          dataset: { instanceId: String(id) },
+          offsetLeft: 0,
+          offsetTop: 0,
+          offsetWidth: 56,
+          offsetHeight: 56,
+          closest: () => ({
+            dataset: {
+              wheelX: "200",
+              wheelY: String(32 + index * 50),
+              wheelVisible: "true",
+            },
+          }),
+        })),
+    });
+    f.start("9");
+    f.track(330, 590);
+    assert.equal(f.ui.beforeId.value, "14");
+    assert.deepEqual(
+      f.ui.displayInstances.value.map((i) => i.id).slice(8, 15),
+      ["8", "10", "11", "12", "13", "9", "14"],
+    );
+    assert.equal(f.ui.strip.value.scrollTop, 0);
+    f.release(330, 590);
+    assert.deepEqual(f.moves, [["9", "14"]]);
+  } finally {
+    f.dispose();
+  }
+});

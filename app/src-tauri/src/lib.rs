@@ -459,6 +459,7 @@ enum Request {
     Launch {
         id: String,
         server: Option<String>,
+        world: Option<String>,
     },
     Stop {
         id: String,
@@ -891,7 +892,7 @@ fn dispatch<'a>(
                 let operation = nekocrate_core::loader::with_pause(receiver.clone(), operation);
                 json!(pausable::run(operation,&cancel,receiver).await?)
             },
-            Request::Launch{id,server}=>{let (cancel,_guard)=state.job().await?;json!(launcher.launch_to_server(&id,server.as_deref(),&cancel,sink).await?)},
+            Request::Launch{id,server,world}=>{let (cancel,_guard)=state.job().await?;json!(launcher.launch_with_target(&id,server.as_deref(),world.as_deref(),&cancel,sink).await?)},
             Request::Stop{id}=>{launcher.stop_game(&id)?;json!(true)},
             Request::Cancel=>{state.jobs.cancel_task();json!(true)},
             Request::Pause | Request::Resume=>{

@@ -1,16 +1,7 @@
 <script setup lang="ts">
-import {
-  computed,
-  inject,
-  onBeforeUnmount,
-  onMounted,
-  ref,
-  watch,
-  useId,
-} from "vue";
+import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   Check,
-  FolderOpen,
   GripVertical,
   Map,
   Plus,
@@ -18,15 +9,11 @@ import {
   Signal,
   X,
 } from "lucide-vue-next";
-import GlassSelect from "./GlassSelect.vue";
 import InstanceIcon from "./InstanceIcon.vue";
-import { resolveInstanceIcon } from "../instanceIcons";
 import { locale, t } from "../i18n";
-import { versionName, versionDescription } from "../versionDescription";
 import {
   dashboard,
   saveDashboard,
-  addFavorite,
   shortcutKey,
   resolveShortcut,
   normalizeServerAddress,
@@ -36,6 +23,7 @@ import {
   loadServerStatus,
   pixelTimePath,
   type VersionShortcut,
+  type LaunchDestination,
   type ServerShortcut,
   type RecentWorld,
   type Todo,
@@ -46,7 +34,7 @@ import type { WidgetRpc } from "../widgetClient";
 import type { Instance } from "../types";
 
 const props = defineProps<{
-  kind: "servers" | "favorites" | "worlds" | "todos" | "clock";
+  kind: "servers" | "worlds" | "todos" | "clock";
   editing: boolean;
   instances: Instance[];
   selected?: Instance;
@@ -56,14 +44,13 @@ const props = defineProps<{
   clockScale?: number;
   clockAngle?: number;
   clockDate?: boolean;
+  align?: "left" | "right";
 }>();
 const emit = defineEmits<{
-  launch: [target: VersionShortcut, server?: string];
-  manage: [target: VersionShortcut];
+  launch: [target: VersionShortcut, destination?: LaunchDestination];
   error: [error: unknown];
 }>();
-const uid = useId(),
-  host = ref<HTMLElement>();
+const host = ref<HTMLElement>();
 const transfer = inject(resourceTransferKey, undefined);
 const visible = ref(true),
   localError = ref(false),
@@ -72,18 +59,7 @@ const serverName = ref(""),
   serverAddress = ref(""),
   serverError = ref("");
 const todoText = ref("");
-const favoritePicker = ref("");
 const serverMenu = ref<string>();
-const allVersions = computed(() =>
-  props.instances.flatMap((instance) =>
-    instance.versions.map((version) => ({
-      value: shortcutKey({ instance: instance.id, version: version.id }),
-      label: versionName(version),
-      detail: `${instance.name} · ${versionDescription(version)}`,
-      keywords: `${instance.name} ${versionDescription(version)}`,
-    })),
-  ),
-);
 function decode(value: string): VersionShortcut | undefined {
   try {
     const [instance, version] = JSON.parse(value);
@@ -100,35 +76,6 @@ function persist(change: Partial<typeof dashboard.value>) {
     emit("error", error);
   }
 }
-function pickFavorite(value: string) {
-  const target = decode(value);
-  if (!target) return;
-  try {
-    addFavorite(target);
-  } catch (error) {
-    emit("error", error);
-  }
-  favoritePicker.value = "";
-}
-const favoriteOptions = computed(() =>
-  allVersions.value.filter(
-    (option) =>
-      !dashboard.value.favorites.some(
-        (item) => shortcutKey(item) === option.value,
-      ),
-  ),
-);
-const favoriteItems = computed(() => dashboard.value.favorites);
-const favoriteSort = useWidgetSorting(favoriteItems, shortcutKey, (favorites) =>
-  persist({ favorites }),
-);
-const favoriteRows = computed(() =>
-  (favoriteSort.rows.value as VersionShortcut[]).map((target) => ({
-    target,
-    key: shortcutKey(target),
-    resolved: resolveShortcut(props.instances, target),
-  })),
-);
 const todoItems = computed(() => dashboard.value.todos);
 const todoSort = useWidgetSorting(
   todoItems,
@@ -205,11 +152,14 @@ function serverTarget(_server: ServerShortcut) {
       instance: selected.id,
       version: selected.selected_version,
     });
-  return allVersions.value[0]?.value || "";
+  const fallback = props.instances.find((instance) => instance.versions.length);
+  return fallback
+    ? shortcutKey({ instance: fallback.id, version: fallback.versions[0]!.id })
+    : "";
 }
 function connect(server: ServerShortcut) {
   const target = decode(serverTarget(server));
-  if (target) emit("launch", target, server.address);
+  if (target) emit("launch", target, { server: server.address });
 }
 function addServer() {
   const address = normalizeServerAddress(serverAddress.value);
@@ -275,19 +225,13 @@ function ago(value: number) {
       : formatter.format(-Math.floor(minutes / 1440), "day");
 }
 function openWorld(world: RecentWorld) {
-  emit("manage", world);
-}
-async function revealWorld(world: RecentWorld) {
-  try {
-    await props.rpc("open_content_folder", {
-      id: world.instance,
-      version: world.version,
-      kind: "saves",
-      file: world.file,
-    });
-  } catch (error) {
-    emit("error", error);
-  }
+  if (props.editing || props.busy || props.running.includes(world.instance))
+    return;
+  emit(
+    "launch",
+    { instance: world.instance, version: world.version },
+    { world: world.file },
+  );
 }
 function dragWorld(event: PointerEvent, world: RecentWorld) {
   if (!props.editing && !props.busy && !props.running.includes(world.instance))
@@ -411,8 +355,8 @@ onBeforeUnmount(() => {
     ref="host"
     class="dashboard-widget"
     :class="`dashboard-${kind}`"
+    :data-align="align"
     data-drop-kind="blocked"
-    :data-home-favorites="kind === 'favorites' ? '' : undefined"
     @dragstart.prevent
   >
     <template v-if="kind === 'clock'">
@@ -427,105 +371,6 @@ onBeforeUnmount(() => {
         </svg>
         <span v-if="clockDate !== false">{{ dateText }}</span>
       </div>
-    </template>
-    <template v-else-if="kind === 'favorites'">
-      <TransitionGroup
-        name="widget-row"
-        tag="div"
-        class="favorite-grid"
-        data-widget-list
-      >
-        <div
-          v-for="item in favoriteRows"
-          :key="item.key"
-          class="favorite-shortcut"
-          :data-widget-row="item.key"
-          :class="{ unavailable: !item.resolved }"
-        >
-          <button
-            class="favorite-launch"
-            :disabled="
-              busy || !item.resolved || running.includes(item.target.instance)
-            "
-            :title="
-              item.resolved
-                ? `${item.resolved.instance.name} · ${versionDescription(item.resolved.version)}`
-                : t('版本已移除')
-            "
-            @click="emit('launch', item.target)"
-          >
-            <InstanceIcon
-              :icon="
-                item.resolved
-                  ? resolveInstanceIcon(
-                      item.resolved.instance.icon,
-                      item.target.instance,
-                    )
-                  : 0
-              "
-            /><span>{{
-              item.resolved
-                ? versionName(item.resolved.version)
-                : item.target.version
-            }}</span>
-          </button>
-          <button
-            class="widget-action favorite-grip"
-            :aria-label="t('拖动排序')"
-            @pointerdown="favoriteSort.start($event, item.key)"
-            @keydown="favoriteSort.nudge($event, item.key)"
-          >
-            <GripVertical :size="12" />
-          </button>
-          <button
-            class="widget-action favorite-remove"
-            :aria-label="t('取消收藏')"
-            @click="
-              persist({
-                favorites: dashboard.favorites.filter(
-                  (target) => shortcutKey(target) !== item.key,
-                ),
-              })
-            "
-          >
-            <X :size="12" />
-          </button>
-        </div>
-        <div
-          v-if="editing && !favoriteRows.length"
-          v-for="index in 3"
-          :key="`example-${index}`"
-          class="favorite-shortcut widget-example"
-        >
-          <InstanceIcon :icon="[0, 8, 6][index - 1]!" /><span>{{
-            ["1.21.1", "Fabric", "生存"][index - 1]
-          }}</span>
-        </div>
-        <div
-          v-if="(favoriteOptions.length && favoriteRows.length < 32) || editing"
-          key="add"
-          class="favorite-add"
-        >
-          <GlassSelect
-            :id="`${uid}-favorites`"
-            v-model="favoritePicker"
-            :options="favoriteOptions"
-            :aria-label="t('收藏版本')"
-            :placeholder="t('收藏版本')"
-            searchable
-            floating
-            compact
-            text-only
-            literal-labels
-            :menu-min-width="260"
-            @update:model-value="pickFavorite"
-          />
-          <Plus :size="20" aria-hidden="true" />
-        </div>
-      </TransitionGroup>
-      <span v-if="!favoriteRows.length && !editing" class="widget-empty-line">{{
-        t("拖入版本收藏")
-      }}</span>
     </template>
     <template v-else-if="kind === 'todos'">
       <div class="widget-scroll">
@@ -613,7 +458,8 @@ onBeforeUnmount(() => {
           >
             <button
               class="world-main"
-              :title="world.name"
+              :title="t('启动并进入 {name}', { name: world.name })"
+              :disabled="editing || busy || running.includes(world.instance)"
               @click="openWorld(world)"
             >
               <img v-if="world.icon" :src="world.icon" alt="" /><Map
@@ -626,14 +472,6 @@ onBeforeUnmount(() => {
                   {{ ago(world.last_played) }}</small
                 ></span
               >
-            </button>
-            <button
-              class="widget-action"
-              :aria-label="t('打开存档目录')"
-              @pointerdown.stop
-              @click="revealWorld(world)"
-            >
-              <FolderOpen :size="14" />
             </button>
           </div>
           <div
@@ -860,10 +698,7 @@ onBeforeUnmount(() => {
     opacity 120ms,
     color 120ms;
 }
-:is(.todo-row, .world-row, .server-row, .favorite-shortcut):is(
-    :hover,
-    :focus-within
-  )
+:is(.todo-row, .world-row, .server-row):is(:hover, :focus-within)
   .widget-action,
 .widget-action:focus-visible {
   opacity: 1;
@@ -964,83 +799,6 @@ onBeforeUnmount(() => {
   text-decoration: line-through;
   opacity: 0.65;
 }
-.favorite-grid {
-  position: relative;
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  align-content: start;
-  gap: 10px 7px;
-  overflow: auto;
-  scrollbar-width: none;
-  padding: 3px 0;
-}
-.favorite-shortcut {
-  position: relative;
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-}
-.favorite-launch {
-  width: 100%;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: var(--ink);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-}
-.favorite-shortcut svg.instance-art,
-.favorite-launch > svg {
-  width: 34px;
-  height: 34px;
-  flex-shrink: 0;
-}
-.favorite-shortcut > span,
-.favorite-launch > span {
-  width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-align: center;
-  font-size: 10px;
-}
-.favorite-grip {
-  position: absolute;
-  left: -3px;
-  top: 3px;
-  cursor: grab;
-  touch-action: none;
-}
-.favorite-remove {
-  position: absolute;
-  right: -3px;
-  top: 3px;
-}
-.favorite-add {
-  position: relative;
-  height: 48px;
-  color: var(--muted);
-  display: grid;
-  place-items: center;
-}
-.favorite-add > .source-select {
-  position: absolute;
-  inset: 0;
-  opacity: 0;
-  z-index: 1;
-}
-.favorite-add > .source-select button {
-  width: 100%;
-  height: 100%;
-}
-.favorite-add:is(:hover, :focus-within) {
-  color: var(--blue);
-  filter: drop-shadow(0 0 5px var(--glow));
-}
 .world-row {
   display: flex;
   align-items: center;
@@ -1125,6 +883,26 @@ onBeforeUnmount(() => {
   top: 0;
   padding: 8px;
   z-index: 2;
+}
+.dashboard-worlds[data-align="right"] .world-row,
+.dashboard-worlds[data-align="right"] .world-main,
+.dashboard-servers[data-align="right"] .server-main {
+  flex-direction: row-reverse;
+  text-align: right;
+}
+.dashboard-servers[data-align="right"] .server-status {
+  text-align: left;
+}
+.dashboard-servers[data-align="right"] .server-status small {
+  justify-content: flex-start;
+}
+.dashboard-servers[data-align="right"] .server-context {
+  left: 0;
+  right: auto;
+}
+.dashboard-worlds[data-align="right"] .widget-empty-line,
+.dashboard-servers[data-align="right"] .widget-empty-line {
+  text-align: right;
 }
 .server-footer {
   position: relative;

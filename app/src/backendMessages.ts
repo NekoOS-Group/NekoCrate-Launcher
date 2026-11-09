@@ -1,5 +1,21 @@
 /** Launcher-owned messages only. Game output and user-supplied values are never translated. */
 export const backendEnglish: Readonly<Record<string, string>> = {
+  不能同时进入服务器和单人存档:
+    "Cannot join a server and a single-player world at the same time",
+  存档目录名称无效: "Invalid world folder name",
+  "存档目录已不存在，请刷新最近存档":
+    "The saves folder no longer exists; refresh recent worlds",
+  "存档已不存在，请刷新最近存档":
+    "The world no longer exists; refresh recent worlds",
+  "存档路径不能离开当前版本的 saves 目录":
+    "The world must be inside this version's saves folder",
+  "存档缺少 level.dat": "The world is missing level.dat",
+  "此版本不支持直接进入存档，启动后请在游戏内选择世界":
+    "This version does not support Quick Play. Select the world in-game after launch.",
+  "无法确认存档信息，启动后请在游戏内选择世界":
+    "World information could not be verified. Select the world in-game after launch.",
+  "存档与启动版本不同，启动后请在游戏内确认并选择世界":
+    "The world uses a different game version. Review and select it in-game after launch.",
   "有任务正在运行，请稍后导出": "Wait for the current task before exporting",
   "导出目录包含符号链接：{path}": "The export contains a symbolic link: {path}",
   导出文件数量过多: "Too many files to export",

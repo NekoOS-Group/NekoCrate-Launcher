@@ -2,6 +2,8 @@ import { ref } from "vue";
 import type { Instance } from "./types";
 import type { WidgetRpc } from "./widgetClient";
 export type VersionShortcut = { instance: string; version: string };
+export type LaunchDestination =
+  { server: string; world?: never } | { world: string; server?: never };
 export type ServerShortcut = VersionShortcut & {
   id: string;
   name: string;
@@ -30,7 +32,6 @@ export type ServerStatus = {
 };
 export type Todo = { id: string; text: string; done: boolean };
 export type Dashboard = {
-  favorites: VersionShortcut[];
   servers: ServerShortcut[];
   hiddenServers: string[];
   todos: Todo[];
@@ -63,7 +64,6 @@ export function normalizeServerAddress(input: string): string | null {
 }
 export function readDashboard(raw: string | null): Dashboard {
   const empty: Dashboard = {
-    favorites: [],
     servers: [],
     hiddenServers: [],
     todos: [],
@@ -72,19 +72,6 @@ export function readDashboard(raw: string | null): Dashboard {
     const value = JSON.parse(raw || "null");
     if (value?.version !== 1) return empty;
     const unique = new Set<string>();
-    empty.favorites = (Array.isArray(value.favorites) ? value.favorites : [])
-      .flatMap((item: any) => {
-        if (!text(item?.instance, 80) || !text(item?.version, 255)) return [];
-        const entry = {
-            instance: text(item.instance, 80),
-            version: text(item.version, 255),
-          },
-          key = shortcutKey(entry);
-        if (unique.has(key)) return [];
-        unique.add(key);
-        return [entry];
-      })
-      .slice(0, 32);
     empty.servers = (Array.isArray(value.servers) ? value.servers : [])
       .flatMap((item: any) => {
         const address = normalizeServerAddress(text(item?.address, 256));
@@ -134,21 +121,6 @@ export function saveDashboard(next: Dashboard) {
   const value = readDashboard(JSON.stringify({ version: 1, ...next }));
   localStorage.setItem(DASHBOARD_KEY, JSON.stringify({ version: 1, ...value }));
   dashboard.value = value;
-}
-export function addFavorite(target: VersionShortcut): boolean {
-  if (
-    dashboard.value.favorites.some(
-      (item) => shortcutKey(item) === shortcutKey(target),
-    )
-  )
-    return false;
-  if (dashboard.value.favorites.length >= 32)
-    throw new Error("最多收藏 32 个版本");
-  saveDashboard({
-    ...dashboard.value,
-    favorites: [...dashboard.value.favorites, target],
-  });
-  return true;
 }
 export function resolveShortcut(
   instances: Instance[],

@@ -94,13 +94,17 @@ impl Launcher {
                 .filter(|v| v.installed)
                 .collect::<Vec<_>>();
             versions.sort_by_key(|v| instance.selected_version.as_deref() != Some(&v.id));
-            for profile in versions {
-                let Ok(working) =
-                    version::instance_working_directory(&game, &instance, &profile.id)
-                        .and_then(|p| fs::canonicalize(p).map_err(Into::into))
-                else {
-                    continue;
-                };
+            let versions = versions
+                .into_iter()
+                .filter_map(|profile| {
+                    let working =
+                        version::instance_working_directory(&game, &instance, &profile.id)
+                            .and_then(|p| fs::canonicalize(p).map_err(Into::into))
+                            .ok()?;
+                    Some((profile, working))
+                })
+                .collect::<Vec<_>>();
+            for (profile, working) in &versions {
                 if !directories.insert(working.clone()) {
                     continue;
                 }
@@ -138,7 +142,7 @@ impl Launcher {
                     let Ok(canonical) = fs::canonicalize(&path) else {
                         continue;
                     };
-                    if !canonical.starts_with(&working) || !worlds.insert(canonical.clone()) {
+                    if !canonical.starts_with(working) || !worlds.insert(canonical.clone()) {
                         continue;
                     }
                     let source = crate::version_management::details::world::read(&path)
@@ -157,6 +161,25 @@ impl Launcher {
                         .map(|m| m.as_millis() as u64)
                         .unwrap_or(0);
                     let file = entry.file_name().to_string_lossy().into_owned();
+                    let game_version = field("游戏版本");
+                    // Shared directories can hold saves from several versions.
+                    // Prefer a matching installed profile in this same directory.
+                    let launch_profile = game_version
+                        .as_deref()
+                        .and_then(|game_version| {
+                            versions
+                                .iter()
+                                .find(|(candidate, directory)| {
+                                    directory == working
+                                        && candidate
+                                            .minecraft_version
+                                            .as_deref()
+                                            .unwrap_or(&candidate.id)
+                                            == game_version
+                                })
+                                .map(|(candidate, _)| *candidate)
+                        })
+                        .unwrap_or(profile);
                     result.worlds.push(RecentWorld {
                         key: canonical.to_string_lossy().into_owned(),
                         name: source
@@ -166,8 +189,8 @@ impl Launcher {
                             .unwrap_or_else(|| file.clone()),
                         file,
                         instance: instance.id.clone(),
-                        version: profile.id.clone(),
-                        game_version: field("游戏版本"),
+                        version: launch_profile.id.clone(),
+                        game_version,
                         last_played: field("最后游玩")
                             .and_then(|s| s.parse().ok())
                             .unwrap_or(modified),
@@ -390,21 +413,84 @@ pub fn apply_server_launch(
     server: &str,
 ) -> Result<()> {
     let server = ServerAddress::parse(server)?;
-    let modern = version.arguments.as_ref().is_some_and(|args| {
-        args.game.iter().any(|arg| match arg {
-            crate::model::Argument::Plain(value) => value == "--quickPlayMultiplayer",
-            crate::model::Argument::Conditional { value, .. } => {
-                value.as_str() == Some("--quickPlayMultiplayer")
-                    || value.as_array().is_some_and(|items| {
-                        items
-                            .iter()
-                            .any(|v| v.as_str() == Some("--quickPlayMultiplayer"))
-                    })
-            }
-        })
-    });
+    let modern = supports_argument(version, "--quickPlayMultiplayer");
     // This is an in-memory clone for this launch; persisted JVM/game options stay intact.
     let args = &mut instance.launch.game_args;
+    clear_launch_destination(args);
+    if modern {
+        args.extend(["--quickPlayMultiplayer".into(), server.display()]);
+    } else {
+        args.extend([
+            "--server".into(),
+            server.host,
+            "--port".into(),
+            server.port.to_string(),
+        ]);
+    }
+    Ok(())
+}
+
+fn supports_argument(version: &crate::model::Version, flag: &str) -> bool {
+    version.arguments.as_ref().is_some_and(|args| {
+        args.game.iter().any(|arg| match arg {
+            crate::model::Argument::Plain(value) => value == flag,
+            crate::model::Argument::Conditional { value, .. } => {
+                value.as_str() == Some(flag)
+                    || value
+                        .as_array()
+                        .is_some_and(|items| items.iter().any(|v| v.as_str() == Some(flag)))
+            }
+        })
+    })
+}
+
+pub fn apply_world_launch(
+    instance: &mut crate::model::Instance,
+    resolved: &version::ResolvedVersion,
+    working: &Path,
+    world: &str,
+) -> Result<Option<&'static str>> {
+    let relative = storage::safe_relative(world)?;
+    ensure!(
+        relative.components().count() == 1 && !world.contains('/'),
+        "存档目录名称无效"
+    );
+    let saves =
+        fs::canonicalize(working.join("saves")).context("存档目录已不存在，请刷新最近存档")?;
+    let path = fs::canonicalize(saves.join(relative)).context("存档已不存在，请刷新最近存档")?;
+    ensure!(
+        path.starts_with(&saves) && path != saves && path.is_dir(),
+        "存档路径不能离开当前版本的 saves 目录"
+    );
+    ensure!(
+        ["level.dat", "level.dat_old"]
+            .iter()
+            .any(|name| path.join(name).is_file()),
+        "存档缺少 level.dat"
+    );
+    let args = &mut instance.launch.game_args;
+    clear_launch_destination(args);
+    if !supports_argument(&resolved.version, "--quickPlaySingleplayer") {
+        return Ok(Some("此版本不支持直接进入存档，启动后请在游戏内选择世界"));
+    }
+    let source = crate::version_management::details::world::read(&path)
+        .into_iter()
+        .find(|source| source.issue.is_none());
+    let Some(source) = source else {
+        return Ok(Some("无法确认存档信息，启动后请在游戏内选择世界"));
+    };
+    // Shared saves can belong to another game version. Do not silently upgrade
+    // or downgrade a world merely because a different profile is now selected.
+    if let Some(game) = source.fields.iter().find(|field| field.label == "游戏版本")
+        && game.value != resolved.minecraft_version
+    {
+        return Ok(Some("存档与启动版本不同，启动后请在游戏内确认并选择世界"));
+    }
+    args.extend(["--quickPlaySingleplayer".into(), world.into()]);
+    Ok(None)
+}
+
+fn clear_launch_destination(args: &mut Vec<String>) {
     let mut index = 0;
     while index < args.len() {
         if [
@@ -425,17 +511,6 @@ pub fn apply_server_launch(
             index += 1;
         }
     }
-    if modern {
-        args.extend(["--quickPlayMultiplayer".into(), server.display()]);
-    } else {
-        args.extend([
-            "--server".into(),
-            server.host,
-            "--port".into(),
-            server.port.to_string(),
-        ]);
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -543,6 +618,8 @@ mod tests {
                 name: String,
                 #[serde(rename = "LastPlayed")]
                 time: i64,
+                #[serde(rename = "Version")]
+                version: Value,
             }
             #[derive(Serialize)]
             struct Root {
@@ -555,6 +632,7 @@ mod tests {
                     data: Data {
                         name: format!("World {name}"),
                         time,
+                        version: json!({"Name": if name == "older" { "1.20.1" } else { "1.21.1" }}),
                     },
                 })
                 .unwrap(),
@@ -568,8 +646,101 @@ mod tests {
         assert_eq!(result.worlds[0].name, "World newer");
         assert_eq!(result.worlds[0].last_played, 2000);
         assert_eq!(result.worlds[0].version, "1.21.1");
+        assert_eq!(result.worlds[1].version, "1.20.1");
         assert_eq!(fs::read(game.join("servers.dat")).unwrap(), servers);
         assert!(!game.join("saves/newer/session.lock").exists());
+    }
+    #[tokio::test]
+    async fn world_launch_validates_paths_preserves_names_and_falls_back_without_overriding_options()
+     {
+        let temp = tempfile::tempdir().unwrap();
+        let launcher = Launcher::open(Some(temp.path().join("launcher"))).unwrap();
+        let mut instance = launcher.create_instance("World", "1.21.1").unwrap();
+        instance.launch.game_args = vec![
+            "--demo".into(),
+            "--server=old".into(),
+            "--quickPlayRealms".into(),
+            "123".into(),
+        ];
+        let working = temp.path().join("isolated");
+        let name = "小屋 New World";
+        let world = working.join("saves").join(name);
+        fs::create_dir_all(&world).unwrap();
+        let bytes = fastnbt::to_bytes(
+            &json!({"Data":{"LevelName":"Display name", "Version":{"Name":"1.21.1"}}}),
+        )
+        .unwrap();
+        fs::write(world.join("level.dat"), &bytes).unwrap();
+        let mut metadata = crate::test_http::version_fixture("fabric-profile");
+        metadata.arguments.as_mut().unwrap().game.push(
+            serde_json::from_value(json!({
+                "rules":[{"action":"allow","features":{"is_quick_play_singleplayer":true}}],
+                "value":["--quickPlaySingleplayer","${quickPlaySingleplayer}"]
+            }))
+            .unwrap(),
+        );
+        let mut resolved = version::ResolvedVersion {
+            version: metadata,
+            minecraft_version: "1.21.1".into(),
+            loader: None,
+        };
+        assert_eq!(
+            apply_world_launch(&mut instance, &resolved, &working, name).unwrap(),
+            None
+        );
+        assert_eq!(
+            instance.launch.game_args,
+            ["--demo", "--quickPlaySingleplayer", name]
+        );
+        assert!(
+            launcher
+                .instance(&instance.id)
+                .unwrap()
+                .launch
+                .game_args
+                .is_empty()
+        );
+        assert_eq!(fs::read(world.join("level.dat")).unwrap(), bytes);
+        assert!(!world.join("session.lock").exists());
+
+        resolved.minecraft_version = "1.20.1".into();
+        assert!(
+            apply_world_launch(&mut instance, &resolved, &working, name)
+                .unwrap()
+                .unwrap()
+                .contains("版本不同")
+        );
+        assert_eq!(instance.launch.game_args, ["--demo"]);
+        resolved.version.arguments = None;
+        assert!(
+            apply_world_launch(&mut instance, &resolved, &working, name)
+                .unwrap()
+                .unwrap()
+                .contains("不支持")
+        );
+        for invalid in [
+            "",
+            "..",
+            "../other",
+            "x/y",
+            "x/",
+            "C:\\world",
+            "/tmp",
+            "missing",
+        ] {
+            assert!(
+                apply_world_launch(&mut instance, &resolved, &working, invalid).is_err(),
+                "accepted {invalid}"
+            );
+        }
+        #[cfg(unix)]
+        {
+            let outside = temp.path().join("outside");
+            fs::create_dir_all(&outside).unwrap();
+            fs::write(outside.join("level.dat"), &bytes).unwrap();
+            std::os::unix::fs::symlink(outside, working.join("saves/linked")).unwrap();
+            assert!(apply_world_launch(&mut instance, &resolved, &working, "linked").is_err());
+        }
     }
     #[tokio::test]
     async fn server_launch_replaces_conflicts_only_in_the_ephemeral_clone() {

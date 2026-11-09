@@ -12,7 +12,7 @@ import {
   snapHomeRect,
   overlaps,
   newsDockTarget,
-  resizeNewsRect,
+  resizeWidgetRect,
   inferHomeAttachments,
   readHomeAttachments,
 } from "../src/homeLayout.ts";
@@ -74,7 +74,7 @@ test("each dock can rotate independently while remaining in bounds on small and 
     { width: 1440, height: 900 },
   ]) {
     for (const tools of ["horizontal", "vertical"])
-      for (const instances of ["horizontal", "vertical"])
+      for (const instances of ["horizontal", "vertical", "wheel"])
         for (const slots of [0, 1, 8, 9]) {
           const directions = { tools, instances };
           const sizes = homeSizes(area, slots, directions);
@@ -223,7 +223,7 @@ test("controls stay clear of each other; all widgets stay within the window", ()
     { width: 1440, height: 900 },
   ]) {
     for (const tools of ["horizontal", "vertical"])
-      for (const instances of ["horizontal", "vertical"]) {
+      for (const instances of ["horizontal", "vertical", "wheel"]) {
         const sizes = homeSizes(area, 8, { tools, instances });
         const layout = arrangeHomeLayout(
           defaultHomeLayout(area, sizes, ["quote", "news"]),
@@ -363,18 +363,18 @@ test("news docks within the visible edge snap zone, releases inward, and does no
 test("Trends height keeps the opposite edge fixed and clamps to available space", () => {
   const area = { width: 900, height: 600 };
   const rect = { x: 588, y: 100, width: 300, height: 244 };
-  assert.deepEqual(resizeNewsRect(rect, "bottom", 100, area), {
+  assert.deepEqual(resizeWidgetRect(rect, "bottom", 100, area), {
     ...rect,
     height: 344,
   });
-  assert.deepEqual(resizeNewsRect(rect, "top", -70, area), {
+  assert.deepEqual(resizeWidgetRect(rect, "top", -70, area), {
     ...rect,
     y: 30,
     height: 314,
   });
-  assert.equal(resizeNewsRect(rect, "top", -999, area).y, 12);
-  assert.equal(resizeNewsRect(rect, "bottom", -999, area).height, 120);
-  const full = resizeNewsRect(rect, "bottom", 999, area);
+  assert.equal(resizeWidgetRect(rect, "top", -999, area).y, 12);
+  assert.equal(resizeWidgetRect(rect, "bottom", -999, area).height, 120);
+  const full = resizeWidgetRect(rect, "bottom", 999, area);
   assert.equal(full.y + full.height, 588);
   assert.equal(
     homeSizes({ width: 760, height: 500 }, 4, undefined, 3, 1, 700).news.height,
@@ -477,17 +477,17 @@ test("saved adjacent controls retain gaps through resize, reload, orientation an
 test("hidden controls reserve no collision space and do not anchor visible controls on resize", () => {
   const area = { width: 760, height: 500 },
     sizes = homeSizes(area, 8);
-  const defaults = defaultHomeLayout(area, sizes, ["favorites"]);
+  const defaults = defaultHomeLayout(area, sizes, ["servers"]);
   const requested = {
     ...defaults,
-    themes: { ...defaults.themes, x: 100, y: 250 },
-    favorites: { ...defaults.favorites, x: 100, y: 250 },
+    themes: { ...defaults.themes, x: 100, y: 180 },
+    servers: { ...defaults.servers, x: 100, y: 180 },
   };
   const hidden = arrangeHomeLayout(requested, area, undefined, [], null, [
     "themes",
   ]);
-  assert.equal(hidden.favorites.x, 100);
-  assert.equal(hidden.favorites.y, 250);
+  assert.equal(hidden.servers.x, 100);
+  assert.equal(hidden.servers.y, 180);
   assert.deepEqual(
     hidden.themes,
     requested.themes,

@@ -30,8 +30,8 @@ function place() {
     anchor.value.closest(".layout-label")?.getBoundingClientRect() ?? box;
   side.value = bar.bottom + 100 <= window.innerHeight ? "bottom" : "top";
   position.value = {
-    left: `${Math.max(8, Math.min(window.innerWidth - 42, box.left + box.width / 2 - 17))}px`,
-    top: `${Math.max(8, side.value === "bottom" ? bar.bottom - 1 : bar.top - 99)}px`,
+    left: `${Math.round(Math.max(8, Math.min(window.innerWidth - 42, box.left + box.width / 2 - 17)))}px`,
+    top: `${Math.round(Math.max(8, side.value === "bottom" ? bar.bottom : bar.top - 100))}px`,
   };
 }
 function show() {
@@ -259,14 +259,20 @@ onBeforeUnmount(() => {
 }
 .layout-slider-enter-active,
 .layout-slider-leave-active {
+  /* Growing away from the bar never paints over the trigger icons or moves
+     their hover target while WebKit creates/removes the popover layer. */
+  transform-origin: top center;
   transition:
     opacity 120ms,
-    translate 160ms var(--motion-ease);
+    transform 160ms var(--motion-ease);
+}
+.layout-slider-panel[data-side="top"] {
+  transform-origin: bottom center;
 }
 .layout-slider-enter-from,
 .layout-slider-leave-to {
   opacity: 0;
-  translate: 0 -4px;
+  transform: scaleY(0.94);
 }
 @media (prefers-reduced-motion: reduce) {
   .layout-slider-enter-active,

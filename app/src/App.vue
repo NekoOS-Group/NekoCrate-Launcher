@@ -81,9 +81,9 @@ import HomeLayout from "./components/HomeLayout.vue";
 import HomeWidget from "./components/HomeWidget.vue";
 import HomeDashboardWidget from "./components/HomeDashboardWidget.vue";
 import {
-  addFavorite,
   resolveShortcut,
   type VersionShortcut,
+  type LaunchDestination,
 } from "./homeDashboard";
 import HomeToolbar from "./components/HomeToolbar.vue";
 import type { HomeTool } from "./homeToolbar";
@@ -181,7 +181,8 @@ import ThemePicker from "./components/ThemePicker.vue";
 import InstanceIcon from "./components/InstanceIcon.vue";
 import InstancePicker from "./components/InstancePicker.vue";
 import InstanceLocation from "./components/InstanceLocation.vue";
-import InstanceProgress from "./components/InstanceProgress.vue";
+import InstanceDockTile from "./components/InstanceDockTile.vue";
+import InstanceWheel from "./components/InstanceWheel.vue";
 import type { FolderImportResult } from "./useFolderDrop";
 import type {
   Settings,
@@ -1464,6 +1465,7 @@ watch([modal, utility], ([dialog, panel]) => {
   if ((dialog && dialog !== "version") || panel === "settings")
     instanceDockExpanded.value = false;
 });
+const instanceWheel = ref<InstanceType<typeof InstanceWheel>>();
 const dockLimit = computed(() => instanceVisibleLimit(instances.value.length));
 const dockSections = computed(() => [
   {
@@ -2032,6 +2034,7 @@ watch(dropInteraction, (active) => {
   if (active) dockBeforeDrop = instanceDockExpanded.value;
 });
 function browseDropTarget(element: Element | null) {
+  if (element?.closest(".instance-wheel")) instanceWheel.value?.revealForDrop();
   const windowSurface = element?.closest<HTMLElement>(".tool-window");
   const windowKey = windowSurface?.dataset.windowId || "";
   if (windowKey !== browseWindowKey) {
@@ -2069,6 +2072,7 @@ function browseDropTarget(element: Element | null) {
     dropVersionMenu.value?.revealForDrop();
 }
 function finishDropBrowse() {
+  instanceWheel.value?.endDrop();
   clearTimeout(browseWindowTimer);
   browseWindowKey = "";
   clearTimeout(browseTimer);
@@ -2129,11 +2133,8 @@ function versionCopyTarget(
 provide(gameTransferKey, {
   preview(id, version, element, x, y) {
     dropInteraction.value = true;
-    const favorite = element?.closest<HTMLElement>("[data-home-favorites]");
-    if (favorite) {
-      showDropHint(favorite, t("收藏此版本"));
-      return;
-    }
+    if (element?.closest(".instance-wheel"))
+      instanceWheel.value?.revealForDrop();
     // Only expand the instance overflow; do not replace the source version list.
     if (element?.closest("[data-drop-overflow]"))
       instanceDockExpanded.value = true;
@@ -2168,15 +2169,6 @@ provide(gameTransferKey, {
     );
   },
   drop(id, version, element, x, y) {
-    if (element?.closest("[data-home-favorites]")) {
-      try {
-        if (resolveShortcut(instances.value, { instance: id, version }))
-          addFavorite({ instance: id, version });
-      } catch (e) {
-        error.value = message(e);
-      }
-      return true;
-    }
     if (exportEdge(x, y)) {
       openGameExport(id, version);
       return true;
@@ -2218,6 +2210,7 @@ provide(gameTransferKey, {
   finish() {
     clearDropHint();
     dropInteraction.value = false;
+    instanceWheel.value?.endDrop();
   },
   export: openGameExport,
 });
@@ -4109,14 +4102,20 @@ async function install(
   }
   return result;
 }
-async function startShortcut(target: VersionShortcut, server?: string) {
+async function startShortcut(
+  target: VersionShortcut,
+  destination?: LaunchDestination,
+) {
   if (busy.value || startRequested.value || launchingId.value) return;
   const resolved = resolveShortcut(instances.value, target);
   if (!resolved || snapshot.value.running.includes(target.instance)) return;
   selectInstance(target.instance);
-  await startGame(server, target);
+  await startGame(destination, target);
 }
-async function startGame(server?: string, target?: VersionShortcut) {
+async function startGame(
+  destination?: LaunchDestination,
+  target?: VersionShortcut,
+) {
   const shortcut = target && resolveShortcut(instances.value, target);
   const instance = shortcut
     ? { ...shortcut.instance, selected_version: shortcut.version.id }
@@ -4168,26 +4167,21 @@ async function startGame(server?: string, target?: VersionShortcut) {
       return;
     await prepareAndLaunch(
       { ...currentInstance, selected_version: version },
-      { install, launch: (instance) => launch(instance, server) },
+      { install, launch: (instance) => launch(instance, destination) },
     );
   } finally {
     repairingTarget.value = null;
     startRequested.value = false;
   }
 }
-async function launch(i: Instance, server?: string) {
+async function launch(i: Instance, destination?: LaunchDestination) {
   if (launchingId.value || busy.value) return;
   launchingId.value = i.id;
   launchReports[i.id] = null;
   try {
     if (guestNameWrite) await guestNameWrite;
     if (accountNameWrite) await accountNameWrite;
-    await action(
-      "启动游戏",
-      "launch",
-      { id: i.id, ...(server ? { server } : {}) },
-      true,
-    );
+    await action("启动游戏", "launch", { id: i.id, ...destination }, true);
   } finally {
     launchingId.value = null;
   }
@@ -4509,6 +4503,7 @@ const launchWindowBehavior = createLaunchWindowBehavior(
   },
 );
 function onEvent(e: LauncherEvent) {
+  if (e.kind === "launch_notice") notify(e.message);
   if (e.instance_id && ["game_crash", "launch_failed"].includes(e.kind)) {
     launchReports[e.instance_id] = e.crash || null;
     delete dismissedRecoveries[e.instance_id];
@@ -4804,15 +4799,9 @@ onUnmounted(() => {
           @link="openLink"
       /></template>
       <template
-        v-for="kind in [
-          'servers',
-          'favorites',
-          'worlds',
-          'todos',
-          'clock',
-        ] as const"
+        v-for="kind in ['servers', 'worlds', 'todos', 'clock'] as const"
         :key="kind"
-        #[kind]="{ editing, clockScale, clockAngle, clockDate }"
+        #[kind]="{ editing, clockScale, clockAngle, clockDate, widgetAlign }"
       >
         <HomeDashboardWidget
           :kind="kind"
@@ -4825,10 +4814,8 @@ onUnmounted(() => {
           :clock-scale="clockScale"
           :clock-angle="clockAngle"
           :clock-date="clockDate"
+          :align="widgetAlign"
           @launch="startShortcut"
-          @manage="
-            manageResourceVersion($event.instance, $event.version, 'saves')
-          "
           @error="error = message($event)"
         />
       </template>
@@ -5062,7 +5049,7 @@ onUnmounted(() => {
         <HomeToolbar
           :items="tools"
           :editing="editing"
-          :orientation="orientation"
+          :orientation="orientation === 'vertical' ? 'vertical' : 'horizontal'"
           :settings-open="utility === 'settings'"
           @update="updateTools"
           @activate="activateHomeTool"
@@ -5102,8 +5089,52 @@ onUnmounted(() => {
           @update:model-value="setTheme"
         />
       </template>
-      <template #instances="{ orientation }">
+      <template #instances="{ orientation, editing, instanceWheelBounds }">
+        <InstanceWheel
+          v-if="orientation === 'wheel'"
+          ref="instanceWheel"
+          class="ui-reveal-item"
+          :style="listRevealStyle(4)"
+          :instances="dockInstances"
+          :selected="selectedInstance?.id"
+          :editing="editing"
+          :bounds="instanceWheelBounds"
+          :dragging="!!draggedInstanceId"
+          :busy="busy"
+          @surface="instanceSort.setSurface('main', $event)"
+          @select="selectInstance"
+          @add="openInstancePicker"
+          @pointerdown.capture="instanceSort.resetClick"
+          @pointermove="instanceSort.track"
+          @pointerup="instanceSort.release"
+          @pointercancel="instanceSort.cancel"
+          @lostpointercapture="instanceSort.lostCapture"
+          @click.capture="instanceSort.guardClick"
+          @dblclick.capture="instanceSort.guardClick"
+        >
+          <template #default="{ instance, tabIndex }">
+            <InstanceDockTile
+              :instance="instance"
+              :selected="selectedInstance?.id === instance.id"
+              :running="snapshot.running.includes(instance.id)"
+              :task="hasInstanceTask(instance.id)"
+              :dragging="draggedInstanceId === instance.id"
+              :progress="
+                instanceProgress?.instance_id === instance.id
+                  ? instanceProgress
+                  : undefined
+              "
+              @start="instanceSort.start($event, instance.id)"
+              @sort="instanceSort.keyboard($event, instance.id)"
+              @select="selectInstance(instance.id)"
+              @open="openInstance(instance, $event)"
+              @edit="edit(instance, $event)"
+              :tab-index="tabIndex"
+            />
+          </template>
+        </InstanceWheel>
         <nav
+          v-else
           class="instance-dock ui-reveal-item"
           :class="{
             empty: !instances.length,
@@ -5202,72 +5233,27 @@ onUnmounted(() => {
                 name="instance-sort"
                 class="instance-track"
               >
-                <div
+                <InstanceDockTile
                   v-for="instance in section.items"
                   :key="instance.id"
-                  class="instance-item"
-                  :data-instance-id="instance.id"
-                  :data-resource-instance="instance.id"
-                  data-drop-kind="instance"
-                  :data-resource-version="
-                    instance.selected_version || undefined
+                  :instance="instance"
+                  :selected="selectedInstance?.id === instance.id"
+                  :running="snapshot.running.includes(instance.id)"
+                  :task="hasInstanceTask(instance.id)"
+                  :dragging="draggedInstanceId === instance.id"
+                  :progress="
+                    instanceProgress?.instance_id === instance.id
+                      ? instanceProgress
+                      : undefined
                   "
-                  :class="{
-                    dragging: draggedInstanceId === instance.id,
-                  }"
-                >
-                  <button
-                    class="instance-tile"
-                    :class="{ selected: selectedInstance?.id === instance.id }"
-                    :aria-label="
-                      t(
-                        snapshot.running.includes(instance.id)
-                          ? '{name}，{version}，双击查看运行日志，按 F2 设置，拖动或按 Alt 加方向键排序'
-                          : hasInstanceTask(instance.id)
-                            ? '{name}，{version}，双击查看下载进度，按 F2 设置，拖动或按 Alt 加方向键排序'
-                            : '{name}，{version}，双击或按 F2 设置，拖动或按 Alt 加方向键排序',
-                        {
-                          name: instance.name,
-                          version:
-                            versionName(
-                              instance.versions.find(
-                                (v) => v.id === instance.selected_version,
-                              ),
-                            ) || t('尚无版本'),
-                        },
-                      )
-                    "
-                    :aria-pressed="selectedInstance?.id === instance.id"
-                    aria-keyshortcuts="Alt+ArrowLeft Alt+ArrowRight Alt+ArrowUp Alt+ArrowDown F2"
-                    @pointerdown="instanceSort.start($event, instance.id)"
-                    @keydown="instanceSort.keyboard($event, instance.id)"
-                    @click="selectInstance(instance.id)"
-                    @dblclick="openInstance(instance, $event)"
-                    @contextmenu.prevent="edit(instance, $event)"
-                    @keydown.f2.prevent="edit(instance, $event)"
-                    @mouseenter="previewInstance($event, instance)"
-                    @mouseleave="hoveredInstance = null"
-                    @focus="previewInstance($event, instance)"
-                    @blur="hoveredInstance = null"
-                  >
-                    <InstanceIcon :icon="instanceMaterial(instance)" />
-                    <i
-                      v-if="snapshot.running.includes(instance.id)"
-                      class="running-dot"
-                    />
-                  </button>
-                  <InstanceProgress
-                    v-if="instanceProgress?.instance_id === instance.id"
-                    :title="instanceProgress.title"
-                    :message="instanceProgress.message"
-                    :progress="instanceProgress.progress"
-                    :indeterminate="
-                      instanceProgress.status === 'running' &&
-                      instanceProgress.indeterminate
-                    "
-                    @open="openInstance(instance)"
-                  />
-                </div>
+                  @start="instanceSort.start($event, instance.id)"
+                  @sort="instanceSort.keyboard($event, instance.id)"
+                  @select="selectInstance(instance.id)"
+                  @open="openInstance(instance, $event)"
+                  @edit="edit(instance, $event)"
+                  @preview="previewInstance($event, instance)"
+                  @leave="hoveredInstance = null"
+                />
                 <button
                   v-if="section.id === 'overflow'"
                   key="add-directory"
