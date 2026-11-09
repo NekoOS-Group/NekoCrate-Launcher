@@ -17,6 +17,8 @@ npm --prefix site run dev
 
 `src/release.json` 是经过校验的公开发布快照。页面先显示快照，再尝试刷新 GitHub Releases（包含预发布），网络失败时保留可用链接。浏览器缓存有效期 30 分钟。更新快照运行 `npm --prefix site run sync-release`；CI 使用只读 `GH_TOKEN` 获取数据，密钥不会写入静态产物。
 
-GitHub Pages 使用 `.github/workflows/pages.yml`：网站相关提交部署，PR 只检查，桌面发布工作流完成后更新下载快照。构建只安装网站依赖，不触发 Rust 编译。Pages 的发布源需设为 **GitHub Actions**，默认 URL 为 `https://nekoos-group.github.io/NekoCrate-Launcher/`。路径前缀由 `SITE_BASE` 控制；更换域名或仓库路径时需同步调整部署环境变量。
+正式地址是 `https://bzy.moe/NekoCrate-Launcher/`，由 `bzy-nya/bzy-nya.github.io` 的 Pages 工作流将网站构建到个人主页的同名子目录；原主页保持独立。该工作流每小时检查本仓库成功的网站发布，只有上游发布或个人主页改变时才重新构建、部署，也可在个人主页仓库手动运行 **Publish website** 立即同步。不会将整个域名绑定到启动器仓库。
+
+本仓库的 `.github/workflows/pages.yml` 仍提供 `https://nekoos-group.github.io/NekoCrate-Launcher/` 作为备用地址：网站相关提交部署，PR 只检查，桌面发布工作流完成后更新下载快照。页面的 canonical 指向正式地址。两处构建只安装网站依赖，不触发 Rust 编译。路径前缀由 `SITE_BASE` 控制，当前均为 `/NekoCrate-Launcher/`。Pages 的发布源需设为 **GitHub Actions**。
 
 网站沿用仓库的 GPL-3.0-only 许可。Logo 来源见 `app/src/assets/neko-cat-ui.provenance.json`；示意图中的方块素材来源见 `app/src/assets/blocks/provenance.json`。

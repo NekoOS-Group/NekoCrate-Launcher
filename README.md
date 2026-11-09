@@ -2,7 +2,7 @@
 
 基于 Rust、Tauri 2 和 Vue 3 的 Minecraft Java 版启动器，支持多游戏目录、加载器与整合包安装、资源管理和可自定义的桌面布局。
 
-[下载官网](https://nekoos-group.github.io/NekoCrate-Launcher/) · [功能与设计](https://nekoos-group.github.io/NekoCrate-Launcher/features/) · [使用文档](https://nekoos-group.github.io/NekoCrate-Launcher/docs/) · [反馈问题](https://github.com/NekoOS-Group/NekoCrate-Launcher/issues) · [发布说明](docs/releases)
+[下载官网](https://bzy.moe/NekoCrate-Launcher/) · [功能与设计](https://bzy.moe/NekoCrate-Launcher/features/) · [使用文档](https://bzy.moe/NekoCrate-Launcher/docs/) · [反馈问题](https://github.com/NekoOS-Group/NekoCrate-Launcher/issues) · [发布说明](docs/releases)
 
 项目仍在开发中，当前开发分支为 `neko_dev`。桌面应用与 CLI 共用 Rust 核心、数据格式和资源索引。
 
