@@ -109,27 +109,21 @@ pub fn is_update_artifact(url: &str, tag: &str) -> bool {
 }
 
 fn standalone_url<'a>(release: &'a Release, os: &str, arch: &str) -> Option<&'a str> {
-    let suffixes: &[&str] = match (os, arch) {
-        // Old releases also have an installed-only .app.tar.gz: prefer their
-        // explicitly portable archive until the unified release is available.
-        ("macos", "aarch64") => &[
-            "mac-appsilicon-portable.app.tar.gz",
-            "mac-appsilicon.app.tar.gz",
-        ],
-        ("windows", "x86_64") => &["win-amd64.exe", "win-amd64-portable.exe"],
-        ("linux", "x86_64") => &["linux-amd64.elf"],
-        _ => &[],
+    let suffix = match (os, arch) {
+        ("macos", "aarch64") => "mac-appsilicon.app.tar.gz",
+        ("windows", "x86_64") => "win-amd64.exe",
+        ("linux", "x86_64") => "linux-amd64.elf",
+        _ => return None,
     };
-    suffixes.iter().find_map(|suffix| {
-        let expected = format!("NekoCrate-Launcher-{}-{suffix}", release.tag_name);
-        release
-            .assets
-            .iter()
-            .find(|a| {
-                a.name == expected && is_update_artifact(&a.browser_download_url, &release.tag_name)
-            })
-            .map(|a| a.browser_download_url.as_str())
-    })
+    let expected = format!("NekoCrate-Launcher-{}-{suffix}", release.tag_name);
+    release
+        .assets
+        .iter()
+        .find(|asset| {
+            asset.name == expected
+                && is_update_artifact(&asset.browser_download_url, &release.tag_name)
+        })
+        .map(|asset| asset.browser_download_url.as_str())
 }
 
 pub async fn check(
@@ -180,7 +174,7 @@ pub async fn check(
 mod tests {
     use super::*;
     #[test]
-    fn standalone_download_links_handle_new_names_and_legacy_mac_pairs() {
+    fn standalone_download_links_accept_only_current_release_names() {
         let mut release = release("dev9.9.9", true);
         for suffix in [
             "mac-appsilicon.app.tar.gz",
@@ -196,16 +190,21 @@ mod tests {
         assert!(
             standalone_url(&release, "macos", "aarch64")
                 .unwrap()
-                .ends_with("-portable.app.tar.gz")
-        );
-        release
-            .assets
-            .retain(|asset| !asset.name.contains("portable"));
-        assert!(
-            standalone_url(&release, "macos", "aarch64")
-                .unwrap()
                 .ends_with("-mac-appsilicon.app.tar.gz")
         );
+        let mut obsolete = super::tests::release("dev9.9.9", true);
+        for suffix in [
+            "mac-appsilicon-portable.app.tar.gz",
+            "win-amd64-portable.exe",
+        ] {
+            let name = format!("NekoCrate-Launcher-dev9.9.9-{suffix}");
+            obsolete.assets.push(Asset {
+                browser_download_url: format!("{RELEASES_URL}download/dev9.9.9/{name}"),
+                name,
+            });
+        }
+        assert!(standalone_url(&obsolete, "macos", "aarch64").is_none());
+        assert!(standalone_url(&obsolete, "windows", "x86_64").is_none());
         assert!(
             standalone_url(&release, "windows", "x86_64")
                 .unwrap()

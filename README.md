@@ -1,161 +1,215 @@
 # 猫咪盒子启动器 · NekoCrate Launcher
 
-一个 Rust 核心 + Tauri 2 / Vue 3 桌面界面的 Minecraft Java 版启动器原型。
+基于 Rust、Tauri 2 和 Vue 3 的 Minecraft Java 版启动器，支持多游戏目录、加载器与整合包安装、资源管理和可自定义的桌面布局。
 
-当前开发分支：`neko_dev`。应用与 CLI 使用同一个核心、数据格式和资源索引。
+[下载](https://github.com/NekoOS-Group/NekoCrate-Launcher/releases) · [反馈问题](https://github.com/NekoOS-Group/NekoCrate-Launcher/issues) · [架构说明](docs/architecture.md) · [发布说明](docs/releases)
 
-上游仓库：[NekoOS-Group/NekoCrate-Launcher](https://github.com/NekoOS-Group/NekoCrate-Launcher)。正式中文名为「猫咪盒子启动器」，英文名为 NekoCrate Launcher。
+项目仍在开发中，当前开发分支为 `neko_dev`。桌面应用与 CLI 共用 Rust 核心、数据格式和资源索引。
 
-## 当前功能
+## 下载与运行
 
-| 模块 | 已实现 |
+从 [GitHub Releases](https://github.com/NekoOS-Group/NekoCrate-Launcher/releases) 选择对应平台的文件：
+
+| 平台 | 安装版 | 便携运行 |
+| --- | --- | --- |
+| macOS Apple Silicon | `.dmg` | 解压 `.app.tar.gz`，双击 `.app` |
+| Windows x64 | `-setup.exe` | 直接运行 `-win-amd64.exe` |
+| Linux x64 | `.deb` | 为 `.elf` 添加执行权限后运行 |
+
+安装版与便携版共用同一套程序，通过运行模式配置选择数据位置：
+
+- **安装版**使用系统应用数据目录，游戏目录可以单独关联或创建。
+- **便携版**使用程序旁的 `.minecraft` 和 `.nekocrate`，分别保存游戏与启动器数据；首次运行会创建并关联 `.minecraft`。macOS 的这两个目录位于 `.app` 旁。只移动程序会改用新位置的数据，需要一起迁移游戏和设置时，请关闭启动器后移动整个文件夹。
+- 账户凭据保存在系统凭据库中，换电脑后需要重新登录。
+
+Windows 需要 WebView2；Linux ELF 需要系统提供 GTK、WebKitGTK 和 D-Bus 运行库。macOS 发布包目前未做 Apple 公证，Windows 发布包尚无发布者代码签名。
+
+macOS `.app`、Windows 安装版与便携版、Linux ELF 支持应用内下载更新、验签、安装替换和重启。Linux DEB 使用手动安装更新；当前发布文件说明见[构建基础设施](docs/build-infrastructure.md#分发格式)。
+
+## 功能与设计
+
+### 功能列表
+
+- **账户与皮肤**
+
+  - 通过浏览器登录微软账户，完成 Xbox / Minecraft 身份验证、游戏权益检查和令牌刷新；支持保存多个账户并切换当前启动身份。
+  - 支持游客身份和游客名称设置。刷新令牌保存在 macOS Keychain、Windows Credential Manager 或 Linux Secret Service，认证流程见[账户与认证](docs/authentication.md)。
+  - 首页展示可旋转的 3D 角色模型和账户头像；皮肤库支持预览、导入和管理皮肤，为游客选择外观，并管理微软账户皮肤。
+
+- **游戏安装与版本管理**
+
+  - 浏览并安装 Minecraft 原版、Fabric、Forge 和 NeoForge，识别已有游戏版本、版本继承关系及对应的启动参数。Forge 安装支持包含 `install_profile.json` 的安装器；早于 1.6 的传统分发包需另行准备。
+  - 一个实例对应一个 `.minecraft` 游戏目录，同一目录可以添加多个版本。支持切换启动版本、设置显示名称、调整排列顺序和管理版本隔离；显示名称与磁盘目录名称独立。
+  - 添加版本时可预选 Mods、资源包、光影和存档，按游戏版本与加载器匹配资源，并将资源准备纳入安装流程。
+  - 支持检查和修复游戏文件，重新获取缺失或损坏的客户端、依赖库及资源；启动前准备匹配的 Java 和原生库。
+
+- **整合包与资源浏览**
+
+  - 浏览 Modrinth 和 CurseForge 的项目介绍、资源版本与依赖信息，按游戏版本、加载器和资源类型筛选下载内容。
+  - 支持在线安装整合包、导入本地整合包，按清单下载依赖并应用覆盖文件。官方构建内置 CurseForge 应用凭据；受作者分发限制的文件需按任务提示手动补齐。
+  - 管理 Mods、资源包、光影、数据包和存档；支持从文件管理器拖入资源，将数据包放入指定存档，以及在版本之间拖拽复制 Mods、资源包和光影。
+
+- **Mod 配置与全局资源库**
+
+  - 查看 Mod 元数据、依赖和关联版本，切换启用状态；编辑配置时提供 JSON / TOML / CFG 辅助、保存校验与备份。
+  - 全局资源库汇总已关联目录中的资源，支持搜索、分类浏览、收藏本地文件，以及从 Modrinth / CurseForge 下载指定资源版本供后续使用。
+  - 资源详情可跳转到对应游戏版本。缓存页展示 Java、皮肤、资源与未完成下载的占用，并提供未完成下载清理入口。
+
+- **目录导入、复制与导出**
+
+  - 自动发现本机游戏目录，支持关联现有 `.minecraft`、指定位置新建目录，以及拖入文件夹扫描游戏；多个扫描结果可预览后选择。
+  - 支持跨游戏目录复制版本和资源，导出实例或版本 ZIP。实例导出可携带对应平台的便携启动器，方便整理和分享游戏环境。
+  - 支持为实例配置独立的 Java、内存和游戏设置。已有整合包沿用原工作目录，新建加载器版本使用独立目录维护 Mods、配置及存档。
+  - 移除关联目录时解除关联并保留原文件；移除托管实例或单个版本时使用系统废纸篓／回收站，操作前检查版本依赖。
+
+- **Java、内存与下载任务**
+
+  - 自动发现系统安装、实例指定和手动登记的 Java，展示版本、发行方、架构及路径；根据游戏要求复用兼容运行时或从 Adoptium / GitHub 下载 Java。Apple Silicon 上缺少 ARM 原生库的游戏版本可能需要 Intel Java 和系统的 Intel 程序运行支持。
+  - 提供自动、推荐、最小和自定义内存分配方式，允许按实例调整启动配置。
+  - 下载支持 1–256 并发、自适应调度、暂停续传、取消和单文件重试；通过完整性校验和本地资源复用减少重复下载，恢复任务时显示已完成的工作量。
+  - 游戏文件与 Mod 资源可分别配置下载来源；网络设置支持代理，下载和安装任务显示当前步骤、文件进度与错误信息。
+
+- **日志与故障诊断**
+
+  - 查看游戏实时输出，按日志内容搜索与筛选；敏感信息在展示和记录前脱敏。可选择启动时显示日志或最小化启动器。
+  - 游戏异常退出时展示相关日志，识别常见 Java 版本、内存不足、Mod 依赖和配置错误，提供对应的排查信息。
+  - 启动器记录下载、更新、启动及认证操作的失败信息，包含时间、版本、平台和错误链，便于反馈问题。
+
+- **界面布局与首页小组件**
+
+  - 支持简体中文、English 和跟随系统，可将界面语言同步到游戏；提供主题背景和可调整的首页布局。
+  - 首页可配置一言、Trends、服务器列表、最近存档、待办便签和像素时钟。服务器组件展示在线人数与延迟，服务器和存档入口可选择关联的游戏版本启动。
+  - 资源管理、版本管理、日志和下载任务以工具窗呈现，支持移动、缩放、边缘吸附和最大化；多个工具窗可同时打开，位置与尺寸会保存。
+  - 实例、版本和资源支持拖拽操作；界面提供键盘导航，并响应系统的减少动态效果设置。
+
+### UI 设计语言与功能拆分
+
+**首页围绕“选择身份、选择游戏、开始游玩”组织。** 账户、角色模型、实例选择和启动按钮构成主要操作区；服务器、最近存档、待办和订阅动态作为可选小组件加入。布局编辑支持调整位置、方向和尺寸，实例栏提供横排、竖排及滚轮选择器，让常用入口适应个人习惯和窗口空间。
+
+**视觉层次由透明表面、主题色和内容本身共同建立。** 动态几何背景承载主题氛围，角色模型与像素元素呼应 Minecraft；工具窗、菜单和设置气泡通过透明底色、文字明暗与悬停反馈区分层级。列表切换、窗口展开和拖放到达使用连贯的过渡，帮助用户追踪操作前后的对象位置。界面响应系统的减少动态效果设置。
+
+**功能按操作对象和作用范围拆分。** 实例代表游戏目录，版本管理负责其中的启动版本、隔离设置与游戏内容；全局资源管理集中处理跨实例复用的 Java、皮肤和资源收藏；账户管理负责启动身份；全局设置负责语言、网络和启动器偏好。资源详情保留关联版本入口，便于从全局浏览返回具体游戏环境。
+
+**长时间工作放进工具窗，短操作靠近对象呈现。** 资源管理、版本管理、下载任务和日志支持同时打开，工具窗可以移动、缩放、吸附和最大化，方便一边整理资源、一边查看目标版本或任务进度。账户选择、实例设置和全局设置使用紧凑的菜单或气泡；需要确认目标与影响范围的操作提供预览或确认步骤。
+
+#### dev0.9：“拖动万物”
+
+“拖动万物”是 dev0.9 系列贯穿目录、版本、资源和布局的交互设计：把对象拖到目标位置，由目标表达要执行的操作。文件管理器、首页实例栏、版本列表、资源窗口和导出区域之间因此形成连续的操作路径。
+
+| 拖动对象 | 目标位置与操作 |
 | --- | --- |
-| 账户 | Microsoft 浏览器授权（PKCE） → Xbox Live → XSTS → Minecraft；权益与档案检查；刷新令牌；多账户切换/移除；游客身份与名称设置；登录账户修改 Java 版名称与皮肤 |
-| 凭据 | 刷新令牌存入 macOS Keychain / Windows Credential Manager / Linux Secret Service；数据库与前端不接收令牌 |
-| 游戏 | 原版、Fabric、Forge、NeoForge 安装；版本目录与推荐版本选择；已有加载器版本启动；版本继承、现代/旧式启动参数、依赖与原生库解析 |
-| Java | 检测本机及托管运行时；综合已知加载器范围、ASM 与模组声明选择兼容 Java，优先复用本地版本；信息不足时保守匹配；现代加载器自动使用完整 JDK；下载 SHA-256 校验 |
-| 内存 | 自动（默认）、推荐、最小、自定义；按游戏版本、Mod 规模及支持的整合包声明估算；启动前重新读取可用内存 |
-| 下载 | 1–256 并发与自适应、暂停/继续、重试、取消、HTTP Range 续传、SHA-1/SHA-256 和长度校验、本地资源索引复用；区分传输／复用／校验／安装状态，恢复完成量与单文件重试；游戏源自动测速与回退、官方/BMCLAPI 手动选择；独立 Mod 源设置与系统/手动代理 |
-| 资源 | 全局 Java、游戏资源、皮肤与缓存管理；Mods / 资源包 / 光影可通过现有版本列表与实例栏复制到其他版本，或拖出到系统文件管理器；内置 Steve / Cirno 皮肤；安装成功后自动清理下载暂存 |
-| 诊断 | 意外退出自动展示日志和本次崩溃依据，识别常见内存、Java、依赖、配置、Mixin 与图形问题 |
-| 修复 | 校验游戏文件；损坏文件优先从已校验缓存恢复，再重新下载；安装中断后不标记为可启动 |
-| 实例 | 每个实例对应一个 `.minecraft`；已有目录直接关联原路径并在其中读写资源和依赖；同一实例添加、切换、改名与移除版本；查看 Mods、数据包、资源包和存档；Mod 启用／禁用、关联配置编辑与备份，JSON/TOML 高亮、格式化与语法提示，CFG 高亮、Forge 分组缩进与结构提示；Java/内存设置 |
-| 进程 | 直接启动 Java，不经过 shell；工作目录隔离；实时 stdout/stderr、脱敏日志；异常退出自动打开日志，正常退出与主动停止不弹出 |
-| 界面 | 简体中文 / English / 跟随系统；可同步 Minecraft 语言；实例与启动版本拖拽排序、拖到右上角移除；应用内下载更新、验签、安装与重启 |
+| 游戏目录、实例 ZIP | 拖入窗口后识别游戏内容，预览并选择关联或导入位置 |
+| `versions` 或单个版本目录 | 拖入窗口识别所属游戏目录；拖到指定实例时复制到目标目录 |
+| Mods、资源包、光影、存档 | 拖到版本或对应资源区域安装；已有资源可拖到其他版本复制，也可加入新版本的资源预选 |
+| 数据包 | 拖到指定存档，安装到该存档的数据包目录 |
+| Modrinth / CurseForge 项目链接 | 拖入后打开项目详情，选择兼容的资源版本 |
+| 配置文件 | 拖入配置编辑器，比较内容后保存 |
+| 实例、版本与资源 | 拖出到文件管理器导出；实例和版本可打包为 ZIP，实例包可附带便携启动器 |
+| 版本与可删除资源 | 拖到右上角回收区，按确认流程移入系统废纸篓／回收站 |
+| 实例条目、版本条目与首页组件 | 拖动排序、调整布局；工具窗拖到边缘可吸附排列 |
 
-## 支持边界
+拖动开始后，提示随悬停目标更新；折叠的实例区域和版本列表会按需展开，目标区域反馈可执行的操作。资源支持多选和批量拖放，复制保留源文件及 Mod 的启停状态。文件类型通过实际内容识别，提交前检查目标版本、同名冲突和必要依赖；涉及多个游戏目录或数据包存档时，先明确目标再执行。
 
-- 普通游戏下载页可选择原版、Fabric、Forge、NeoForge；加载器版本目录缓存一小时，联网失败时复用已有目录。支持导入 Modrinth / CurseForge 整合包；不自动添加 Fabric API 或未声明的其他模组。CurseForge 使用官方构建内置的应用凭据，无需用户填写密钥；作者限制第三方分发的文件仍需手动补齐。
-- 新建加载器版本使用 `versions/<版本>` 隔离 Mods、配置和存档，安装记录保存在其 `.nekocrate/loader.json`；暂停时终止正在运行的 Java 安装步骤，继续时重跑该步骤，已校验完成的步骤保留。支持修复本启动器安装的加载器；不原地升级或替换已有整合包加载器，不覆盖同名的外部版本。
-- Forge 安装支持含 `install_profile.json` 的新旧安装器格式，早于 1.6 的传统分发包不在选择列表中；没有逐个历史构建做实机验证。
-- 已有关联目录会在启动器启动时重新识别版本。支持 `inheritsFrom` 和 HMCL 合并配置；有隔离目录的整合包保留 `versions/<子实例>` 中的模组、配置和存档，原版及已有普通版本继续沿用原工作目录。
-- 支持旧式 Forge 启动参数；Apple Silicon 上缺少 ARM 原生库的旧版本匹配 Intel Java，需要系统可运行 Intel 程序。没有逐个游戏、加载器及整合包版本做实机验证。
-- 外置认证、Bedrock、Quilt 安装尚未实现。
-- 下载恢复支持 HTTP Range 字节级续传；未变化的完整文件复用持久化校验记录，主动修复仍完整校验。服务器不支持续传时安全地重新下载对应文件。
-- 关联目录移除后仍保留原处，只取消关联；启动器内新建的托管实例移除后进入系统废纸篓／回收站，可通过系统恢复或清空。
-- 添加游戏目录时自动发现官方启动器目录及当前可执行文件旁的 `.minecraft`，也可选择已有目录或在数据目录／外部位置新建。官方目录默认命名为「官方启动器」。
-- 管理版本时，改名只修改显示名称，保留加载器 ID 与磁盘目录；移除版本会检查其他版本的依赖，并将该版本目录移入系统废纸篓／回收站，共享文件保留。四类内容按版本实际工作目录读取，数据包同时列出游戏目录与存档内的内容。
-- 拖入 ZIP 时按内部内容识别资源包、光影、存档或整合包；不匹配的区域会原地说明原因，不自动改投其他位置。手动补齐整合包文件只在任务内的缺失文件框接收。拖动已有资源时，悬停实例图标展开现有版本菜单，悬停折叠箭头展开更多实例；拖出窗口使用系统文件复制，保留源文件。
-- 将文件夹拖入桌面窗口，会在后台查找它及下层隐藏的 `.minecraft`。单个新目录直接关联，多个目录先预览勾选；默认名称取游戏目录的上层文件夹名。同目录不重复添加，游戏文件保持原位。扫描可取消，关联提示显示名称与路径并在 2 秒后消失。
-- 包含 `.minecraft` 的完整 ZIP 会打开新建实例流程，可修改名称并选择启动器数据目录或外部位置；压缩包包含多个游戏目录时先选择其中一个，只解压所选目录，不导入外层启动器或账户凭据。导入复用任务进度界面，取消或失败会清理本次创建的文件，不覆盖已有目录。沿用压缩包限制：最多 10 万项、单文件 1 GiB、总解压大小 8 GiB。
-- 将 `versions` 或 `versions/<版本>` 拖到主界面，会定位并关联所属游戏目录，单个版本还会自动选中；独立版本目录会要求选择目标实例。将版本目录拖到实例图标或版本条目上，可复制到该实例，新建实例也可作为目标；源文件保留，同名版本报冲突。复制会带上现有的基础版本和引用的共享依赖，缺失依赖保留为待下载状态。使用自定义外部工作目录的 HMCL 版本需关联原游戏目录，避免复制后仍读写原存档。
-- 自动 Java 下载依赖 Adoptium/GitHub 网络。无法访问时，可在实例设置中指定对应主版本的本地 Java。
-- macOS 是本地验证平台；Windows/Linux 配置了 CI 构建检查，未经本机实测。
+拖放与添加、导入、复制、导出等按钮入口共用同一套操作流程，用户可以在鼠标拖动、菜单选择和键盘操作之间切换。设计目标是让“拿起什么、放到哪里、会发生什么”在操作过程中清晰可见。具体功能记录见 [dev0.9 系列更新](docs/releases/dev0.9.9.md)。
 
-## 开发运行
+## 开发
 
-需要 Rust 1.93 或更新的 stable、Node.js 22，以及 [Tauri 系统依赖](https://v2.tauri.app/start/prerequisites/)。macOS 的本地签名脚本还需要 Python 3。
+需要 Rust 1.93 或更新的 stable、Node.js 22，以及 [Tauri 系统依赖](https://v2.tauri.app/start/prerequisites/)。macOS 本地签名还需要 Python 3。
+
+以下命令均在仓库根目录执行。
+
+### 启动桌面界面
 
 ```sh
 git switch neko_dev
-npm --prefix app ci # 首次运行时安装前端依赖
+npm --prefix app ci
 cargo ui
 ```
 
-在仓库根目录执行 `cargo ui`，会一并启动 Vite 前端开发服务和 Tauri 桌面窗口，并监听代码修改；按 Ctrl+C 结束开发进程。`cargo ui --help` 查看可传入的 Tauri 开发参数。
-
-macOS 下 `cargo ui` 会在首次运行时创建固定的本地自签身份 `NekoCrate Local Development`，之后在每次编译完成、启动程序之前签名，包括 Rust 热重载。私钥不可导出地保存在当前用户钥匙串；首次设置可能出现系统确认；自签名的钥匙串分区仍绑定二进制哈希，因此 Rust 重新编译后可能再次要求凭据授权。证书缺失时会报错，不自动更换身份。直接执行 `npm run tauri dev` 会绕过此签名步骤。详见[签名与密钥管理](docs/build-infrastructure.md#签名与密钥管理)。
-
-可用 `NEKOCRATE_DATA_DIR` 指定测试数据目录。默认使用操作系统应用数据目录。
+`cargo ui` 会启动 Vite 和 Tauri 窗口，监听代码修改；Ctrl+C 结束开发进程，`cargo ui --help` 查看参数。开发模式默认使用系统应用数据目录，也可单独指定测试目录：
 
 ```sh
-# 在仓库根目录执行；开发数据不会进入 Git
 NEKOCRATE_DATA_DIR="$PWD/.runtime/dev" cargo ui
 ```
 
-构建桌面应用：
+macOS 下 `cargo ui` 使用固定的本地自签身份 `NekoCrate Local Development`。首次设置可能出现系统确认，Rust 重新编译后仍可能要求钥匙串授权；直接运行 `tauri dev` 会绕过本地签名步骤。详见[签名与密钥管理](docs/build-infrastructure.md#签名与密钥管理)。
+
+仅预览界面可执行 `npm --prefix app run dev`。账户、安装和游戏启动等操作需要桌面运行时。
+
+### 构建桌面应用
+
+按当前平台选择一条命令：
 
 ```sh
-cd app
-npm run tauri build
-# macOS: ../target/release/bundle/macos/猫咪盒子启动器.app
+# macOS：默认生成 .app
+npm --prefix app run tauri build
+
+# Windows：NSIS 安装包
+npm --prefix app run tauri build -- --bundles nsis
+
+# Linux：DEB 安装包
+npm --prefix app run tauri build -- --bundles deb
 ```
 
-项目默认 bundle 类型是 macOS app。其他平台可通过 `--bundles nsis` / `--bundles deb` 选择平台包，或先执行 `npm run tauri build -- --no-bundle` 验证可执行文件。
-
-本机打包也可复用上述自签证书（在仓库根目录执行）：
+打包产物位于 `target/release/bundle/`。只构建可执行文件时使用 `--no-bundle`。macOS 本机打包可复用开发自签证书：
 
 ```sh
 python3 scripts/macos_sign.py ensure
 npm --prefix app run tauri build -- --config src-tauri/tauri.local.conf.json
 ```
 
-普通 CI 在 Linux 上集中执行一次前端测试与构建、Rust 完整测试、格式检查和 Clippy；Windows/macOS 仅补充文件系统差异测试，不再各自重复整套检查或编译桌面测试程序。通过检查的前端产物保留 14 天。
-
-Linux CI 和发布构建使用固定 digest 的 Ubuntu 22.04 预装依赖镜像。镜像升级前在全新的 runner 上比较三次 apt 安装与三次冷拉取；构建缓存自动保留各平台最新代次，定期清理旧标签范围与重复代次。规则、实测数据、手动操作和发布文件说明见 [构建基础设施](docs/build-infrastructure.md)。
-
-开发版本发布由 `.github/workflows/release.yml` 管理：先将提交推送到 `neko_dev` / `main`，再推送 `dev*` 标签；标签任务将构建调度到默认分支，复用跨版本的 Rust 发布缓存（手动发布也选择默认分支），实际源码仍固定为标签提交；发布提前复用相同提交已检查的前端产物，并与剩余 CI 检查并行编译；公开发布仍须等待完整 CI 成功，不再安装前端依赖、重跑检查或重建前端。三个原生 runner 仅安装锁定版本的 Tauri CLI，在编译前检查前端入口与资源，编译后执行实际二进制的 `--verify-frontend`，验证内嵌资源及 IPC 异步对象大小，不打开窗口或用户数据；分别编译并打包 macOS ARM64、Windows AMD64、Ubuntu 22.04 AMD64。全部成功后校验来源提交、架构与 SHA-256，上传 DMG、NSIS EXE、DEB，以及便携 EXE、ELF 和 `.app.tar.gz`，再公开 GitHub 预发布版。若 CI 失败或产物已过期，需要先重跑对应提交的 CI，再重跑发布任务。构建使用 Rust 1.93.1、Node.js 22 和锁定依赖，`docs/releases/<标签>.md` 保存发布说明。`dev0.1` 对应应用版本 `0.1.0-dev.1`；`dev0.2` 对应 `0.2.0-dev.1`；`dev0.3` 对应 `0.3.0-dev.1`；`dev0.3.1` 对应 `0.3.1-dev.1`；`dev0.3.2` 对应 `0.3.2-dev.1`；`dev0.4` 对应 `0.4.0-dev.1`；`dev0.5` 对应 `0.5.0-dev.1`；`dev0.6` 对应 `0.6.0-dev.1`；`dev0.7` 对应 `0.7.0-dev.1`；`dev0.7.1` 对应 `0.7.1-dev.1`；`dev0.8` 对应 `0.8.0-dev.1`；`dev0.9` 对应 `0.9.0-dev.1`；`dev0.9.1` 对应 `0.9.1-dev.1`；`dev0.9.2` 对应 `0.9.2-dev.1`；`dev0.9.3` 对应 `0.9.3-dev.1`；`dev0.9.4` 对应 `0.9.4-dev.1`；`dev0.9.5` 对应 `0.9.5-dev.1`；`dev0.9.6` 对应 `0.9.6-dev.1`；`dev0.9.7` 对应 `0.9.7-dev.1`；`dev0.9.8` 对应 `0.9.8-dev.1`；`dev0.9.9` 对应 `0.9.9-dev.1`。
-
-应用内更新使用 Tauri updater：macOS 安装后的 `.app`、Windows NSIS 安装版、Windows 便携版和 Linux 便携 ELF 支持下载、签名验证、安装替换及重启；开发模式、未安装的 macOS 二进制和 Linux DEB 保留手动安装入口。下载可取消，游戏或下载任务运行时保留准备好的更新，任务结束后点击「安装并重启」。已发布的 dev0.4 及以前版本仍需手动安装一次带更新器的新版本。
-
-发布 workflow 需要仓库 Actions Secret `TAURI_SIGNING_PRIVATE_KEY`，加密私钥另设 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`。公钥固定在 `tauri.conf.json`；私钥保存在仓库外并备份，不能提交。macOS 的通用 `.app.tar.gz` 同时用于便携运行和两种模式的自动更新，另提供 `latest.json` 和 `BUILDINFO.json`。构建时生成的签名内嵌到 `latest.json`，不再单独上传 `.sig`；`BUILDINFO.json` 的 `files` 统一记录各安装包和更新清单的大小与 SHA-256，不再提供 `SHA256SUMS` 或 `.app.zip`。更新清单绑定当前发布标签、版本及平台。客户端同时验证 HTTPS、更新签名及签名中的版本；该签名独立于 Apple / Windows 代码签名。
-
-GitHub Release 的 macOS 开发包目前仍采用 [Tauri ad-hoc 签名](https://v2.tauri.app/distribute/sign/macos/#ad-hoc-signing)，未做 Apple 公证；本机自签私钥不会上传到 CI。Windows 开发包没有发布者代码签名。Linux 使用英文包名满足包管理器命名要求，桌面入口及窗口仍显示「猫咪盒子启动器」。
-
-安装版与便携版共用一次编译生成的程序，发布版没有运行模式配置时默认便携运行：Windows 直接下载 `-win-amd64.exe`（安装包仍是 `-win-amd64-setup.exe`），Linux 下载 `.elf`；macOS 解压唯一的 `-mac-appsilicon.app.tar.gz` 得到可双击的 `.app`。安装包额外部署 `nekocrate.runtime.json`（`{"schema":1,"mode":"installed"}`），让同一程序使用系统应用数据目录；Windows 放在 EXE 旁，macOS 放在 `.app/Contents/Resources`，Linux DEB 放在 `/usr/lib/nekocrate-launcher`。macOS 安装版更新前将当前 App 路径登记在系统数据目录的 `runtime-modes` 中，因此替换为通用包后仍使用原数据；新位置的独立副本默认便携运行。CLI 与 `cargo ui` 仍默认使用系统应用数据目录，`NEKOCRATE_DATA_DIR` 仍优先。
-
-合并更新包后，macOS 使用新的统一更新目标。此前发布的 macOS 客户端及 Windows 便携客户端需要手动替换一次：安装版使用 DMG 覆盖原 App，便携版只替换程序并保留旁边的 `.nekocrate` 和 `.minecraft`。旧客户端写死了旧包名或不支持保留包外模式，因此不会将不兼容包伪装成旧更新目标。Windows 安装版和 Linux ELF 的更新入口不变。
-
-便携运行不依赖程序名称：每次启动使用程序所在目录，首次打开自动关联 `.minecraft`（不存在则创建），设置、Java、索引和任务保存在 `.nekocrate`。只移动程序会使用新位置的数据；需要保留游戏和设置时，关闭启动器后移动整个文件夹。安装版数据独立；旧便携标记仍兼容，显式运行模式配置优先。Windows 需要 WebView2，Linux ELF 需要系统 GTK / WebKitGTK / D-Bus 运行库（Debian/Ubuntu 的 D-Bus 包为 `libdbus-1-3`），macOS 游戏目录位于 `.app` 旁边。账户凭据留在系统凭据库，换电脑后重新登录。dev0.9.4 便携版和旧 AppImage 需手动迁移一次，详情见 [dev0.9.5 发布说明](docs/releases/dev0.9.5.md)。
-
-浏览器仅用于界面预览：在仓库根目录执行 `npm --prefix app run dev`。安装、账户和启动等操作需要桌面运行时，浏览器不会模拟成功结果。
-
-## CLI
+### CLI
 
 ```sh
 cargo run -p nekocrate-cli -- --help
 cargo run -p nekocrate-cli -- --data-dir .runtime/cli versions
 cargo run -p nekocrate-cli -- --data-dir .runtime/cli create "我的世界" --version 1.21.1
-# 将创建结果中的 id 用于后续命令；同一目录可添加更多版本
-cargo run -p nekocrate-cli -- --data-dir .runtime/cli add-version <instance-id> 1.20.1
-cargo run -p nekocrate-cli -- --data-dir .runtime/cli select-version <instance-id> 1.21.1
-cargo run -p nekocrate-cli -- --data-dir .runtime/cli install <instance-id>
-cargo run -p nekocrate-cli -- --data-dir .runtime/cli configure --client-id <your-client-id>
+
+# 替换为创建结果中的实例 ID
+instance_id="实例 ID"
+cargo run -p nekocrate-cli -- --data-dir .runtime/cli install "$instance_id"
 cargo run -p nekocrate-cli -- --data-dir .runtime/cli login
-cargo run -p nekocrate-cli -- --data-dir .runtime/cli launch <instance-id>
+cargo run -p nekocrate-cli -- --data-dir .runtime/cli launch "$instance_id"
 ```
 
-其他命令：`status`、`repair`、`clone`、`delete`、`import`、`java`、`refresh`、`select-account`、`remove-account`。Ctrl+C 取消 CLI 下载/登录或停止当前 CLI 启动的游戏。同一数据目录不允许同时打开多个启动器进程。
+还支持 `add-version`、`select-version`、`repair`、`import`、`java` 和账户管理等命令，具体参数见 `--help`。Ctrl+C 可取消下载／登录，或停止当前 CLI 启动的游戏。同一数据目录不允许同时打开多个启动器进程。
 
-## 检查
+### 检查
 
 ```sh
 cargo fmt --all -- --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
-cd app && npm test && npm run build
+npm --prefix app test
+npm --prefix app run build
 ```
 
-真实网络安装检查（下载游戏资源和 Java，约数百 MB 至数 GB）：
+真实网络安装与修复检查：
 
 ```sh
 python3 scripts/smoke_install.py --version 1.21.1
 ```
 
-该脚本创建独立测试目录，安装官方版本，主动损坏一个测试资源文件，再验证修复。不会读取用户账户或启动付费游戏。
+该脚本使用独立测试目录，下载游戏资源和 Java，再验证文件损坏后的修复；下载量约数百 MB 至数 GB，不读取用户账户或启动游戏。
+
+### CI 与发布
+
+CI 集中执行前端与 Rust 检查，Windows / macOS 补充平台差异测试。发布工作流固定标签提交，复用已检查的前端产物和跨版本 Rust 缓存，三个平台构建成功且完整 CI 通过后发布。
+
+发布说明保存在 [`docs/releases/`](docs/releases)。缓存清理、Linux 构建镜像、发布附件与签名配置见[构建基础设施](docs/build-infrastructure.md)。
 
 ## 仓库结构
 
 ```text
 crates/nekocrate-core/   账户、下载、Java、元数据、实例、启动与日志
-crates/nekocrate-cli/    可脚本化的命令行入口
-app/src/                Vue / TypeScript 桌面界面
+crates/nekocrate-cli/    命令行入口
+app/src/                Vue / TypeScript 界面
 app/src-tauri/          Tauri IPC 与桌面打包
-docs/                   认证配置、架构与验证记录
-scripts/                可复现的真实网络检查
+xtask/                  cargo ui 开发入口
+docs/                   架构、认证、构建与发布说明
+scripts/                构建、签名与验证工具
 ```
-
-参见 [架构说明](docs/architecture.md)。
 
 ## 许可证
 
-Copyright © NekoOS Group。启动器代码采用 [GNU GPL v3.0](LICENSE)（`GPL-3.0-only`）。第三方依赖和 Minecraft 原版素材保留各自的许可与权利声明；原版方块素材来源见 [provenance.json](app/src/assets/blocks/provenance.json)。
-
-### 拖放与 ZIP 导出
-
-- 将版本条目拖到另一个游戏目录图标可复制版本及其本地依赖；已有同名版本或目标正在运行时不覆盖。资源可混合拖入目标版本，预览会按真实类型分组；数据包可直接拖到存档条目。
-- Modrinth / CurseForge 项目链接可拖入窗口或指定版本，打开详情并选择兼容版本。配置文件可拖到已打开的配置编辑器，先比较内容，再备份并替换。
-- 实例设置和版本管理提供 ZIP 导出；也可将实例或版本拖到窗口边缘，松开打开导出面板。ZIP 生成后，可拖到文件管理器或选择保存位置。首次拖出需要先完成打包。
-- 导出面板可选附带 Windows x64、macOS Apple Silicon 或 Linux x64 便携版。启动器从官方发布下载，并验证签名和版本；可执行文件 / `.app` 与 `.minecraft` 并列。不附带当前启动器的账户数据库、凭据或托管 Java 环境；换平台后，缺少的 Java 和平台依赖由启动器补齐。
-- 单版本导出只收集该版本实际需要的本地游戏文件和依赖；`jar` 引用只携带基础 JAR，`inheritsFrom` 则同时携带继承配置。只有整个实例导出才包含其他版本。
-- 未拖出的临时 ZIP 在关闭导出面板时清理。已交给文件管理器的 ZIP 暂时保留，以免中断系统异步复制；超过一天后在下次启动或导出时清理。
+Copyright © NekoOS Group。启动器代码采用 [GNU GPL v3.0](LICENSE)（`GPL-3.0-only`）。第三方依赖和 Minecraft 原版素材保留各自的许可与权利声明；方块素材来源见 [provenance.json](app/src/assets/blocks/provenance.json)。

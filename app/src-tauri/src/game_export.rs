@@ -75,30 +75,16 @@ pub async fn portable(
     })
 }
 fn standalone_package<'a>(manifest: &'a Value, platform: &str, tag: &str) -> Result<&'a Value> {
-    let (target, suffixes): (&str, &[&str]) = match platform {
-        "windows" => (
-            "windows-x86_64-portable-exe",
-            &["-win-amd64.exe", "-win-amd64-portable.exe"],
-        ),
-        "macos"
-            if manifest["platforms"]
-                .get("darwin-aarch64-unified")
-                .is_some() =>
-        {
-            ("darwin-aarch64-unified", &["-mac-appsilicon.app.tar.gz"])
-        }
-        "macos" => (
-            "darwin-aarch64-portable",
-            &["-mac-appsilicon-portable.app.tar.gz"],
-        ),
-        "linux" => ("linux-x86_64-elf", &["-linux-amd64.elf"]),
+    let (target, suffix) = match platform {
+        "windows" => ("windows-x86_64-portable-exe", "-win-amd64.exe"),
+        "macos" => ("darwin-aarch64-unified", "-mac-appsilicon.app.tar.gz"),
+        "linux" => ("linux-x86_64-elf", "-linux-amd64.elf"),
         _ => anyhow::bail!("不支持的便携版平台"),
     };
     let package = &manifest["platforms"][target];
     let url = package["url"].as_str().context("此平台暂无便携版")?;
     ensure!(
-        updates::is_update_artifact(url, tag)
-            && suffixes.iter().any(|suffix| url.ends_with(suffix)),
+        updates::is_update_artifact(url, tag) && url.ends_with(suffix),
         "便携版下载地址无效"
     );
     Ok(package)
@@ -127,7 +113,7 @@ fn verify(bytes: &[u8], signature: &str, public: &str, version: &str) -> Result<
 mod tests {
     use super::*;
     #[test]
-    fn export_selects_common_or_legacy_portable_but_never_the_old_installed_archive() {
+    fn export_accepts_only_current_standalone_targets() {
         let mut manifest = serde_json::json!({"platforms":{}});
         let url = |name: &str| {
             format!(
@@ -139,12 +125,7 @@ mod tests {
         assert!(standalone_package(&manifest, "macos", "dev9.9.9").is_err());
         manifest["platforms"]["darwin-aarch64-portable"] =
             serde_json::json!({"url":url("mac-appsilicon-portable.app.tar.gz")});
-        assert!(
-            standalone_package(&manifest, "macos", "dev9.9.9").unwrap()["url"]
-                .as_str()
-                .unwrap()
-                .contains("portable")
-        );
+        assert!(standalone_package(&manifest, "macos", "dev9.9.9").is_err());
         manifest["platforms"]["darwin-aarch64-unified"] =
             serde_json::json!({"url":url("mac-appsilicon.app.tar.gz")});
         assert_eq!(
@@ -155,7 +136,10 @@ mod tests {
         for suffix in ["win-amd64.exe", "win-amd64-portable.exe"] {
             manifest["platforms"]["windows-x86_64-portable-exe"] =
                 serde_json::json!({"url":url(suffix)});
-            assert!(standalone_package(&manifest, "windows", "dev9.9.9").is_ok());
+            assert_eq!(
+                standalone_package(&manifest, "windows", "dev9.9.9").is_ok(),
+                suffix == "win-amd64.exe"
+            );
         }
         manifest["platforms"]["windows-x86_64-portable-exe"] =
             serde_json::json!({"url":url("win-amd64-setup.exe")});

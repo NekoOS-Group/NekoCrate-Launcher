@@ -394,31 +394,10 @@ pub(crate) fn write_database(root: &Path, path: &Path, db: &crate::model::Databa
     storage::write_json(path, &value)
 }
 
-/// Validate a signed portable EXE. Legacy ZIP payloads remain readable during migration.
+/// Validate the current single-file Windows portable update payload.
 pub fn windows_executable(bytes: &[u8]) -> Result<Vec<u8>> {
-    use std::io::Read;
     ensure!(bytes.len() <= 128 * 1024 * 1024, "便携程序大小无效");
-    let binary = if bytes.starts_with(b"MZ") {
-        bytes.to_vec()
-    } else {
-        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
-        let name = "NekoCrate/nekocrate-launcher.exe";
-        ensure!(
-            archive.file_names().filter(|n| *n == name).count() == 1,
-            "便携更新包缺少唯一的启动器程序"
-        );
-        let mut entry = archive.by_name(name)?;
-        ensure!(
-            entry.is_file() && entry.size() <= 128 * 1024 * 1024,
-            "便携程序大小无效"
-        );
-        let mut binary = Vec::new();
-        entry
-            .by_ref()
-            .take(128 * 1024 * 1024 + 1)
-            .read_to_end(&mut binary)?;
-        binary
-    };
+    let binary = bytes;
     ensure!(
         binary.len() <= 128 * 1024 * 1024 && binary.get(..2) == Some(b"MZ"),
         "便携程序不是 Windows 可执行文件"
@@ -429,7 +408,7 @@ pub fn windows_executable(bytes: &[u8]) -> Result<Vec<u8>> {
         binary.get(offset..offset.saturating_add(6)) == Some(b"PE\0\0\x64\x86"),
         "便携程序架构无效"
     );
-    Ok(binary)
+    Ok(binary.to_vec())
 }
 
 #[cfg(test)]
@@ -690,7 +669,7 @@ mod tests {
     }
 
     #[test]
-    fn portable_archive_reads_only_the_expected_windows_binary() {
+    fn portable_update_accepts_only_a_windows_executable() {
         use std::io::Write;
         let make = |name: &str, binary: &[u8]| {
             let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
@@ -705,10 +684,10 @@ mod tests {
         binary[64..].copy_from_slice(b"PE\0\0\x64\x86");
         assert_eq!(windows_executable(&binary).unwrap(), binary);
         assert!(windows_executable(b"MZ incomplete").is_err());
-        assert_eq!(
-            windows_executable(&make("NekoCrate/nekocrate-launcher.exe", &binary)).unwrap(),
-            binary
-        );
+        assert!(windows_executable(&make("NekoCrate/nekocrate-launcher.exe", &binary)).is_err());
+        let mut wrong_arch = binary.clone();
+        wrong_arch[68..70].copy_from_slice(&[0x4c, 0x01]);
+        assert!(windows_executable(&wrong_arch).is_err());
         assert!(windows_executable(&make("../nekocrate-launcher.exe", &binary)).is_err());
         assert!(windows_executable(&make("NekoCrate/nekocrate-launcher.exe", b"not PE")).is_err());
     }
