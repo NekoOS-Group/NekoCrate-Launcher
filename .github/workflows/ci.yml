@@ -2,7 +2,13 @@ name: Check source
 on:
   push:
     branches: [neko_dev, main]
+    paths-ignore:
+      - 'site/**'
+      - '.github/workflows/pages.yml'
   pull_request:
+    paths-ignore:
+      - 'site/**'
+      - '.github/workflows/pages.yml'
   workflow_dispatch:
 
 permissions:
