@@ -138,6 +138,20 @@ fn cache_is_fresh(path: &Path, ttl: Duration) -> bool {
 }
 
 impl Provider {
+    pub(super) async fn modrinth_v3(
+        &self,
+        path: &str,
+        query: &[(&str, String)],
+        cancel: &CancellationToken,
+    ) -> Result<Value> {
+        anyhow::ensure!(self.platform == Platform::Modrinth, "无效资源平台");
+        let mut url =
+            reqwest::Url::parse_with_params(&format!("https://api.modrinth.com/v3/{path}"), query)?;
+        if query.is_empty() {
+            url.set_query(None);
+        }
+        self.get_at(url, cancel).await
+    }
     pub(super) fn new(launcher: &Launcher, platform: Platform) -> Result<Self> {
         let key = if platform == Platform::Curseforge {
             let value = crate::curseforge::key()?;

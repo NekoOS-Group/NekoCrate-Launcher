@@ -43,7 +43,7 @@ fn strings(v: &Value) -> Vec<String> {
         .map(str::to_owned)
         .collect()
 }
-fn web_url(value: &str) -> Option<String> {
+pub(super) fn web_url(value: &str) -> Option<String> {
     let url = reqwest::Url::parse(value).ok()?;
     (matches!(url.scheme(), "https" | "http")
         && url.host_str().is_some()
@@ -71,7 +71,12 @@ pub(super) fn image_url(value: &str) -> Option<String> {
         ))
     .then(|| url.into())
 }
-fn details(v: &Value, platform: Platform, body: String, authors: Vec<String>) -> ProjectDetails {
+pub(super) fn details(
+    v: &Value,
+    platform: Platform,
+    body: String,
+    authors: Vec<String>,
+) -> ProjectDetails {
     let mr = platform == Platform::Modrinth;
     let mut links = Vec::new();
     for (label, value) in if mr {

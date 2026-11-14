@@ -6050,7 +6050,7 @@ onUnmounted(() => {
       <ToolWindow
         v-if="storeOpen"
         window-id="store"
-        :initial-size="{ width: 860, height: 600 }"
+        :initial-size="{ width: 980, height: 600 }"
         :label="t('商城')"
         :locked="storeBusy"
         @close="storeOpen = false"

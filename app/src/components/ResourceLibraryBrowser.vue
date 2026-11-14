@@ -14,6 +14,7 @@ const props = defineProps<{
   kind: ResourceKind;
   busy: boolean;
   embedded?: boolean;
+  hideCategories?: boolean;
 }>();
 const emit = defineEmits<{
   back: [];
@@ -124,6 +125,7 @@ async function cancel() {
   <ResourceBrowser
     class="library-browser"
     :embedded="embedded"
+    :hide-categories="hideCategories"
     :library="{
       minecraft: game,
       loader: loader ? { kind: loader, version: '' } : null,
@@ -137,7 +139,7 @@ async function cancel() {
     @error="emit('error', $event)"
     @link="emit('link', $event)"
   >
-    <template #destination>
+    <template #filters>
       <div class="library-filters">
         <GlassSelect
           id="library-game"
@@ -189,14 +191,7 @@ async function cancel() {
 </template>
 <style scoped>
 .library-filters {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  margin-left: auto;
-  color: var(--muted);
-}
-.library-filters :deep(.source-select) {
-  width: 120px;
+  display: contents;
 }
 .library-progress {
   display: flex;

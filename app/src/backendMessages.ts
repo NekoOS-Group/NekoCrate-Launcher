@@ -1,5 +1,7 @@
 /** Launcher-owned messages only. Game output and user-supplied values are never translated. */
 export const backendEnglish: Readonly<Record<string, string>> = {
+  "皮肤来源暂时无法访问（HTTP {status}）":
+    "The skin provider is temporarily unavailable (HTTP {status})",
   不能同时进入服务器和单人存档:
     "Cannot join a server and a single-player world at the same time",
   存档目录名称无效: "Invalid world folder name",

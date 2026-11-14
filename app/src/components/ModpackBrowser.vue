@@ -10,14 +10,13 @@ import {
 import {
   Archive,
   ArrowLeft,
-  ArrowRight,
   Download,
   LoaderCircle,
   Search,
-  Users,
 } from "lucide-vue-next";
 import GlassSelect from "./GlassSelect.vue";
 import ProjectImage from "./ProjectImage.vue";
+import CatalogProjectRow from "./CatalogProjectRow.vue";
 import ProjectDetails from "./ProjectDetails.vue";
 import ProjectLinks from "./ProjectLinks.vue";
 import DownloadWorkflow from "./DownloadWorkflow.vue";
@@ -68,13 +67,6 @@ const platform = ref<ResourcePlatform>(
 const query = ref("");
 const sort = ref("relevance");
 const category = ref("");
-const downloadFormat = computed(
-  () =>
-    new Intl.NumberFormat(locale.value, {
-      notation: "compact",
-      maximumFractionDigits: 1,
-    }),
-);
 const categories = shallowRef<{ id: string; name: string }[]>([]);
 const categoriesLoading = ref(false);
 const categoriesFailed = ref(false);
@@ -584,77 +576,39 @@ onBeforeUnmount(() => {
               </ProjectDetails>
             </template>
             <template v-else>
-              <article
+              <CatalogProjectRow
                 v-for="(item, index) in hits"
                 :key="item.id"
-                class="pack-result list-reveal-item"
+                :project="item"
+                :rpc="rpc"
+                class="list-reveal-item"
                 :style="listRevealStyle(index % 20)"
-                :class="{ disabled: blocked }"
+                :disabled="blocked"
+                @open="choose(item)"
               >
-                <ProjectImage :url="item.icon_url" :rpc="rpc" :size="42"
-                  ><Archive :size="24"
-                /></ProjectImage>
-                <div class="pack-result-copy">
-                  <div class="pack-result-heading">
-                    <div class="pack-result-title">
-                      <button
-                        type="button"
-                        class="pack-result-open"
-                        :disabled="blocked"
-                        :title="item.name"
-                        @click="choose(item)"
-                      >
-                        <strong>{{ item.name }}</strong>
-                      </button>
-                      <span
-                        v-if="item.categories?.length"
-                        class="pack-result-tags"
-                      >
-                        <button
-                          v-for="tag in visibleTags(item)"
-                          :key="tag"
-                          type="button"
-                          class="project-badge"
-                          :class="{ active: tagSelected(tag) }"
-                          :aria-pressed="tagSelected(tag)"
-                          :disabled="blocked || !tagCategory(tag)"
-                          :title="categoryLabel(tag)"
-                          @click="filterTag(tag)"
-                        >
-                          {{ categoryLabel(tag) }}
-                        </button>
-                        <span
-                          v-if="item.categories.length > 3"
-                          class="project-badge pack-result-more-tags"
-                          :title="
-                            hiddenTags(item).map(categoryLabel).join(' · ')
-                          "
-                          >+{{ item.categories.length - 3 }}</span
-                        >
-                      </span>
-                    </div>
-                    <span
-                      class="pack-result-downloads"
-                      :title="`${t('下载量')}: ${item.downloads.toLocaleString(locale)}`"
-                    >
-                      <Download :size="12" />{{
-                        downloadFormat.format(item.downloads)
-                      }}
-                    </span>
-                    <span
-                      v-if="item.authors?.length"
-                      class="pack-result-authors"
-                      :title="`${t('作者')}: ${item.authors.join(', ')}`"
-                    >
-                      <Users :size="12" /><span>{{
-                        item.authors.join(", ")
-                      }}</span>
-                    </span>
-                  </div>
-                  <p>{{ item.description }}</p>
-                </div>
-                <ArrowRight :size="16" />
-              </article>
+                <template #icon><Archive :size="24" /></template>
+                <template #tags>
+                  <button
+                    v-for="tag in visibleTags(item)"
+                    :key="tag"
+                    type="button"
+                    class="project-badge"
+                    :class="{ active: tagSelected(tag) }"
+                    :aria-pressed="tagSelected(tag)"
+                    :disabled="blocked || !tagCategory(tag)"
+                    :title="categoryLabel(tag)"
+                    @click="filterTag(tag)"
+                  >
+                    {{ categoryLabel(tag) }}
+                  </button>
+                  <span
+                    v-if="(item.categories?.length || 0) > 3"
+                    class="project-badge catalog-project-more-tags"
+                    :title="hiddenTags(item).map(categoryLabel).join(' · ')"
+                    >+{{ (item.categories?.length || 0) - 3 }}</span
+                  >
+                </template>
+              </CatalogProjectRow>
               <div
                 v-if="!searching && !failure && !hits.length"
                 class="pack-empty"
@@ -770,158 +724,6 @@ onBeforeUnmount(() => {
   min-height: 0;
   overflow: auto;
   overflow-x: hidden;
-}
-.pack-result {
-  position: relative;
-  display: flex;
-  gap: 15px;
-  align-items: center;
-  width: 100%;
-  text-align: left;
-  background: transparent;
-  color: var(--ink);
-  border: 0;
-  border-bottom: 1px solid var(--line);
-  padding: 16px 8px;
-}
-.pack-result.disabled {
-  opacity: 0.5;
-}
-.pack-result > svg:first-child {
-  color: var(--blue);
-}
-.pack-result > svg {
-  flex-shrink: 0;
-}
-.pack-result > svg:last-child {
-  color: var(--muted);
-}
-.pack-result-copy {
-  flex: 1;
-  min-width: 0;
-}
-.pack-result-heading {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 68px minmax(0, 16%);
-  align-items: center;
-  gap: 12px;
-  min-width: 0;
-}
-.pack-result-title {
-  grid-column: 1;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-.pack-result-open {
-  min-width: 0;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-.pack-result-open::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-}
-.pack-result-open:focus-visible {
-  outline: none;
-  color: var(--blue);
-  text-shadow: 0 0 10px var(--glow);
-}
-.pack-result-heading strong {
-  display: block;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 14px;
-  font-weight: 500;
-}
-.pack-result-downloads,
-.pack-result-authors {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--muted);
-  font-size: 11px;
-  white-space: nowrap;
-}
-.pack-result-downloads > svg,
-.pack-result-authors > svg {
-  flex-shrink: 0;
-}
-.pack-result-downloads {
-  grid-column: 2;
-  font-variant-numeric: tabular-nums;
-}
-.pack-result-authors {
-  grid-column: 3;
-  min-width: 0;
-}
-.pack-result-authors > span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.pack-result-tags {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  gap: 4px;
-  min-width: 0;
-  max-width: 55%;
-  flex-shrink: 0;
-}
-.pack-result-tags .project-badge {
-  display: block;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  font-family: inherit;
-  transition:
-    color 160ms,
-    background-color 160ms,
-    box-shadow 160ms;
-}
-.pack-result-tags button {
-  cursor: pointer;
-}
-.pack-result-tags button:hover:not(:disabled) {
-  border-color: var(--blue);
-}
-.pack-result-tags button.active {
-  background: var(--blue);
-  color: var(--night);
-  border-color: var(--blue);
-}
-.pack-result-tags button:focus-visible {
-  outline: 1px solid var(--blue);
-  outline-offset: 2px;
-}
-.pack-result-tags button:disabled {
-  cursor: default;
-}
-.pack-result-tags .pack-result-more-tags {
-  flex-shrink: 0;
-}
-.pack-result p {
-  margin: 6px 0 0;
-  color: var(--muted);
-  font-size: 12px;
-  line-height: 1.6;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-  overflow-wrap: anywhere;
-}
-.pack-result:has(.pack-result-open:hover) strong {
-  color: var(--blue);
-  text-shadow: 0 0 10px var(--glow);
 }
 .pack-footer {
   justify-content: flex-end;

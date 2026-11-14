@@ -24,6 +24,7 @@ mod install;
 mod modpacks;
 mod presentation;
 mod provider;
+pub mod store;
 pub use modpacks::{ModpackArchive, ModpackCategory, ModpackFilters, ModpackSort, ModpackVersions};
 pub use presentation::ProjectDetails;
 pub(crate) use presentation::image_type;

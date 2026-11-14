@@ -52,6 +52,7 @@ import { listRevealStyle } from "../listMotion";
 
 const props = defineProps<{
   embedded?: boolean;
+  hideCategories?: boolean;
   session?: ResourceSession;
   library?: ResourceLibraryDestination;
   download?: (
@@ -98,6 +99,12 @@ const categories = computed(() =>
 );
 const kind = ref<ResourceKind>(
   props.library?.kind || props.session?.kind || "mods",
+);
+watch(
+  () => props.library?.kind,
+  (value) => {
+    if (value) kind.value = value;
+  },
 );
 const platform = ref<ResourcePlatform>(props.session?.platform || "modrinth");
 const query = ref("");
@@ -506,7 +513,14 @@ onBeforeUnmount(() => {
       </template>
       <template v-else>
         <header
-          v-if="!embedded || plan || project || local || $slots.destination"
+          v-if="
+            !embedded ||
+            !hideCategories ||
+            plan ||
+            project ||
+            local ||
+            $slots.destination
+          "
           class="modal-header resource-header list-reveal-item"
           :style="listRevealStyle(0)"
         >
@@ -519,18 +533,34 @@ onBeforeUnmount(() => {
           >
             <ArrowLeft :size="18" />
           </button>
-          <div>
-            <h2 class="dialog-heading" tabindex="-1">
-              {{ t(plan ? "安装预览" : "添加资源") }}
-            </h2>
-            <small v-if="!embedded && session"
-              >{{ session.instance.name }} · {{ versionTitle
-              }}<span v-if="target">
-                · {{ target.minecraft
-                }}{{ target.loader ? ` · ${target.loader.kind}` : "" }}</span
-              ></small
+          <nav
+            v-if="!plan && !local && !hideCategories"
+            class="resource-categories dialog-heading"
+            tabindex="-1"
+            :aria-label="t('资源类型')"
+          >
+            <button
+              v-for="(category, index) in categories"
+              :key="category.value"
+              :data-drop-kind="category.value"
+              :disabled="blocked"
+              class="list-reveal-item"
+              :style="{
+                '--category-color': category.color,
+                ...listRevealStyle(index),
+              }"
+              :class="{ active: kind === category.value }"
+              :aria-pressed="kind === category.value"
+              @click="kind = category.value"
             >
-          </div>
+              <component :is="category.icon" :size="17" />{{
+                t(category.label)
+              }}
+            </button>
+          </nav>
+          <h2 v-else class="dialog-heading" tabindex="-1">
+            {{ t(plan ? "安装预览" : "添加资源") }}
+          </h2>
           <slot name="destination" />
           <WindowControls v-if="!embedded" />
           <button
@@ -597,52 +627,35 @@ onBeforeUnmount(() => {
           </footer>
         </template>
         <template v-else>
-          <nav
-            v-if="!local"
-            class="resource-categories"
-            :aria-label="t('资源类型')"
-          >
-            <button
-              v-for="(category, index) in categories"
-              :key="category.value"
-              :data-drop-kind="category.value"
-              :disabled="blocked"
-              class="list-reveal-item"
-              :style="{
-                '--category-color': category.color,
-                ...listRevealStyle(index),
-              }"
-              :class="{ active: kind === category.value }"
-              @click="kind = category.value"
-            >
-              <component :is="category.icon" :size="17" />{{
-                t(category.label)
-              }}
-            </button>
-          </nav>
           <div
             v-if="!local && !project && kind !== 'saves'"
-            class="resource-tools list-reveal-item"
+            class="catalog-toolbar resource-tools list-reveal-item"
+            :data-filter-count="$slots.filters ? 3 : 1"
             :style="listRevealStyle(1)"
           >
-            <GlassSelect
-              :id="`resource-provider-${browserId}`"
-              v-model="platform"
-              :disabled="blocked"
-              compact
-              :options="[
-                { value: 'modrinth', label: 'Modrinth' },
-                { value: 'curseforge', label: 'CurseForge' },
-              ]"
-            />
             <label class="resource-search"
-              ><Search :size="15" /><input
+              ><Search :size="14" /><input
                 v-model="query"
                 :disabled="blocked"
                 :placeholder="t('搜索资源')"
                 :aria-label="t('搜索资源')"
-            /></label>
-            <LoaderCircle v-if="searching" class="spin" :size="16" />
+              /><LoaderCircle v-if="searching" class="spin" :size="16" />
+            </label>
+            <div class="catalog-filter-group">
+              <GlassSelect
+                :id="`resource-provider-${browserId}`"
+                v-model="platform"
+                :disabled="blocked"
+                compact
+                floating
+                :aria-label="t('来源')"
+                :options="[
+                  { value: 'modrinth', label: 'Modrinth' },
+                  { value: 'curseforge', label: 'CurseForge' },
+                ]"
+              />
+              <slot name="filters" />
+            </div>
           </div>
           <div
             v-if="worldRequired"
@@ -944,28 +957,29 @@ onBeforeUnmount(() => {
   margin: 0;
   font-size: 18px;
 }
-.resource-header small {
-  color: var(--muted);
-  font-size: 11px;
-}
-.resource-close {
-  margin-left: auto;
-}
 .resource-categories {
   display: flex;
   justify-content: space-evenly;
   gap: 10px;
-  flex-shrink: 0;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.resource-categories::-webkit-scrollbar {
+  display: none;
 }
 .resource-categories button {
   display: flex;
   align-items: center;
+  flex-shrink: 0;
   gap: 7px;
   padding: 9px 2px;
   color: var(--muted);
   background: transparent;
   border: 0;
   font-size: 12px;
+  white-space: nowrap;
   cursor: pointer;
 }
 .resource-categories button.active {
@@ -975,15 +989,14 @@ onBeforeUnmount(() => {
 .resource-categories button.active svg {
   filter: drop-shadow(0 0 7px var(--category-color));
 }
-.resource-tools,
 .resource-world {
   display: flex;
   align-items: center;
   gap: 14px;
   flex-shrink: 0;
 }
-.resource-tools :deep(.glass-select) {
-  min-width: 130px;
+.resource-tools {
+  flex-shrink: 0;
 }
 .resource-world {
   font-size: 12px;

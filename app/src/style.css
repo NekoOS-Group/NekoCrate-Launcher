@@ -2896,6 +2896,57 @@ input:read-only {
   color: var(--blue);
   text-shadow: 0 0 10px var(--glow);
 }
+/* Keep catalog search and filters stationary when switching resource types. */
+.catalog-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 390px);
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.catalog-filter-group {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.catalog-toolbar[data-filter-count="1"] {
+  grid-template-columns: minmax(0, 1fr) 120px;
+}
+.catalog-toolbar[data-filter-count="1"] > .catalog-filter-group {
+  grid-template-columns: minmax(0, 1fr);
+}
+.catalog-toolbar .catalog-filter-group > .pack-filters {
+  display: contents;
+}
+.catalog-toolbar .catalog-filter-group .source-select {
+  width: 100%;
+  min-width: 0;
+}
+.catalog-toolbar .catalog-filter-group .source-select-trigger {
+  height: 36px;
+  padding: 0 10px;
+  font-size: 12px;
+}
+.catalog-toolbar label:is(.pack-search, .resource-search) {
+  height: 36px;
+  gap: 8px;
+  border-bottom: 1px solid transparent;
+}
+.catalog-toolbar :is(.pack-search, .resource-search) input {
+  height: 100%;
+  min-width: 0;
+  padding: 0;
+  font-size: 12px;
+  border: 0;
+  outline: none;
+  box-shadow: none;
+}
+.catalog-toolbar :is(.pack-search, .resource-search):focus-within {
+  color: var(--blue);
+  border-color: var(--blue);
+}
 .source-select {
   position: relative;
   color: var(--ink);

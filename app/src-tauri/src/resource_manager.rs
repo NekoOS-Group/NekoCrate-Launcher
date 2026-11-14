@@ -9,6 +9,39 @@ use tauri_plugin_opener::OpenerExt;
 #[derive(Deserialize)]
 #[serde(remote = "Self", rename_all = "snake_case")]
 pub enum Action {
+    StoreCategories {
+        scope: nekocrate_core::resources::store::Scope,
+    },
+    StoreSearch {
+        scope: nekocrate_core::resources::store::Scope,
+        query: String,
+        offset: usize,
+    },
+    StoreVersions {
+        scope: nekocrate_core::resources::store::Scope,
+        project: String,
+    },
+    StoreServer {
+        project: String,
+    },
+    StoreDownload {
+        scope: nekocrate_core::resources::store::Scope,
+        project: String,
+        version: String,
+        path: PathBuf,
+    },
+    StoreSkins {
+        source: nekocrate_core::resources::store::skins::Source,
+        query: String,
+        cursor: String,
+    },
+    StoreSkinBytes {
+        input: nekocrate_core::resources::store::skins::Skin,
+    },
+    StoreSaveSkin {
+        input: nekocrate_core::resources::store::skins::Skin,
+        slim: bool,
+    },
     Java,
     RegisterJava {
         path: PathBuf,
@@ -138,6 +171,85 @@ pub fn handle<'a>(
     Box::pin(async move {
         let launcher = state.launcher.clone();
         match action {
+            Action::StoreCategories { scope } => Ok(json!(
+                launcher
+                    .store_categories(&scope, &tokio_util::sync::CancellationToken::new())
+                    .await?
+            )),
+            Action::StoreSearch {
+                scope,
+                query,
+                offset,
+            } => Ok(json!(
+                launcher
+                    .store_search(
+                        &scope,
+                        &query,
+                        offset,
+                        &tokio_util::sync::CancellationToken::new()
+                    )
+                    .await?
+            )),
+            Action::StoreVersions { scope, project } => Ok(json!(
+                launcher
+                    .store_versions(
+                        &scope,
+                        &project,
+                        &tokio_util::sync::CancellationToken::new()
+                    )
+                    .await?
+            )),
+            Action::StoreServer { project } => Ok(json!(
+                launcher
+                    .store_server(&project, &tokio_util::sync::CancellationToken::new())
+                    .await?
+            )),
+            Action::StoreSkins {
+                source,
+                query,
+                cursor,
+            } => Ok(json!(
+                launcher
+                    .store_skins(
+                        source,
+                        &query,
+                        &cursor,
+                        &tokio_util::sync::CancellationToken::new()
+                    )
+                    .await?
+            )),
+            Action::StoreSkinBytes { input } => {
+                use base64::Engine;
+                let bytes = launcher
+                    .store_skin_bytes(&input, &tokio_util::sync::CancellationToken::new())
+                    .await?;
+                Ok(json!(format!(
+                    "data:image/png;base64,{}",
+                    base64::engine::general_purpose::STANDARD.encode(bytes)
+                )))
+            }
+            Action::StoreSaveSkin { input, slim } => Ok(json!(
+                launcher
+                    .store_save_skin(&input, slim, &tokio_util::sync::CancellationToken::new())
+                    .await?
+            )),
+            Action::StoreDownload {
+                scope,
+                project,
+                version,
+                path,
+            } => {
+                use tauri::Emitter;
+                let (cancel, _guard) = state.job().await?;
+                let handle = app.clone();
+                let progress: EventSink = std::sync::Arc::new(move |event| {
+                    let _ = handle.emit("store-download-progress", event);
+                });
+                launcher
+                    .store_download(&scope, &project, &version, &path, &cancel, &progress)
+                    .await?;
+                Ok(Value::Null)
+            }
             Action::DownloadCachedResource {
                 scope,
                 project,

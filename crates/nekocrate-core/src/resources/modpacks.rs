@@ -114,6 +114,14 @@ fn search_parameters(
     }
 }
 fn parse_categories(value: &serde_json::Value, platform: Platform) -> Result<Vec<ModpackCategory>> {
+    parse_project_categories(value, platform, "modpack", 4471)
+}
+pub(super) fn parse_project_categories(
+    value: &serde_json::Value,
+    platform: Platform,
+    project_type: &str,
+    class_id: u64,
+) -> Result<Vec<ModpackCategory>> {
     let entries = if platform == Platform::Modrinth {
         value
     } else {
@@ -125,13 +133,13 @@ fn parse_categories(value: &serde_json::Value, platform: Platform) -> Result<Vec
         .iter()
         .filter_map(|entry| {
             let id = if platform == Platform::Modrinth {
-                if entry["project_type"] != "modpack" {
+                if entry["project_type"] != project_type {
                     return None;
                 }
                 entry["name"].as_str()?.to_owned()
             } else {
                 if entry["isClass"] == true
-                    || (entry["classId"] != 4471 && entry["parentCategoryId"] != 4471)
+                    || (entry["classId"] != class_id && entry["parentCategoryId"] != class_id)
                 {
                     return None;
                 }

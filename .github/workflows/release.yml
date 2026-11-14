@@ -9,7 +9,7 @@ on:
       tag:
         description: Existing preview tag to build
         required: true
-        default: dev0.9.9
+        default: dev0.10
         type: string
 
 permissions:

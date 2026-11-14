@@ -96,7 +96,12 @@ impl CacheKind {
                 "resource-library/shaderpacks",
                 "resource-library/datapacks",
             ],
-            Self::Partials => &["cache/objects", "cache/java", "resource-library/.imports"],
+            Self::Partials => &[
+                "cache/objects",
+                "cache/java",
+                "resource-library/.imports",
+                "cache/store-downloads",
+            ],
         }
     }
 }

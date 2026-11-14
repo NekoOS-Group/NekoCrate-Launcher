@@ -28,6 +28,7 @@ const props = defineProps<{
   platform: ResourcePlatform;
   rpc: ResourceRpc;
   compact?: boolean;
+  hideDownloads?: boolean;
 }>();
 const emit = defineEmits<{
   link: [url: string];
@@ -149,7 +150,7 @@ function link(value: string) {
         <div class="project-metadata">
           <div class="project-facts">
             <slot name="facts" />
-            <span :title="t('下载量')"
+            <span v-if="!hideDownloads" :title="t('下载量')"
               ><Download :size="12" />{{ downloads }}</span
             >
             <span

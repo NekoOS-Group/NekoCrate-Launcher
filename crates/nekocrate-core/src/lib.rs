@@ -1388,15 +1388,15 @@ impl Launcher {
         let working_directory =
             version::instance_working_directory(&game, &instance, &selected.id)?;
         let mut resolved = version::resolve(self.root(), &game, &selected.id)?;
-        if let Some(world) = world {
-            if let Some(notice) = home_dashboard::apply_world_launch(
+        if let Some(world) = world
+            && let Some(notice) = home_dashboard::apply_world_launch(
                 &mut instance,
                 &resolved,
                 &working_directory,
                 world,
-            )? {
-                sink(Event::new("launch_notice", notice));
-            }
+            )?
+        {
+            sink(Event::new("launch_notice", notice));
         }
         let settings = self.settings();
         let downloader = download::Downloader::new(self.root(), settings.clone())?
