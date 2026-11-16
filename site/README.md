@@ -11,9 +11,13 @@ npm --prefix site run dev
 
 本地地址：`http://127.0.0.1:1422/NekoCrate-Launcher/`。构建用 `npm --prefix site run build`，产物在 `site/dist`；预览用 `npm --prefix site run preview`。
 
-- `/`：下载页，按平台、架构和运行模式匹配真实发布附件。
-- `/features/`：功能与设计，使用同一套主题与交互示意。
-- `/docs/`：使用文档，支持全文检索、章节链接和复制命令。
+网站是单页应用，用 hash 切换内容，右上角可切换中文 / English：
+
+- `#download`（默认）：下载页。一个按钮内选择系统、安装版或便携版以及历史版本，匹配真实发布附件。
+- `#features`：功能与设计，使用同一套主题与交互示意。
+- `#docs/<文章>`：使用文档，支持全文检索、章节链接和复制命令。中文在 `src/docs.js`，英文在 `src/docs.en.js`。
+
+旧地址 `/features/` 与 `/docs/#<文章>` 保留为跳转页。
 
 `src/release.json` 是经过校验的公开发布快照。页面先显示快照，再尝试刷新 GitHub Releases（包含预发布），网络失败时保留可用链接。浏览器缓存有效期 30 分钟。更新快照运行 `npm --prefix site run sync-release`；CI 使用只读 `GH_TOKEN` 获取数据，密钥不会写入静态产物。
 

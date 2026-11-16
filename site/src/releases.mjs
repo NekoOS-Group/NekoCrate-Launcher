@@ -71,16 +71,16 @@ export function normalizeRelease(raw) {
   };
 }
 
+export function listReleases(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map(normalizeRelease)
+    .filter(Boolean)
+    .sort((a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt));
+}
+
 export function latestRelease(raw) {
-  if (!Array.isArray(raw)) return null;
-  return (
-    raw
-      .map(normalizeRelease)
-      .filter(Boolean)
-      .sort(
-        (a, b) => Date.parse(b.publishedAt) - Date.parse(a.publishedAt),
-      )[0] || null
-  );
+  return listReleases(raw)[0] || null;
 }
 
 export function releaseAsset(release, platform, mode) {

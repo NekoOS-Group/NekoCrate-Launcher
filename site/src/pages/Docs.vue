@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, watchEffect, onMounted, onBeforeUnmount } from "vue";
 import {
   Search,
   ArrowLeft,
@@ -10,21 +10,25 @@ import {
   Check,
   ChevronRight,
 } from "lucide-vue-next";
-import { articles } from "../docs";
+import { articles as zhArticles } from "../docs";
+import { articles as enArticles } from "../docs.en";
+import { route, href } from "../router";
+import { lang, t } from "../i18n";
 import { repositoryUrl } from "../releases.mjs";
-const base = import.meta.env.BASE_URL;
 const query = ref("");
-const current = ref("start");
+const articles = computed(() => (lang.value === "zh" ? zhArticles : enArticles));
 const copied = ref("");
 const copyIssue = ref("");
 let copyTimer;
 const article = computed(
-  () => articles.find((item) => item.id === current.value) || articles[0],
+  () =>
+    articles.value.find((item) => item.id === route.value.sub) ||
+    articles.value[0],
 );
-const position = computed(() => articles.indexOf(article.value));
+const position = computed(() => articles.value.indexOf(article.value));
 const filtered = computed(() => {
   const term = query.value.trim().toLocaleLowerCase();
-  return articles.filter(
+  return articles.value.filter(
     (item) =>
       !term ||
       [
@@ -43,11 +47,10 @@ const filtered = computed(() => {
 const groups = computed(() => [
   ...new Set(filtered.value.map((item) => item.group)),
 ]);
-function sync() {
-  const hash = location.hash.slice(1);
-  current.value = articles.some((item) => item.id === hash) ? hash : "start";
-  document.title = `${article.value.title} · 猫咪盒子使用文档`;
-}
+watchEffect(() => {
+  if (route.value.page === "docs")
+    document.title = `${article.value.title} · ${t.value.meta.docs}`;
+});
 function navigate() {
   query.value = "";
   requestAnimationFrame(() =>
@@ -58,6 +61,7 @@ function navigate() {
 }
 function keyboard(event) {
   if (
+    route.value.page === "docs" &&
     event.key === "/" &&
     !event.metaKey &&
     !event.ctrlKey &&
@@ -76,16 +80,11 @@ async function copy(code, id) {
     clearTimeout(copyTimer);
     copyTimer = setTimeout(() => (copied.value = ""), 1800);
   } catch {
-    copyIssue.value = "未能复制，请选中命令手动复制。";
+    copyIssue.value = t.value.docs.copyFailed;
   }
 }
-onMounted(() => {
-  sync();
-  window.addEventListener("hashchange", sync);
-  window.addEventListener("keydown", keyboard);
-});
+onMounted(() => window.addEventListener("keydown", keyboard));
 onBeforeUnmount(() => {
-  window.removeEventListener("hashchange", sync);
   window.removeEventListener("keydown", keyboard);
   clearTimeout(copyTimer);
 });
@@ -93,28 +92,25 @@ onBeforeUnmount(() => {
 
 <template>
   <header class="docs-heading">
-    <div>
-      <span class="eyebrow">DOCUMENTATION</span>
-      <h1>使用文档</h1>
-    </div>
+    <h1>{{ t.docs.title }}</h1>
     <label class="doc-search"
       ><Search :size="17" /><input
         v-model="query"
         type="search"
-        placeholder="搜索文档"
-        aria-label="搜索文档"
+        :placeholder="t.docs.search"
+        :aria-label="t.docs.search"
       /><kbd>/</kbd></label
     >
   </header>
   <div class="docs-layout">
-    <aside class="docs-sidebar" aria-label="文档目录">
+    <aside class="docs-sidebar" :aria-label="t.docs.toc">
       <nav>
         <section v-for="group in groups" :key="group">
           <h2>{{ group }}</h2>
           <a
             v-for="item in filtered.filter((item) => item.group === group)"
             :key="item.id"
-            :href="`#${item.id}`"
+            :href="href('docs', item.id)"
             :aria-current="article.id === item.id ? 'page' : undefined"
             @click="navigate"
             ><span>{{ item.title }}</span
@@ -122,19 +118,19 @@ onBeforeUnmount(() => {
           /></a>
         </section>
       </nav>
-      <p v-if="!filtered.length" class="no-results">没有找到相关文档。</p>
+      <p v-if="!filtered.length" class="no-results">{{ t.docs.none }}</p>
       <a
         class="docs-source"
         :href="`${repositoryUrl}/tree/neko_dev/docs`"
         target="_blank"
         rel="noopener noreferrer"
-        ><BookOpen :size="15" />仓库技术文档<ArrowUpRight :size="13"
+        ><BookOpen :size="15" />{{ t.docs.source }}<ArrowUpRight :size="13"
       /></a>
     </aside>
     <Transition name="article" mode="out-in"
       ><article :key="article.id" class="doc-article">
         <div class="breadcrumb">
-          文档 <ChevronRight :size="12" /> {{ article.group }}
+          {{ t.docs.root }} <ChevronRight :size="12" /> {{ article.group }}
         </div>
         <h2>{{ article.title }}</h2>
         <p class="doc-summary">{{ article.summary }}</p>
@@ -149,7 +145,7 @@ onBeforeUnmount(() => {
             <button
               class="icon-button"
               :aria-label="
-                copied === `${article.id}-${index}` ? '已复制' : '复制命令'
+                copied === `${article.id}-${index}` ? t.docs.copied : t.docs.copy
               "
               @click="copy(section.code, `${article.id}-${index}`)"
             >
@@ -163,7 +159,7 @@ onBeforeUnmount(() => {
           <a
             v-if="section.link"
             class="text-link"
-            :href="`${base}${section.link.href}`"
+            :href="section.link.href ? href('docs', section.link.href) : href('download')"
             >{{ section.link.label }}<ArrowRight :size="15"
           /></a>
           <a
@@ -176,21 +172,21 @@ onBeforeUnmount(() => {
           /></a>
         </section>
         <p class="copy-feedback" role="status">
-          {{ copyIssue || (copied ? "已复制" : "") }}
+          {{ copyIssue || (copied ? t.docs.copied : "") }}
         </p>
-        <nav class="doc-pagination" aria-label="相邻文档">
+        <nav class="doc-pagination" :aria-label="t.docs.siblings">
           <a
             v-if="position > 0"
-            :href="`#${articles[position - 1].id}`"
+            :href="href('docs', articles[position - 1].id)"
             @click="navigate"
             ><ArrowLeft :size="16" /><span
-              ><small>上一篇</small>{{ articles[position - 1].title }}</span
+              ><small>{{ t.docs.prev }}</small>{{ articles[position - 1].title }}</span
             ></a
           ><span v-else /><a
             v-if="position < articles.length - 1"
-            :href="`#${articles[position + 1].id}`"
+            :href="href('docs', articles[position + 1].id)"
             @click="navigate"
-            ><span><small>下一篇</small>{{ articles[position + 1].title }}</span
+            ><span><small>{{ t.docs.next }}</small>{{ articles[position + 1].title }}</span
             ><ArrowRight :size="16"
           /></a>
         </nav></article

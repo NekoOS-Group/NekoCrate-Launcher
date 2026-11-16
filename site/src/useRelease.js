@@ -1,23 +1,24 @@
 import { ref, onMounted, onBeforeUnmount } from "vue";
 import fallback from "./release.json";
-import { latestRelease, normalizeRelease, releaseApi } from "./releases.mjs";
+import { listReleases, normalizeRelease, releaseApi } from "./releases.mjs";
 
-const cacheKey = "nekocrate-site-release-v1";
-export function useRelease() {
-  const release = ref(normalizeRelease(fallback));
+const cacheKey = "nekocrate-site-releases-v2";
+const maxAge = 30 * 60 * 1000;
+const newest = (list) => Date.parse(list[0]?.publishedAt ?? 0);
+
+// Newest first. Starts with the bundled snapshot so links work offline.
+export function useReleases() {
+  const releases = ref([normalizeRelease(fallback)].filter(Boolean));
   let controller;
   onBeforeUnmount(() => controller?.abort());
   onMounted(async () => {
     try {
       const cached = JSON.parse(localStorage.getItem(cacheKey) || "null");
-      const saved = normalizeRelease(cached?.release);
-      if (
-        saved &&
-        Date.parse(saved.publishedAt) >= Date.parse(release.value.publishedAt)
-      ) {
-        release.value = saved;
+      const saved = listReleases(cached?.releases);
+      if (saved.length && newest(saved) >= newest(releases.value)) {
+        releases.value = saved;
         const age = Date.now() - cached.at;
-        if (age >= 0 && age < 30 * 60 * 1000) return;
+        if (age >= 0 && age < maxAge) return;
       }
     } catch {
       /* Storage may be unavailable; the bundled release stays usable. */
@@ -30,17 +31,13 @@ export function useRelease() {
         headers: { Accept: "application/vnd.github+json" },
       });
       if (!response.ok) return;
-      const current = latestRelease(await response.json());
-      if (
-        !current ||
-        Date.parse(current.publishedAt) < Date.parse(release.value.publishedAt)
-      )
-        return;
-      release.value = current;
+      const current = listReleases(await response.json());
+      if (!current.length || newest(current) < newest(releases.value)) return;
+      releases.value = current;
       try {
         localStorage.setItem(
           cacheKey,
-          JSON.stringify({ at: Date.now(), release: current }),
+          JSON.stringify({ at: Date.now(), releases: current }),
         );
       } catch {
         /* optional cache */
@@ -51,5 +48,5 @@ export function useRelease() {
       clearTimeout(timer);
     }
   });
-  return release;
+  return releases;
 }

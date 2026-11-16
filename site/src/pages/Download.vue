@@ -1,229 +1,246 @@
 <script setup>
-import { computed, ref } from "vue";
+import { computed, ref, watch, onMounted, onBeforeUnmount } from "vue";
 import {
   ArrowDown,
   ArrowRight,
   ArrowUpRight,
-  Box,
-  BookOpen,
-  ChevronRight,
+  ChevronDown,
   Monitor,
   Command,
   Terminal,
   Check,
-  PackageOpen,
 } from "lucide-vue-next";
 import logo from "../icon.webp";
-import { useRelease } from "../useRelease";
+import { useReleases } from "../useRelease";
 import {
   releaseAsset,
   detectPlatform,
   formatSize,
   repositoryUrl,
 } from "../releases.mjs";
+import { href } from "../router";
+import { lang, t } from "../i18n";
 
-const base = import.meta.env.BASE_URL;
-const release = useRelease();
-const platform = ref(detectPlatform(navigator.userAgent) || "windows");
-const mode = ref("installed");
+const releases = useReleases();
+const detected = detectPlatform(navigator.userAgent);
 const platforms = [
-  {
-    id: "windows",
-    label: "Windows",
-    arch: "x64",
-    icon: Monitor,
-    installed: ".exe",
-    portable: ".exe",
-  },
-  {
-    id: "macos",
-    label: "macOS",
-    arch: "Apple Silicon",
-    icon: Command,
-    installed: ".dmg",
-    portable: ".app.tar.gz",
-  },
-  {
-    id: "linux",
-    label: "Linux",
-    arch: "x64",
-    icon: Terminal,
-    installed: ".deb",
-    portable: ".elf",
-  },
+  { id: "windows", label: "Windows", arch: "x64", icon: Monitor, ext: { installed: ".exe", portable: ".exe" } },
+  { id: "macos", label: "macOS", arch: "Apple Silicon", icon: Command, ext: { installed: ".dmg", portable: ".app.tar.gz" } },
+  { id: "linux", label: "Linux", arch: "x64", icon: Terminal, ext: { installed: ".deb", portable: ".elf" } },
 ];
-const current = computed(() =>
-  platforms.find((item) => item.id === platform.value),
+const modes = ["installed", "portable"];
+
+const platform = ref(detected || "windows");
+const mode = ref("installed");
+const tag = ref(""); // empty = always the newest release
+const open = ref(false);
+const picker = ref();
+const toggle = ref();
+
+const release = computed(
+  () => releases.value.find((item) => item.tag === tag.value) || releases.value[0],
 );
-const asset = computed(() =>
-  releaseAsset(release.value, platform.value, mode.value),
-);
-const date = computed(() =>
-  new Date(release.value.publishedAt).toLocaleDateString("zh-CN", {
+const current = computed(() => platforms.find((item) => item.id === platform.value));
+const asset = computed(() => releaseAsset(release.value, platform.value, mode.value));
+const formatDate = (value) =>
+  new Date(value).toLocaleDateString(lang.value === "zh" ? "zh-CN" : "en", {
     year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }),
+    month: "short",
+    day: "numeric",
+  });
+const available = (rel) => Boolean(releaseAsset(rel, platform.value, mode.value));
+const summary = computed(() =>
+  [
+    t.value.dl[mode.value],
+    current.value.ext[mode.value],
+    release.value.tag,
+    asset.value && formatSize(asset.value.size),
+  ]
+    .filter(Boolean)
+    .join(" · "),
 );
-const note = computed(
-  () =>
-    ({
-      windows:
-        mode.value === "installed"
-          ? "安装到这台电脑，使用系统目录保存启动器设置。"
-          : "无需安装。程序旁的 .minecraft 就是你的游戏目录。",
-      macos:
-        mode.value === "installed"
-          ? "打开 DMG，将猫咪盒子启动器拖入「应用程序」。"
-          : "解压后双击 .app，游戏目录与设置保存在应用旁边。",
-      linux:
-        mode.value === "installed"
-          ? "适用于 Debian / Ubuntu，通过系统包管理器安装。"
-          : "赋予 ELF 执行权限后运行，使用程序旁的游戏目录。",
-    })[platform.value],
-);
+
+function close(focusToggle = false) {
+  open.value = false;
+  if (focusToggle) toggle.value?.focus();
+}
+function outside(event) {
+  if (open.value && !picker.value?.contains(event.target)) close();
+}
+function escape(event) {
+  if (open.value && event.key === "Escape") close(true);
+}
+onMounted(() => {
+  document.addEventListener("pointerdown", outside);
+  document.addEventListener("keydown", escape);
+});
+onBeforeUnmount(() => {
+  document.removeEventListener("pointerdown", outside);
+  document.removeEventListener("keydown", escape);
+});
+watch(releases, () => {
+  if (tag.value && !releases.value.some((item) => item.tag === tag.value))
+    tag.value = "";
+});
 </script>
 
 <template>
-  <section class="download-hero">
+  <section class="hero" aria-labelledby="hero-title">
     <div class="hero-copy">
-      <div class="eyebrow">
-        <span class="status-dot" /> MINECRAFT JAVA EDITION
-      </div>
-      <h1>
-        猫咪盒子<span>启动器<span class="title-dot">.</span></span>
+      <h1 id="hero-title">
+        {{ t.hero.title[0] }}<br />{{ t.hero.title[1] }}
       </h1>
-      <p class="hero-description">
-        用 Rust 构建的 Minecraft 启动器。<br />从游戏版本到整合包，把准备工作变简单。
-      </p>
-      <div class="hero-facts">
-        <span><Check :size="14" />开源免费</span
-        ><span><Check :size="14" />多版本管理</span
-        ><span><Check :size="14" />跨平台</span>
-      </div>
-    </div>
-    <div class="hero-art" aria-hidden="true">
-      <div class="artifact-grid"><i /><i /><i /><i /></div>
-      <img :src="logo" width="384" height="384" fetchpriority="high" alt="" />
-      <span class="artifact-label">NEKOCRATE<span>LAUNCHER</span></span>
-      <div class="artifact-coordinates">[ 0, 64, 0 ]</div>
-    </div>
-  </section>
+      <p class="hero-lede">{{ t.hero.lede }}</p>
 
-  <section class="download-panel glass" aria-labelledby="download-heading">
-    <div class="download-heading">
-      <div>
-        <span class="eyebrow small">GET NEKOCRATE</span>
-        <h2 id="download-heading">下载启动器</h2>
-      </div>
-      <a
-        :href="release.url"
-        class="release-link"
-        target="_blank"
-        rel="noopener noreferrer"
-        ><span class="version">{{ release.tag }}</span
-        ><span class="release-badge">{{
-          release.prerelease ? "开发版" : "正式版"
-        }}</span
-        ><span class="release-date">{{ date }}</span
-        ><ArrowUpRight :size="15"
-      /></a>
-    </div>
-    <div class="download-content">
-      <div class="platform-section">
-        <div class="platforms" role="group" aria-label="选择操作系统">
-          <button
-            v-for="item in platforms"
-            :key="item.id"
-            :aria-pressed="platform === item.id"
-            @click="platform = item.id"
+      <div ref="picker" class="download-picker">
+        <div class="download-split">
+          <a
+            v-if="asset"
+            class="download-main"
+            :href="asset.url"
+            :aria-label="`${t.dl.download(current.label)}, ${summary}`"
           >
-            <component :is="item.icon" :size="23" /><span
-              >{{ item.label }}<small>{{ item.arch }}</small></span
-            ><i />
+            <ArrowDown :size="22" />
+            <span class="download-text">
+              <strong>{{ t.dl.download(current.label) }}</strong>
+              <small>{{ summary }}</small>
+            </span>
+          </a>
+          <a
+            v-else
+            class="download-main"
+            :href="release.url"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <ArrowUpRight :size="22" />
+            <span class="download-text">
+              <strong>{{ t.dl.viewRelease }}</strong>
+              <small>{{ t.dl.missing }}</small>
+            </span>
+          </a>
+          <button
+            ref="toggle"
+            class="download-toggle"
+            :aria-expanded="open"
+            aria-controls="download-options"
+            :aria-label="t.dl.options"
+            :title="t.dl.options"
+            @click="open = !open"
+          >
+            <ChevronDown :size="22" />
           </button>
         </div>
-        <div class="download-mode-row">
-          <div class="segmented" role="group" aria-label="运行方式">
-            <button
-              :aria-pressed="mode === 'installed'"
-              @click="mode = 'installed'"
-            >
-              <Box :size="15" />安装版</button
-            ><button
-              :aria-pressed="mode === 'portable'"
-              @click="mode = 'portable'"
-            >
-              <PackageOpen :size="15" />便携版
-            </button>
+
+        <Transition name="drop">
+          <div
+            v-show="open"
+            id="download-options"
+            class="download-options crate"
+          >
+            <fieldset>
+              <legend>{{ t.dl.system }}</legend>
+              <div class="option-row">
+                <button
+                  v-for="item in platforms"
+                  :key="item.id"
+                  :aria-pressed="platform === item.id"
+                  @click="platform = item.id"
+                >
+                  <component :is="item.icon" :size="18" />
+                  <span
+                    >{{ item.label }}<small>{{ item.arch }}</small></span
+                  >
+                </button>
+              </div>
+            </fieldset>
+            <fieldset>
+              <legend>
+                {{ t.dl.mode }}
+                <a :href="href('docs', 'portable')" @click="close()">{{
+                  t.dl.choose
+                }}</a>
+              </legend>
+              <div class="option-row">
+                <button
+                  v-for="item in modes"
+                  :key="item"
+                  :aria-pressed="mode === item"
+                  @click="mode = item"
+                >
+                  <span
+                    >{{ t.dl[item] }}
+                    <code>{{ current.ext[item] }}</code
+                    ><small>{{ t.dl.notes[platform][item] }}</small></span
+                  >
+                </button>
+              </div>
+            </fieldset>
+            <fieldset>
+              <legend>{{ t.dl.version }}</legend>
+              <ul class="version-list">
+                <li v-for="(item, index) in releases" :key="item.tag">
+                  <button
+                    :aria-pressed="release === item"
+                    @click="tag = index === 0 ? '' : item.tag"
+                  >
+                    <span class="version-check"
+                      ><Check v-if="release === item" :size="15"
+                    /></span>
+                    <code>{{ item.tag }}</code>
+                    <span v-if="index === 0" class="version-badge">{{
+                      t.dl.latest
+                    }}</span>
+                    <span class="version-kind">{{
+                      item.prerelease ? t.dl.preview : t.dl.stable
+                    }}</span>
+                    <span v-if="!available(item)" class="version-missing">{{
+                      t.dl.missing
+                    }}</span>
+                    <time :datetime="item.publishedAt">{{
+                      formatDate(item.publishedAt)
+                    }}</time>
+                  </button>
+                </li>
+              </ul>
+            </fieldset>
+            <footer class="options-foot">
+              <a :href="release.url" target="_blank" rel="noopener noreferrer"
+                >{{ t.dl.viewRelease }} {{ release.tag
+                }}<ArrowUpRight :size="13"
+              /></a>
+              <a
+                :href="`${repositoryUrl}/releases`"
+                target="_blank"
+                rel="noopener noreferrer"
+                >{{ t.dl.history }}<ArrowUpRight :size="13"
+              /></a>
+            </footer>
           </div>
-          <a :href="`${base}docs/#portable`" class="quiet-link"
-            >如何选择 <ChevronRight :size="13"
-          /></a>
-        </div>
+        </Transition>
       </div>
-      <div class="download-action">
-        <a
-          v-if="asset"
-          class="primary-button"
-          :href="asset.url"
-          :aria-label="`下载 ${current.label} ${current.arch} ${mode === 'installed' ? '安装版' : '便携版'}`"
-          ><ArrowDown :size="21" /><span>下载 {{ current.label }}</span
-          ><span class="download-extension">{{ current[mode] }}</span></a
-        >
-        <a v-else class="primary-button" :href="release.url"
-          >查看可用构建 <ArrowUpRight :size="18"
-        /></a>
-        <p class="download-meta">
-          <template v-if="asset"
-            >{{ formatSize(asset.size) }}<span>·</span>{{ current.arch
-            }}<span>·</span>GitHub 官方发布仓库</template
-          ><template v-else>当前发布尚未提供此构建</template>
-        </p>
-        <Transition name="text-change" mode="out-in"
-          ><p :key="`${platform}-${mode}`" class="download-note">
-            {{ note }}
-          </p></Transition
-        >
-      </div>
+
+      <p class="download-note">
+        {{ detected ? asset && t.dl.notes[platform][mode] : t.hero.noMatch }}
+      </p>
     </div>
-    <div class="download-bottom">
-      <span
-        ><span class="status-dot" />{{
-          release.prerelease
-            ? "持续开发中，欢迎反馈使用体验。"
-            : "下载来自项目的 GitHub Releases。"
-        }}</span
-      ><a :href="`${base}docs/#install`"
-        >系统要求与安装帮助 <ArrowUpRight :size="14"
-      /></a>
+    <div class="hero-art" aria-hidden="true">
+      <img :src="logo" width="384" height="384" fetchpriority="high" alt="" />
+      <span class="hero-shadow" />
     </div>
   </section>
 
-  <section class="explore-links" aria-label="继续了解">
-    <a :href="`${base}features/`"
-      ><Box :size="23" />
-      <div>
-        <h2>先看看它能做什么</h2>
-        <p>拖放资源、整理版本，定制你的启动界面。</p>
-      </div>
-      <ArrowRight :size="20"
-    /></a>
-    <a :href="`${base}docs/`"
-      ><BookOpen :size="23" />
-      <div>
-        <h2>从第一次启动开始</h2>
-        <p>安装、关联目录、登录，以及常见问题。</p>
-      </div>
-      <ArrowRight :size="20"
-    /></a>
-  </section>
-  <div class="download-history">
-    <a
-      :href="`${repositoryUrl}/releases`"
-      target="_blank"
-      rel="noopener noreferrer"
-      >历史版本与完整更新记录 <ArrowUpRight :size="13"
-    /></a>
-  </div>
+  <nav class="next-links" :aria-label="t.next.label">
+    <a :href="href('features')">
+      <strong>{{ t.next.features[0] }}</strong>
+      <span>{{ t.next.features[1] }}</span>
+      <ArrowRight :size="20" />
+    </a>
+    <a :href="href('docs', 'install')">
+      <strong>{{ t.next.docs[0] }}</strong>
+      <span>{{ t.next.docs[1] }}</span>
+      <ArrowRight :size="20" />
+    </a>
+  </nav>
+  <p class="source-note">{{ t.dl.source }}</p>
 </template>
