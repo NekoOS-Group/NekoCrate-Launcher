@@ -146,42 +146,14 @@ test("dragged controls take priority and neighbours find nonoverlapping position
       }
   }
 });
-test("legacy combined account/tools layouts split in place without resetting other controls", () => {
-  const area = { width: 900, height: 600 },
-    sizes = homeSizes(area, 4);
+test("retired combined account/tools layouts are not converted", () => {
   const positions = {
     account: { x: 0.5, y: 0.25 },
     instances: { x: 0.8, y: 1 },
     themes: { x: 0, y: 1 },
     launch: { x: 1, y: 0.8 },
   };
-  const parsed = readHomeLayout(JSON.stringify({ version: 1, positions }));
-  assert.deepEqual(parsed, positions);
-  const rects = expandHomeLayout(parsed, area, sizes);
-  assert.equal(rects.account.x, 12 + (900 - 380 - 24) * 0.5);
-  assert.equal(rects.tools.x, rects.account.x + rects.account.width + 12);
-  assert.equal(rects.tools.y, rects.account.y);
-  const saved = normalizeHomeLayout(rects, area);
-  const reloaded = expandHomeLayout(
-    readHomeLayout(JSON.stringify({ version: 1, positions: saved })),
-    area,
-    sizes,
-  );
-  for (const id of homeGroups) {
-    assert.ok(Math.abs(reloaded[id].x - rects[id].x) < 0.01);
-    assert.ok(Math.abs(reloaded[id].y - rects[id].y) < 0.01);
-    assert.equal(reloaded[id].width, rects[id].width);
-    assert.equal(reloaded[id].height, rects[id].height);
-  }
-  assert.deepEqual(saved.instances, positions.instances);
-  assert.deepEqual(saved.themes, positions.themes);
-  assert.deepEqual(saved.launch, positions.launch);
-  assert.equal(
-    readHomeLayout(
-      JSON.stringify({ version: 1, positions: { ...positions, tools: {} } }),
-    ),
-    null,
-  );
+  assert.equal(readHomeLayout(JSON.stringify({ version: 1, positions })), null);
 });
 test("alignment snaps to edges and other groups without dragging distant controls", () => {
   const area = { width: 900, height: 600 };

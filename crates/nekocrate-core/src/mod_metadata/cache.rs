@@ -1,12 +1,12 @@
-//! In-memory display summaries, invalidated by the same file identity used for
+//! Shared parsed descriptors, invalidated by the same file identity used for
 //! download receipts. Cache hits inspect metadata, never read the archive again.
-use super::{ModIdentity, mod_metadata};
+use super::{Metadata, load};
 use crate::verification::Fingerprint;
 use std::{
     collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex, OnceLock},
 };
 
 const MAX_ENTRIES: usize = 2048;
@@ -14,7 +14,7 @@ const MAX_BYTES: usize = 8 * 1024 * 1024;
 
 struct Entry {
     fingerprint: Fingerprint,
-    value: ModIdentity,
+    value: Arc<Metadata>,
     used: u64,
     bytes: usize,
 }
@@ -25,16 +25,14 @@ struct Entries {
     bytes: usize,
 }
 #[derive(Default)]
-pub(crate) struct SummaryCache {
+struct Cache {
     entries: Mutex<Entries>,
-    #[cfg(test)]
-    pub reads: std::sync::atomic::AtomicUsize,
 }
 fn fingerprint(path: &Path) -> Option<Fingerprint> {
     Fingerprint::read_at(path, &fs::metadata(path).ok()?)
 }
-impl SummaryCache {
-    pub(super) fn get(&self, path: &Path) -> Option<ModIdentity> {
+impl Cache {
+    fn get(&self, path: &Path) -> Option<Arc<Metadata>> {
         let stamp = fingerprint(path)?;
         let mut entries = self.entries.lock().unwrap();
         entries.clock += 1;
@@ -48,23 +46,16 @@ impl SummaryCache {
         entries.bytes -= old.bytes;
         None
     }
-    pub(crate) fn read(&self, path: &Path) -> ModIdentity {
+    fn read(&self, path: &Path) -> Arc<Metadata> {
         if let Some(value) = self.get(path) {
             return value;
         }
         let before = fingerprint(path);
-        #[cfg(test)]
-        self.reads
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let value = mod_metadata(path).unwrap_or_default();
+        let value = Arc::new(load(path));
         if let Some(before) = before
             && fingerprint(path).as_ref() == Some(&before)
         {
-            let bytes = path.as_os_str().len()
-                + value.name.as_ref().map_or(0, String::len)
-                + value.version.as_ref().map_or(0, String::len)
-                + value.ids.iter().map(String::len).sum::<usize>()
-                + 128;
+            let bytes = path.as_os_str().len() + value.bytes + 128;
             if bytes <= MAX_BYTES {
                 let mut entries = self.entries.lock().unwrap();
                 if let Some(old) = entries.files.remove(path) {
@@ -97,4 +88,15 @@ impl SummaryCache {
         }
         value
     }
+}
+
+fn cache() -> &'static Cache {
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    CACHE.get_or_init(Cache::default)
+}
+pub(crate) fn get(path: &Path) -> Option<Arc<Metadata>> {
+    cache().get(path)
+}
+pub(crate) fn read(path: &Path) -> Arc<Metadata> {
+    cache().read(path)
 }

@@ -222,12 +222,6 @@ enum Request {
         inputs: Vec<nekocrate_core::resources::LocalImport>,
         world: Option<String>,
     },
-    CopyResource {
-        source: nekocrate_core::resources::ResourceCopySource,
-        id: String,
-        version: String,
-        world: Option<String>,
-    },
     CopyResources {
         sources: Vec<nekocrate_core::resources::ResourceCopySource>,
         id: String,
@@ -241,9 +235,6 @@ enum Request {
         sources: Vec<nekocrate_core::resources::ResourceCopySource>,
         #[serde(default)]
         confirmed: bool,
-    },
-    ExportResource {
-        source: nekocrate_core::resources::ResourceCopySource,
     },
     ResourcePlans {
         id: String,
@@ -264,9 +255,6 @@ enum Request {
         value: String,
     },
     Versions,
-    FabricVersions {
-        game_version: String,
-    },
     LoaderVersions {
         game_version: String,
         kind: String,
@@ -275,11 +263,6 @@ enum Request {
         id: String,
         game_version: String,
         loader: ModLoader,
-    },
-    AddFabricVersion {
-        id: String,
-        game_version: String,
-        loader_version: String,
     },
     PreviewModpack {
         path: PathBuf,
@@ -334,9 +317,6 @@ enum Request {
         icon: Option<u8>,
         #[serde(default)]
         launch: Option<nekocrate_core::launch_options::LaunchOptions>,
-    },
-    Clone {
-        id: String,
     },
     Delete {
         id: String,
@@ -444,12 +424,6 @@ enum Request {
         id: String,
         version: String,
     },
-    VersionStorage {
-        id: String,
-        version: String,
-        #[serde(default)]
-        relative: String,
-    },
     Install {
         id: String,
         #[serde(default)]
@@ -548,12 +522,8 @@ fn dispatch<'a>(
         // Log operation names, never account/proxy/API-key request payloads.
         let diagnostic_operation = match &request {
             Request::Versions => Some("versions"),
-            Request::LoaderVersions { .. } | Request::FabricVersions { .. } => {
-                Some("loader_versions")
-            }
-            Request::AddLoaderVersion { .. } | Request::AddFabricVersion { .. } => {
-                Some("add_loader_version")
-            }
+            Request::LoaderVersions { .. } => Some("loader_versions"),
+            Request::AddLoaderVersion { .. } => Some("add_loader_version"),
             Request::Install { .. } => Some("install"),
             Request::DownloadDeclaredMod { .. } => Some("download_mod"),
             Request::Launch { .. } => Some("launch"),
@@ -688,16 +658,6 @@ fn dispatch<'a>(
                 let launcher=launcher.clone();
                 blocking::json(move || launcher.prepare_local_resources(&id,&version,&inputs,world.as_deref(),&cancel)).await??
             },
-            Request::CopyResource{source,id,version,world}=>{
-                let (cancel,_guard)=state.job().await?;
-                let worker=launcher.clone();
-                let token=cancel.clone();
-                let plan=blocking::run(move || worker.prepare_resource_copies_to(&[source],&id,&version,world.as_deref(),&token)).await??;
-                if let Some(plan)=plan {
-                    launcher.install_resources(&plan.target.instance,&plan.target.version,&plan.id,&cancel,&sink).await?;
-                    json!(true)
-                } else { json!(false) }
-            },
             Request::CopyResources{sources,id,version,world}=>{
                 let (cancel,_guard)=state.job().await?;
                 let worker=launcher.clone(); let token=cancel.clone();
@@ -715,12 +675,6 @@ fn dispatch<'a>(
                 let window=app.get_webview_window("main").ok_or_else(|| anyhow::anyhow!("启动器窗口已关闭"))?;
                 json!(file_drag::start(window,paths.into_iter().collect()).await?)
             },
-            Request::ExportResource{source}=>{
-                let worker=launcher.clone();
-                let path=blocking::run(move || worker.resource_export_path(&source)).await??;
-                let window=app.get_webview_window("main").ok_or_else(|| anyhow::anyhow!("启动器窗口已关闭"))?;
-                json!(file_drag::start(window,vec![path]).await?)
-            },
             Request::ResourcePlans{id,version}=>{
                 let launcher=launcher.clone();
                 blocking::json(move || launcher.resource_plans(&id,&version)).await??
@@ -733,15 +687,10 @@ fn dispatch<'a>(
                 json!(true)
             },
             Request::Versions=>{let (cancel,_guard)=state.job().await?;json!(launcher.versions(&cancel).await?)},
-            Request::FabricVersions{game_version}=>json!(launcher.fabric_versions(&game_version,&CancellationToken::new()).await?),
             Request::LoaderVersions{game_version,kind}=>json!(launcher.loader_versions(&game_version,&kind,&CancellationToken::new()).await?),
             Request::AddLoaderVersion{id,game_version,loader}=>{
                 let (cancel,_guard)=state.job().await?;
                 json!(launcher.add_loader_version(&id,&game_version,loader,&cancel).await?)
-            },
-            Request::AddFabricVersion{id,game_version,loader_version}=>{
-                let (cancel,_guard)=state.job().await?;
-                json!(launcher.add_fabric_version(&id,&game_version,&loader_version,&cancel,&sink).await?)
             },
             Request::PreviewModpack{path}=>{
                 let launcher = launcher.clone();
@@ -780,7 +729,6 @@ fn dispatch<'a>(
                 }).await??
             },
             Request::Update{id,name,memory_mb,memory_mode,java_path,icon,launch}=>{launcher.update_instance_options(&id,&name,nekocrate_core::memory::MemoryConfig{mode:memory_mode,custom_mb:memory_mb},java_path,icon,launch)?;json!(true)},
-            Request::Clone{id}=>{let (_cancel,_guard)=state.job().await?;json!(launcher.clone_instance(&id).await?)},
             Request::Delete{id}=>{
                 let (_cancel,_guard)=state.job().await?;
                 let launcher = launcher.clone();
@@ -876,10 +824,6 @@ fn dispatch<'a>(
             Request::VersionMetadata{id,version}=>{
                 let launcher = launcher.clone();
                 blocking::json(move || launcher.version_metadata(&id,&version)).await??
-            },
-            Request::VersionStorage{id,version,relative}=>{
-                let launcher = launcher.clone();
-                blocking::json(move || launcher.version_storage(&id,&version,&relative)).await??
             },
             Request::Install{id,repair,version}=>{
                 let (cancel,_guard)=state.job().await?;

@@ -112,6 +112,7 @@ fn read_jar(
     budget: &mut u64,
     result: &mut Vec<FabricMod>,
     cancel: &CancellationToken,
+    cached: Option<&crate::mod_metadata::Metadata>,
 ) -> Result<()> {
     anyhow::ensure!(
         depth <= 8 && result.len() < 2048,
@@ -119,19 +120,13 @@ fn read_jar(
     );
     anyhow::ensure!(!cancel.is_cancelled(), "操作已取消");
     let mut zip = zip::ZipArchive::new(input)?;
-    let metadata: Value = {
-        let Ok(mut file) = zip.by_name("fabric.mod.json") else {
-            return Ok(());
-        };
-        anyhow::ensure!(file.size() <= 1024 * 1024, "Mod 元数据过大");
-        let mut bytes = Vec::new();
-        file.read_to_end(&mut bytes)?;
-        crate::fabric_metadata::parse(&bytes)?
+    let Some(metadata) = crate::mod_metadata::document(&mut zip, "fabric.mod.json", cached)? else {
+        return Ok(());
     };
     if metadata["environment"] == "server" {
         return Ok(());
     }
-    result.push(serde_json::from_value(metadata.clone())?);
+    result.push(FabricMod::deserialize(metadata.as_ref())?);
     for nested in metadata["jars"].as_array().into_iter().flatten() {
         let name = nested["file"].as_str().context("嵌套 Mod 路径无效")?;
         storage::safe_relative(name)?;
@@ -143,7 +138,7 @@ fn read_jar(
                 .context("嵌套 Mod 累计读取超过 1 GiB 限制")?;
             NestedJar::read(&mut file, size, cancel)?
         };
-        read_jar(archive.reader(), depth + 1, budget, result, cancel)?;
+        read_jar(archive.reader(), depth + 1, budget, result, cancel, None)?;
     }
     Ok(())
 }
@@ -152,12 +147,14 @@ impl<T: Read + Seek> ReadSeek for T {}
 pub(crate) fn metadata(path: &Path, cancel: &CancellationToken) -> Result<Vec<FabricMod>> {
     let mut result = Vec::new();
     let mut budget = NESTED_TOTAL_LIMIT;
+    let cached = crate::mod_metadata::read(path);
     read_jar(
         &mut fs::File::open(path)?,
         0,
         &mut budget,
         &mut result,
         cancel,
+        Some(&cached),
     )
     .with_context(|| {
         format!(

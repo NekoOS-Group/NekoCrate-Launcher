@@ -327,7 +327,6 @@ impl Launcher {
                 history: None,
             },
             None,
-            true,
             &downloader,
             cancel,
             sink,
@@ -780,8 +779,7 @@ mod tests {
         );
         let mut legacy = serde_json::to_value(launcher.snapshot().database).unwrap();
         legacy.as_object_mut().unwrap().remove("guest_skin");
-        let legacy: crate::model::Database = serde_json::from_value(legacy).unwrap();
-        assert_eq!(legacy.guest_skin, "builtin:steve");
+        assert!(serde_json::from_value::<crate::model::Database>(legacy).is_err());
     }
     #[test]
     fn cache_inventory_includes_installed_java_and_only_clears_unfinished_downloads() {

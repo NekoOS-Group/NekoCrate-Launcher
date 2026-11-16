@@ -4,8 +4,8 @@ const minimumRowHeight = 28;
 const overscan = 3;
 
 /** Variable-height window; preserve the reader's anchor when rows wrap or expire. */
-export class LogViewport {
-  private rows: readonly LogRow[] = [];
+export class LogViewport<Row extends { id: number } = LogRow> {
+  private rows: readonly Row[] = [];
   private offsets = [0];
   private heights = new Map<number, number>();
   private indices = new Map<number, number>();
@@ -27,7 +27,7 @@ export class LogViewport {
   private get maxTop() {
     return Math.max(0, this.offsets.at(-1)! - this.height);
   }
-  private rebuild(next: readonly LogRow[] = this.rows) {
+  private rebuild(next: readonly Row[] = this.rows) {
     const index = this.indexAt(this.top);
     const anchor = this.rows[index]?.id;
     const within = this.top - this.offsets[index];
@@ -55,12 +55,13 @@ export class LogViewport {
           ),
         );
   }
-  setRows(rows: readonly LogRow[], reset = false) {
+  setRows(rows: readonly Row[], reset = false, structureChanged = false) {
     if (reset) this.following = true;
     const previousLength = this.rows.length;
     // Stream appends keep existing offsets and measurements; no history scan.
     if (
       !reset &&
+      !structureChanged &&
       previousLength > 0 &&
       rows.length >= previousLength &&
       rows[0] === this.rows[0] &&

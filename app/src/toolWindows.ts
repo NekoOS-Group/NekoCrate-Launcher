@@ -1,9 +1,4 @@
-import { shallowRef, type InjectionKey, type Ref } from "vue";
-
-export const windowControlsKey: InjectionKey<{
-  expanded: Ref<boolean>;
-  toggle: () => void;
-}> = Symbol("window-controls");
+import { shallowRef } from "vue";
 
 type Tool = { id: string; focus: () => void; close: () => void };
 const windows: Tool[] = [];

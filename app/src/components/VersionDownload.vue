@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import WindowControls from "./WindowControls.vue";
 import { computed, ref } from "vue";
 import {
   Archive,
@@ -149,7 +148,6 @@ const selectionColor = computed(() =>
         @update:location="$emit('update:location', $event)"
         @browse="$emit('browse')"
       />
-      <WindowControls />
       <button
         type="button"
         class="icon-button"

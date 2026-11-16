@@ -24,7 +24,7 @@ export function readHiddenHomeGroups(
     if (data?.version === 1 && Array.isArray(data.hiddenGroups))
       return removableHomeGroups.filter((id) => data.hiddenGroups.includes(id));
   } catch {
-    /* Older layouts keep the original controls visible. */
+    /* Invalid or absent preferences use the default visibility. */
   }
   return [];
 }
@@ -34,10 +34,6 @@ export type Rect = Point & { width: number; height: number };
 export type Area = { width: number; height: number };
 export type HomePositions = Record<HomeGroup, Point> &
   Partial<Record<HomeWidget, Point>>;
-// Layouts saved before tools became movable keep their original account anchor.
-export type SavedHomePositions = Omit<HomePositions, "tools"> & {
-  tools?: Point;
-};
 export type HomeRects = Record<HomeGroup, Rect> &
   Partial<Record<HomeWidget, Rect>>;
 export type HomeOrientation = "horizontal" | "vertical";
@@ -440,7 +436,7 @@ export function normalizeHomeLayout(
   ) as HomePositions;
 }
 export function expandHomeLayout(
-  saved: SavedHomePositions | null,
+  saved: HomePositions | null,
   area: Area,
   sizes: Record<HomeItem, Area>,
   widgets: HomeWidget[] = [],
@@ -449,24 +445,15 @@ export function expandHomeLayout(
 ): HomeRects {
   if (!saved) return defaultHomeLayout(area, sizes, widgets);
   const defaults = defaultHomeLayout(area, sizes, widgets);
-  const expand = (
-    id: HomeItem,
-    position: Point,
-    width = sizes[id].width,
-  ): Rect => ({
+  const expand = (id: HomeItem, position: Point): Rect => ({
     ...sizes[id],
-    x: margin + position.x * Math.max(0, area.width - width - margin * 2),
+    x:
+      margin +
+      position.x * Math.max(0, area.width - sizes[id].width - margin * 2),
     y:
       margin +
       position.y * Math.max(0, area.height - sizes[id].height - margin * 2),
   });
-  const account = expand(
-    "account",
-    saved.account,
-    saved.tools
-      ? sizes.account.width
-      : sizes.account.width + gap + sizes.tools.width,
-  );
   return attachHomePairs(
     {
       ...Object.fromEntries(
@@ -475,10 +462,8 @@ export function expandHomeLayout(
           saved[id] ? expand(id, saved[id]!) : defaults[id],
         ]),
       ),
-      account,
-      tools: saved.tools
-        ? expand("tools", saved.tools)
-        : { ...sizes.tools, x: account.x + account.width + gap, y: account.y },
+      account: expand("account", saved.account),
+      tools: expand("tools", saved.tools),
       instances: expand("instances", saved.instances),
       themes: expand("themes", saved.themes),
       launch: expand("launch", saved.launch),
@@ -488,15 +473,13 @@ export function expandHomeLayout(
     hidden,
   );
 }
-export function readHomeLayout(
-  value: string | null,
-): SavedHomePositions | null {
+export function readHomeLayout(value: string | null): HomePositions | null {
   try {
     const data = JSON.parse(value || "null");
     const groups = [
       ...homeGroups,
       ...homeWidgets.filter((id) => data?.positions?.[id] !== undefined),
-    ].filter((id) => id !== "tools" || data?.positions?.tools !== undefined);
+    ];
     if (
       data?.version !== 1 ||
       !groups.every((id) =>
@@ -512,12 +495,11 @@ export function readHomeLayout(
         id,
         { x: data.positions[id].x, y: data.positions[id].y },
       ]),
-    ) as SavedHomePositions;
+    ) as HomePositions;
   } catch {
     return null;
   }
 }
-/** Missing directions belong to older layouts and retain the horizontal dock. */
 export function readHomeOrientations(value: string | null): HomeOrientations {
   try {
     const data = JSON.parse(value || "null");

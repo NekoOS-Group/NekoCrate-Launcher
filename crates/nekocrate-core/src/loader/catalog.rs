@@ -229,11 +229,11 @@ mod tests {
             temp.path(),
             Settings {
                 download_source: "official".into(),
-                retries: 0,
                 ..Default::default()
             },
         )
-        .unwrap();
+        .unwrap()
+        .with_retries(0);
         let cases = [
             ("1.20.1", "fabric", "0."),
             ("1.20.1", "forge", "47."),
@@ -303,7 +303,6 @@ mod tests {
         let settings = Settings {
             proxy_mode: "none".into(),
             download_source: "official".into(),
-            retries: 0,
             ..Default::default()
         };
         let downloader = Downloader::new(temp.path(), settings).unwrap();

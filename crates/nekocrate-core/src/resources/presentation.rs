@@ -479,12 +479,6 @@ mod tests {
         assert_eq!(cf.gallery.len(), 1);
         assert!(cf.license_url.is_none());
         assert!(cf.project.icon_url.is_some());
-        // Existing catalog caches from before icons remain readable.
-        let old: Project = serde_json::from_value(
-            json!({"id":"cat", "name":"Cat", "description":"", "downloads":0, "url":""}),
-        )
-        .unwrap();
-        assert!(old.icon_url.is_none());
     }
 
     #[test]

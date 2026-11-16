@@ -151,9 +151,7 @@ impl Launcher {
             .await?;
         sink(Event::workflow("mod_files", "下载与校验 Mod"));
         let files_sink = Event::scoped(&sink, id, Some("mod_files"));
-        downloader
-            .import_cached_files(self.root(), std::slice::from_ref(&spec), cancel)
-            .await?;
+
         downloader
             .batch(vec![spec.clone()], cancel, &files_sink)
             .await?;

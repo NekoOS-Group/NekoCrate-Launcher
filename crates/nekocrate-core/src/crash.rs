@@ -30,7 +30,6 @@ pub struct CrashReport {
     pub findings: Vec<Finding>,
     #[serde(default)]
     pub file: Option<ReportFile>,
-    #[serde(default)]
     pub repairable: bool,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -450,13 +449,7 @@ impl Launcher {
                         .and_then(|path| tail(&path).ok())
                 })
                 .unwrap_or_default();
-            Ok(audit::inspect(
-                self.root(),
-                &game,
-                &report.version,
-                &working,
-                &text,
-            ))
+            Ok(audit::inspect(&game, &report.version, &working, &text))
         };
         match run() {
             Ok(findings) => {

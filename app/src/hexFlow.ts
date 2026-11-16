@@ -1,8 +1,4 @@
 import type { FlowGraph } from "./flowGraph.ts";
-export { createHexGraph } from "./flowGraph.ts";
-// Compatibility names for the existing simulation API; it now accepts every tiling.
-export type HexGraph = FlowGraph;
-
 export const HEX_STEP_SECONDS = 0.3;
 export const HEX_HOLD_PROBABILITY = 0.1;
 export const HEX_EDGE_CAPACITY = 4;
@@ -27,7 +23,7 @@ function regionScratch(size: number): RegionScratch {
   };
 }
 export type HexFlow = {
-  graph: HexGraph;
+  graph: FlowGraph;
   random: () => number;
   time: number;
   occupancy: Uint8Array;
@@ -52,7 +48,7 @@ export function restingWidth() {
 
 /** Hold 10%; distribute the rest equally among incident edges (22.5% on hexes). */
 export function sampleHexTransition(
-  graph: HexGraph,
+  graph: FlowGraph,
   edge: number,
   random: () => number,
 ): number {
@@ -71,7 +67,7 @@ export function sampleHexTransition(
  * not a closed region. Tile boundaries themselves never act as walls.
  */
 export function findEnclosedHexRegions(
-  graph: HexGraph,
+  graph: FlowGraph,
   blocked: Uint8Array,
   scratch = regionScratch(graph.cells.length),
 ): number[][] {
@@ -111,7 +107,7 @@ export function findEnclosedHexRegions(
  * explicit diffusion nonnegative even when advance receives a long frame.
  */
 export function diffuseHexDye(
-  graph: HexGraph,
+  graph: FlowGraph,
   dye: Float32Array,
   blocked: Uint8Array,
   seconds: number,
@@ -203,7 +199,7 @@ function advanceDye(flow: HexFlow, dt: number) {
   for (let i = 0; i < flow.dye.length; i++) flow.dye[i] *= fade;
 }
 
-export function createHexFlow(graph: HexGraph, random = Math.random): HexFlow {
+export function createHexFlow(graph: FlowGraph, random = Math.random): HexFlow {
   const size = graph.edges.length;
   const flow: HexFlow = {
     graph,

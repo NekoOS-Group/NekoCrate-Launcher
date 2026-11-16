@@ -1,10 +1,5 @@
 import type { DownloadFile, LauncherEvent, WorkflowState } from "./types";
-import {
-  createFileOrder,
-  indexFile,
-  finishFileOrder,
-  fileWindowBounds,
-} from "./fileOrder.ts";
+import { createFileOrder, indexFile, finishFileOrder } from "./fileOrder.ts";
 export { fileRowHeight } from "./fileOrder.ts";
 
 export function createWorkflow(
@@ -271,14 +266,6 @@ export function setWorkflowPaused(workflow: WorkflowState, paused: boolean) {
   }
 }
 
-export function fileWindow(files: readonly DownloadFile[], scrollTop: number) {
-  const { start, height } = fileWindowBounds(files.length, scrollTop);
-  return {
-    start,
-    items: files.slice(start, start + 10),
-    height,
-  };
-}
 export function filePercent(file: DownloadFile) {
   return file.status === "done"
     ? 100

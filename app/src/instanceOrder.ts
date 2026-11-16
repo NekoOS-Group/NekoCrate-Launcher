@@ -20,18 +20,6 @@ export function moveInstanceBefore<T extends { id: string }>(
   return remaining;
 }
 
-export function instanceDropTarget(
-  positions: readonly { id: string; left: number; width: number }[],
-  draggedId: string,
-  clientX: number,
-): string | null {
-  return (
-    positions.find(
-      (item) => item.id !== draggedId && clientX < item.left + item.width / 2,
-    )?.id ?? null
-  );
-}
-
 export const VISIBLE_INSTANCES = 9;
 /** The overflow arrow occupies one of the nine dock slots. */
 export function instanceVisibleLimit(total: number) {

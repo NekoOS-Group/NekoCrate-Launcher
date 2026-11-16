@@ -53,23 +53,6 @@ pub struct VersionMetadata {
     pub issue: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct VersionStorageEntry {
-    pub name: String,
-    pub relative: String,
-    pub directory: bool,
-    pub symlink: bool,
-    pub size: u64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct VersionStorage {
-    pub directory: PathBuf,
-    pub relative: String,
-    pub exists: bool,
-    pub files: Vec<VersionStorageEntry>,
-}
-
 impl Launcher {
     fn inspected_version_root(&self, id: &str, version_id: &str) -> Result<PathBuf> {
         storage::safe_version(version_id)?;
@@ -105,7 +88,7 @@ impl Launcher {
             && !version::metadata_path(&game, version_id)?.exists();
         let pending_loader = crate::loader::has_record(&game, version_id)
             && !version::metadata_path(&game, version_id)?.exists();
-        let mut issue = self.modpack_migration_issue(id, version_id);
+        let mut issue = None;
         loop {
             if pending_pack || pending_loader {
                 break;
@@ -120,13 +103,6 @@ impl Launcher {
                     issue = Some(error.to_string());
                     break;
                 }
-            };
-            let path = if !path.is_file() && current != version_id {
-                self.root()
-                    .join("metadata/versions")
-                    .join(format!("{current}.json"))
-            } else {
-                path
             };
             let mut document = document::empty(
                 path.clone(),
@@ -228,14 +204,6 @@ impl Launcher {
                 }
             }
         }
-        // Legacy interrupted imports only retained the manifest in their cached job.
-        // Inspect that snapshot directly without requiring downloads or an API key.
-        if pending_pack && documents.is_empty() {
-            match self.cached_modpack_manifest(id, version_id) {
-                Ok((source, manifest)) => documents.push(document::cached_pack(source, &manifest)),
-                Err(error) => issue = Some(format!("无法读取整合包清单：{error}")),
-            }
-        }
         if crate::loader::has_record(&game, version_id) {
             let path = crate::loader::record_path(&game, version_id)?;
             let mut doc = document::empty(path.clone(), "loader-install".into(), "加载器安装记录");
@@ -314,56 +282,6 @@ impl Launcher {
             issue,
         })
     }
-
-    /// List only the requested directory; no traversal of saves, mods or libraries.
-    pub fn version_storage(
-        &self,
-        id: &str,
-        version_id: &str,
-        relative: &str,
-    ) -> Result<VersionStorage> {
-        let root = self.inspected_version_root(id, version_id)?;
-        let directory = if relative.is_empty() {
-            root.clone()
-        } else {
-            root.join(storage::safe_relative(relative)?)
-        };
-        let mut result = VersionStorage {
-            directory: directory.clone(),
-            relative: relative.into(),
-            exists: directory.is_dir(),
-            files: Vec::new(),
-        };
-        if !root.exists() && relative.is_empty() {
-            return Ok(result);
-        }
-        let canonical_root = root.canonicalize()?;
-        if !directory.canonicalize()?.starts_with(&canonical_root) {
-            bail!("路径不能离开版本目录");
-        }
-        for entry in fs::read_dir(&directory)? {
-            let entry = entry?;
-            let metadata = fs::symlink_metadata(entry.path())?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let path = if relative.is_empty() {
-                name.clone()
-            } else {
-                format!("{relative}/{name}")
-            };
-            // Symlinks are visible, but are not browsed: no escaping or link cycles.
-            result.files.push(VersionStorageEntry {
-                name,
-                relative: path,
-                directory: metadata.is_dir(),
-                symlink: metadata.is_symlink(),
-                size: metadata.len(),
-            });
-        }
-        crate::sorting::sort_by_cached_key(&mut result.files, |f| {
-            (!f.directory, f.name.to_lowercase())
-        });
-        Ok(result)
-    }
 }
 
 #[cfg(test)]
@@ -382,11 +300,7 @@ mod tests {
             {"name":"org.example:common:1"},
             {"name":"org.example:base:1"}
         ]);
-        storage::write_json(
-            &launcher.root().join("metadata/versions/1.20.1.json"),
-            &parent,
-        )
-        .unwrap();
+        storage::write_json(&version::metadata_path(&game, "1.20.1").unwrap(), &parent).unwrap();
         storage::write_json(
             &version::metadata_path(&game, "child").unwrap(),
             &json!({
@@ -431,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn reads_inherited_source_and_cached_parent_without_rewriting_unknown_fields() {
+    fn reads_local_inherited_source_without_rewriting_unknown_fields() {
         let temp = tempfile::tempdir().unwrap();
         let launcher = Launcher::open(Some(temp.path().into())).unwrap();
         let instance = launcher.create_instance("Pack", "child").unwrap();
@@ -441,7 +355,7 @@ mod tests {
             json!({"id":"child", "inheritsFrom":"1.20.1", "customPackField":{"hello":"world"}});
         storage::write_json(&path, &source).unwrap();
         let bytes = fs::read(&path).unwrap();
-        let parent = launcher.root().join("metadata/versions/1.20.1.json");
+        let parent = version::metadata_path(&game, "1.20.1").unwrap();
         storage::write_json(&parent, &crate::test_http::version_fixture("1.20.1")).unwrap();
         fs::create_dir_all(game.join("versions/child/mods")).unwrap();
         // Inspection is also allowed while another download owns the operation lock.
@@ -537,15 +451,13 @@ mod tests {
     }
 
     #[test]
-    fn pending_corrupt_and_cyclic_profiles_still_have_inspectable_storage() {
+    fn pending_corrupt_and_cyclic_profiles_still_have_inspectable_metadata() {
         let temp = tempfile::tempdir().unwrap();
         let launcher = Launcher::open(Some(temp.path().into())).unwrap();
         let instance = launcher.create_instance("Pack", "pack").unwrap();
         let game = launcher.game_dir(&instance.id).unwrap();
         let pending = launcher.version_metadata(&instance.id, "pack").unwrap();
         assert!(pending.documents[0].issue.is_some());
-        let files = launcher.version_storage(&instance.id, "pack", "").unwrap();
-        assert!(!files.exists);
         let path = version::metadata_path(&game, "pack").unwrap();
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, b"{broken JSON").unwrap();
@@ -562,66 +474,9 @@ mod tests {
         );
         assert!(
             launcher
-                .version_storage(&instance.id, "pack", "")
-                .unwrap()
-                .files
-                .iter()
-                .any(|file| file.name == "pack.json")
-        );
-        assert!(
-            launcher
                 .version_metadata(&instance.id, "untracked")
                 .is_err()
         );
         assert!(launcher.version_metadata(&instance.id, "../pack").is_err());
-    }
-
-    #[test]
-    fn storage_lists_one_level_and_rejects_escaping_paths() {
-        let temp = tempfile::tempdir().unwrap();
-        let launcher = Launcher::open(Some(temp.path().into())).unwrap();
-        let instance = launcher.create_instance("Pack", "pack").unwrap();
-        let root = launcher
-            .game_dir(&instance.id)
-            .unwrap()
-            .join("versions/pack");
-        fs::create_dir_all(root.join("saves/world/region")).unwrap();
-        fs::write(root.join("pack.jar"), b"client").unwrap();
-        fs::write(root.join("saves/world/level.dat"), b"save").unwrap();
-        let files = launcher.version_storage(&instance.id, "pack", "").unwrap();
-        assert_eq!(
-            files
-                .files
-                .iter()
-                .map(|f| f.name.as_str())
-                .collect::<Vec<_>>(),
-            ["saves", "pack.jar"]
-        );
-        assert_eq!(files.files[1].size, 6);
-        let world = launcher
-            .version_storage(&instance.id, "pack", "saves/world")
-            .unwrap();
-        assert_eq!(world.files.len(), 2);
-        assert_eq!(world.files[0].relative, "saves/world/region");
-        for relative in ["../..", "/tmp", "saves/../../..", "C:\\Windows"] {
-            assert!(
-                launcher
-                    .version_storage(&instance.id, "pack", relative)
-                    .is_err()
-            );
-        }
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(temp.path(), root.join("escape")).unwrap();
-            let files = launcher.version_storage(&instance.id, "pack", "").unwrap();
-            let link = files.files.iter().find(|f| f.name == "escape").unwrap();
-            assert!(link.symlink);
-            assert!(!link.directory);
-            assert!(
-                launcher
-                    .version_storage(&instance.id, "pack", "escape")
-                    .is_err()
-            );
-        }
     }
 }

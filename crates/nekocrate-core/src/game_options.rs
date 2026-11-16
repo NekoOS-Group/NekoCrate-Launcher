@@ -205,9 +205,9 @@ mod tests {
             fs::read_to_string(temp.path().join("options.txt")).unwrap(),
             "music:0.4\nlang:zh_cn\n"
         );
-        let old: Settings = serde_json::from_str("{}").unwrap();
-        assert_eq!(old.language, "system");
-        assert!(!old.apply_language_to_game);
+        let defaults = Settings::default();
+        assert_eq!(defaults.language, "system");
+        assert!(!defaults.apply_language_to_game);
     }
 
     #[test]

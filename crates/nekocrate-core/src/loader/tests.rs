@@ -122,7 +122,7 @@ async fn modern_processors_resume_repair_and_publish_only_after_success() {
     let mut settings = launcher.settings();
     settings.proxy_mode = "none".into();
     settings.download_source = "official".into();
-    settings.retries = 0;
+
     launcher.save_settings(settings).unwrap();
     let mut base = serde_json::to_value(crate::test_http::version_fixture("1.20.1")).unwrap();
     let bytes = b"fixture client";
@@ -263,9 +263,7 @@ printf 'generated' > "$target"
     assert!(read_record(&game, &id).unwrap().completed);
     assert!(!journal_path.exists());
     assert_eq!(
-        version::resolve(launcher.root(), &game, &id)
-            .unwrap()
-            .minecraft_version,
+        version::resolve(&game, &id).unwrap().minecraft_version,
         "1.20.1"
     );
     let runs = fs::read_to_string(game.join("processor-runs.txt")).unwrap();
@@ -313,7 +311,6 @@ printf 'generated' > "$target"
         downloader: &downloader,
         cancel: &token,
         sink: &sink,
-        auto_java: false,
     };
     assert!(preparation.restore(&saved).await.unwrap());
     let runs = fs::read_to_string(game.join("processor-runs.txt")).unwrap();

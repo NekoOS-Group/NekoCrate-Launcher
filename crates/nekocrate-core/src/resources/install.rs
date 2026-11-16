@@ -4,29 +4,10 @@ use crate::{
     model::{Event, EventSink},
     version_management,
 };
-use sha1::{Digest, Sha1};
-use std::{
-    collections::HashSet,
-    io::{Read, Write},
-};
+use std::collections::HashSet;
 use tokio_util::sync::CancellationToken;
 
-fn sha1(path: &Path, cancel: &CancellationToken) -> Result<String> {
-    let mut input = fs::File::open(path)?;
-    let mut hash = Sha1::new();
-    let mut buffer = [0; 64 * 1024];
-    loop {
-        if cancel.is_cancelled() {
-            bail!("操作已取消");
-        }
-        let n = input.read(&mut buffer)?;
-        if n == 0 {
-            break;
-        }
-        hash.update(&buffer[..n]);
-    }
-    Ok(hex::encode(hash.finalize()))
-}
+use crate::file_hash::{self, Algorithm};
 fn valid_destination(entry: &PlanEntry, target: &ResourceTarget) -> Result<PathBuf> {
     let parts: Vec<_> = entry.destination.split('/').collect();
     let valid = if entry.kind == ResourceKind::Datapacks {
@@ -76,7 +57,7 @@ pub(super) fn preflight(plan: &mut ResourcePlan, cancel: &CancellationToken) -> 
             entry.reuse = if let Some(expected) = &entry.content_sha256 {
                 imports::fingerprint(&path, cancel)?.0 == *expected
             } else if let Input::Remote { file } = &entry.input {
-                path.is_file() && sha1(&path, cancel)?.eq_ignore_ascii_case(&file.sha1)
+                path.is_file() && file_hash::sha1(&path, cancel)?.eq_ignore_ascii_case(&file.sha1)
             } else {
                 false
             };
@@ -129,20 +110,9 @@ pub(super) fn copy_new(
         .open(output)?;
     let result = (|| -> Result<()> {
         let mut source = fs::File::open(source)?;
-        let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
-        let mut bytes = [0; 64 * 1024];
-        loop {
-            if cancel.is_cancelled() {
-                bail!("操作已取消");
-            }
-            let count = source.read(&mut bytes)?;
-            if count == 0 {
-                break;
-            }
-            digest.update(&bytes[..count]);
-            target.write_all(&bytes[..count])?;
-        }
-        if hex::encode(digest.finish()) != expected {
+        let hash =
+            file_hash::read(&mut source, Some(&mut target), Algorithm::Sha256, cancel)?.sha256;
+        if hash != expected {
             bail!("资源在安装期间发生变化：{}", output.display());
         }
         target.sync_all()?;
@@ -518,18 +488,24 @@ fn commit(
         } else {
             staged_path(directory, index, entry)?
         };
-        let actual = imports::fingerprint(&path, &cancel)?.0;
+        // Remote resources need both the upstream SHA-1 and the publication
+        // SHA-256. Compute them together rather than reading the file twice.
+        let actual = if let Input::Remote { file } = &entry.input {
+            let hashes =
+                file_hash::read(&mut fs::File::open(&path)?, None, Algorithm::Both, &cancel)?;
+            if !hashes.sha1.eq_ignore_ascii_case(&file.sha1) {
+                bail!("资源校验失败：{}", entry.destination);
+            }
+            hashes.sha256
+        } else {
+            imports::fingerprint(&path, &cancel)?.0
+        };
         if entry
             .content_sha256
             .as_ref()
             .is_some_and(|expected| expected != &actual)
         {
             bail!("资源在安装期间发生变化：{}", entry.destination);
-        }
-        if let Input::Remote { file } = &entry.input
-            && !sha1(&path, &cancel)?.eq_ignore_ascii_case(&file.sha1)
-        {
-            bail!("资源校验失败：{}", entry.destination);
         }
         entry.content_sha256 = Some(actual);
     }

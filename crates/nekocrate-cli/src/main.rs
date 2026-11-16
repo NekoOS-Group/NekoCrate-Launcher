@@ -54,11 +54,6 @@ enum Commands {
         #[arg(long, default_value = "")]
         version: String,
     },
-    /// Associate an existing instance with its original directory without moving files.
-    Relink {
-        id: String,
-        source: PathBuf,
-    },
     Java,
     Login,
     Refresh,
@@ -144,10 +139,6 @@ async fn main() -> Result<()> {
             serde_json::to_string_pretty(&launcher.import_instance(source, name, version).await?)?
         ),
         Commands::Delete { id } => launcher.delete_instance(&id)?,
-        Commands::Relink { id, source } => println!(
-            "{}",
-            serde_json::to_string_pretty(&launcher.relink_instance(&id, source).await?)?
-        ),
         Commands::Java => println!(
             "{}",
             serde_json::to_string_pretty(&nekocrate_core::java::discover(launcher.root()).await)?

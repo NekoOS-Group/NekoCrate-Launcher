@@ -297,9 +297,6 @@ onBeforeUnmount(() => {
           </div>
         </div>
       </Transition>
-      <span v-if="quoteProblem && quote" class="widget-hint">{{
-        t("暂时无法刷新，保留上次内容")
-      }}</span>
     </template>
     <template v-else>
       <div

@@ -223,7 +223,8 @@ impl Launcher {
 
     /// Resolve a listed resource rather than trusting a frontend-supplied absolute path.
     /// Use the normal transactional installer; copying never removes the source.
-    pub fn prepare_resource_copy(
+    #[cfg(test)]
+    pub(crate) fn prepare_resource_copy(
         &self,
         source: &ResourceCopySource,
         id: &str,
@@ -233,7 +234,8 @@ impl Launcher {
         self.prepare_resource_copies(std::slice::from_ref(source), id, version, cancel)
     }
 
-    pub fn prepare_resource_copies(
+    #[cfg(test)]
+    pub(crate) fn prepare_resource_copies(
         &self,
         sources: &[ResourceCopySource],
         id: &str,
@@ -545,24 +547,28 @@ pub(super) fn fingerprint(path: &Path, cancel: &CancellationToken) -> Result<(St
     if metadata.file_type().is_symlink() {
         bail!("资源路径包含符号链接");
     }
-    let directory = metadata.is_dir();
-    let files = if directory {
-        tree(path)?
-    } else {
+    if !metadata.is_dir() {
         if !metadata.is_file() || metadata.len() > MAX_TOTAL {
             bail!("无效资源文件或文件过大");
         }
-        vec![(String::new(), path.to_owned(), metadata.len())]
-    };
+        let hashes = crate::file_hash::read(
+            &mut fs::File::open(path)?.take(metadata.len() + 1),
+            None,
+            crate::file_hash::Algorithm::Sha256,
+            cancel,
+        )?;
+        anyhow::ensure!(hashes.bytes == metadata.len(), "资源在读取时发生变化");
+        return Ok((hashes.sha256, hashes.bytes));
+    }
     let mut digest = ring::digest::Context::new(&ring::digest::SHA256);
     let mut total = 0;
     let mut buffer = [0; 64 * 1024];
-    for (relative, file, size) in files {
-        if directory {
-            digest.update(relative.as_bytes());
-            digest.update(&[0]);
-            digest.update(&size.to_le_bytes());
-        }
+    // Directory fingerprints also cover relative names and lengths; they are
+    // intentionally distinct from the hash of an individual file.
+    for (relative, file, size) in tree(path)? {
+        digest.update(relative.as_bytes());
+        digest.update(&[0]);
+        digest.update(&size.to_le_bytes());
         let mut source = fs::File::open(file)?;
         let mut read = 0;
         loop {

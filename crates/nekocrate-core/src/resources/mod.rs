@@ -83,9 +83,7 @@ pub struct Project {
     pub name: String,
     pub description: String,
     pub downloads: u64,
-    #[serde(default)]
     pub authors: Vec<String>,
-    #[serde(default)]
     pub categories: Vec<String>,
     pub url: String,
     pub kind: Option<ResourceKind>,
@@ -163,7 +161,6 @@ pub struct ResourcePlan {
     pub warnings: Vec<String>,
     pub created_at: u64,
     pub complete: bool,
-    #[serde(default)]
     pub started: bool,
     /// Missing Fabric IDs verified against the installed Mods before publication.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

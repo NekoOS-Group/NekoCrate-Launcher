@@ -28,9 +28,6 @@ impl ResourceKind {
 }
 
 impl Launcher {
-    pub fn remove_game_resources(&self, sources: &[ResourceCopySource]) -> Result<ResourceRemoval> {
-        self.remove_game_resources_with(sources, &mut crate::recycle::move_to_trash)
-    }
     pub fn remove_game_resources_confirmed(
         &self,
         sources: &[ResourceCopySource],

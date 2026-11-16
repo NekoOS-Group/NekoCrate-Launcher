@@ -26,10 +26,8 @@ pub enum LogBehavior {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
 pub struct LaunchOptions {
-    /// None retains the layout of configurations saved before explicit isolation existed.
-    /// The UI offers only Shared and Version; it does not offer an automatic mode.
+    /// Imported profiles may define their own working directories. None honors that metadata.
     pub isolation: Option<IsolationMode>,
     pub log_behavior: LogBehavior,
     pub window_mode: WindowMode,
@@ -203,10 +201,9 @@ mod tests {
     }
     #[test]
     fn defaults_preserve_launch_behavior_and_parameters_remain_literal() {
-        let old: LaunchOptions = serde_json::from_str("{}").unwrap();
-        assert_eq!(old, LaunchOptions::default());
-        assert!(!old.minimize_launcher);
-        let mut options = old;
+        assert!(serde_json::from_str::<LaunchOptions>("{}").is_err());
+        let mut options = LaunchOptions::default();
+        assert!(!options.minimize_launcher);
         options.jvm_args = vec![
             "-Dpack.name=My Pack".into(),
             "--add-opens=java.base/java.lang=ALL-UNNAMED".into(),

@@ -17,13 +17,7 @@ mod tests;
 pub(crate) mod world;
 
 const TEXT_LIMIT: u64 = 1024 * 1024;
-pub(super) const MOD_DESCRIPTORS: [&str; 5] = [
-    "fabric.mod.json",
-    "quilt.mod.json",
-    "META-INF/neoforge.mods.toml",
-    "META-INF/mods.toml",
-    "mcmod.info",
-];
+pub(super) use crate::mod_metadata::DESCRIPTORS as MOD_DESCRIPTORS;
 
 /// Presence only: reuse Mod summaries, inspect pack archive directories, and never
 /// parse full metadata or world data just to decide whether a row can expand.
@@ -264,14 +258,10 @@ fn contained(root: &Path, path: &Path) -> Result<PathBuf> {
     }
     Ok(path)
 }
-fn bounded(reader: impl Read, limit: u64) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    reader.take(limit + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > limit {
-        bail!("元数据内容过大");
-    }
-    Ok(bytes)
+fn bounded(mut reader: impl Read, limit: u64) -> Result<Vec<u8>> {
+    storage::read_bounded(&mut reader, limit)
 }
+
 fn scalar(value: &Value) -> Option<String> {
     match value {
         Value::String(s) => Some(s.trim().into()),
@@ -349,33 +339,19 @@ fn dependency(source: &mut ContentSource, id: &str, requirement: &Value, relatio
 }
 
 fn read_mod(path: &Path) -> Result<Vec<ContentSource>> {
-    let mut archive = zip::ZipArchive::new(fs::File::open(path)?)?;
+    let metadata = crate::mod_metadata::read(path);
+    metadata.check()?;
     let mut sources = Vec::new();
-    // Multiple descriptors can coexist in a cross-loader JAR. Keep their provenance.
-    for descriptor in MOD_DESCRIPTORS {
-        let mut entry = match archive.by_name(descriptor) {
-            Ok(entry) => entry,
-            Err(zip::result::ZipError::FileNotFound) => continue,
-            Err(error) => return Err(error.into()),
-        };
-        let parsed = (|| -> Result<Vec<ContentSource>> {
-            if entry.size() > TEXT_LIMIT {
-                bail!("元数据内容过大");
-            }
-            let bytes = bounded(&mut entry, TEXT_LIMIT)?;
-            let value: Value = if descriptor.ends_with(".toml") {
-                serde_json::to_value(toml::from_str::<toml::Value>(std::str::from_utf8(&bytes)?)?)?
-            } else if descriptor == "fabric.mod.json" {
-                crate::fabric_metadata::parse(&bytes)?
-            } else {
-                serde_json::from_slice(&bytes)?
-            };
-            parse_mod(descriptor, &value)
-        })();
+    for document in &metadata.documents {
+        let parsed = document
+            .value
+            .as_ref()
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .and_then(|value| parse_mod(document.name, value));
         match parsed {
             Ok(parsed) => sources.extend(parsed),
             Err(error) => {
-                let mut source = ContentSource::new(descriptor);
+                let mut source = ContentSource::new(document.name);
                 source.issue = Some(error.to_string());
                 sources.push(source);
             }
@@ -387,24 +363,7 @@ fn read_mod(path: &Path) -> Result<Vec<ContentSource>> {
 fn parse_mod(descriptor: &str, value: &Value) -> Result<Vec<ContentSource>> {
     let toml = descriptor.ends_with(".toml");
     let quilt = descriptor == "quilt.mod.json";
-    let infos: Vec<&Value> = if toml {
-        value["mods"]
-            .as_array()
-            .context("Mod 描述缺少 mods 列表")?
-            .iter()
-            .collect()
-    } else if descriptor == "mcmod.info" {
-        value
-            .as_array()
-            .or_else(|| value["modList"].as_array())
-            .context("Mod 描述格式无效")?
-            .iter()
-            .collect()
-    } else if quilt {
-        vec![&value["quilt_loader"]]
-    } else {
-        vec![value]
-    };
+    let infos = crate::mod_metadata::infos(descriptor, value)?;
     let mut sources = Vec::new();
     for info in infos {
         if !info.is_object() {

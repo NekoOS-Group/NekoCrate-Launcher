@@ -96,7 +96,7 @@ fn metadata(path: &Path) -> Option<Value> {
 pub fn presets(root: &Path, instance: &Instance) -> MemoryPresets {
     let game = instance.game_dir(root);
     let selected = instance.selected();
-    let resolved = selected.and_then(|s| version::resolve(root, &game, &s.id).ok());
+    let resolved = selected.and_then(|s| version::resolve(&game, &s.id).ok());
     let game_version = resolved
         .as_ref()
         .map(|r| r.minecraft_version.as_str())
@@ -265,18 +265,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_and_legacy_instances_use_auto_and_modes_survive_copy_and_reopen() {
+    async fn new_instances_use_auto_and_modes_survive_copy_and_reopen() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("data");
         let launcher = Launcher::open(Some(root.clone())).unwrap();
         let instance = launcher.create_instance("Memory", "").unwrap();
         assert_eq!(instance.memory_mode, MemoryMode::Auto);
-        let mut legacy = serde_json::to_value(&instance).unwrap();
-        legacy.as_object_mut().unwrap().remove("memory_mode");
-        legacy["memory_mb"] = json!(5120);
-        let legacy: Instance = serde_json::from_value(legacy).unwrap();
-        assert_eq!(legacy.memory_mode, MemoryMode::Auto);
-        assert_eq!(legacy.memory_mb, 5120);
         for mode in [
             MemoryMode::Custom,
             MemoryMode::Minimum,

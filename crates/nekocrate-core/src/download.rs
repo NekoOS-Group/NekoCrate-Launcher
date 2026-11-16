@@ -96,6 +96,7 @@ pub struct Downloader {
     stall_policy: crate::download_stall::StallPolicy,
     cache: PathBuf,
     settings: Settings,
+    retries: usize,
     metrics: Arc<TransferMetrics>,
     sources: Arc<Mutex<std::collections::HashMap<String, Arc<OnceCell<usize>>>>>,
     locks: Arc<Mutex<std::collections::HashMap<String, Arc<Mutex<()>>>>>,
@@ -260,6 +261,11 @@ impl BatchProgress {
 }
 
 impl Downloader {
+    #[cfg(test)]
+    pub(crate) fn with_retries(mut self, retries: usize) -> Self {
+        self.retries = retries;
+        self
+    }
     pub fn new(root: &Path, settings: Settings) -> Result<Self> {
         Ok(Self {
             network_root: Arc::new(root.to_owned()),
@@ -273,6 +279,7 @@ impl Downloader {
             cache: root.join("cache/objects"),
             metrics: Arc::default(),
             settings,
+            retries: 2,
             locks: Arc::new(Mutex::new(Default::default())),
             sources: Arc::new(Mutex::new(Default::default())),
             verification: crate::verification::VerificationCache::shared(root),
@@ -450,35 +457,6 @@ impl Downloader {
             .map_err(|_| crate::download_stall::Stalled(wait))?
     }
 
-    pub(crate) async fn import_cached_files(
-        &self,
-        root: &Path,
-        files: &[FileSpec],
-        cancel: &CancellationToken,
-    ) -> Result<()> {
-        for file in files {
-            check_cancel(cancel)?;
-            if file.path.is_file() {
-                continue;
-            }
-            let old = object_path(&root.join("cache/objects"), file)?;
-            let new = self.cache_path(file)?;
-            for (source, target) in [
-                (old.clone(), new.clone()),
-                (old.with_extension("part"), new.with_extension("part")),
-            ] {
-                if target.try_exists()? || !source.is_file() {
-                    continue;
-                }
-                tokio::fs::create_dir_all(target.parent().context("无效下载目标")?).await?;
-                let temporary =
-                    Partial(target.with_extension(format!("{}.tmp", uuid::Uuid::new_v4())));
-                tokio::fs::copy(&source, &temporary.0).await?;
-                tokio::fs::rename(&temporary.0, target).await?;
-            }
-        }
-        Ok(())
-    }
     pub fn urls(&self, url: &str) -> Vec<String> {
         crate::network::urls(&self.settings, url)
     }
@@ -572,7 +550,7 @@ impl Downloader {
     ) -> Result<T> {
         let mut last = String::new();
         for candidate in self.ordered_urls(url, cancel).await? {
-            for attempt in 0..=self.settings.retries {
+            for attempt in 0..=self.retries {
                 let result: Result<T> = tokio::select! {
                     _=cancel.cancelled()=>bail!("操作已取消"),
                     r=async { Ok(self.client.get(&candidate).timeout(Duration::from_secs(30)).send().await?.error_for_status()?.json().await?) }=>r,
@@ -588,7 +566,7 @@ impl Downloader {
                         }
                     }
                 }
-                if attempt < self.settings.retries {
+                if attempt < self.retries {
                     tokio::select! { _=cancel.cancelled()=>bail!("操作已取消"), _=tokio::time::sleep(Duration::from_millis(300 * (1<<attempt)))=>{} }
                 }
             }
@@ -600,7 +578,7 @@ impl Downloader {
     pub async fn maven_sha1(&self, url: &str, cancel: &CancellationToken) -> Result<String> {
         let mut last = String::new();
         for candidate in self.ordered_urls(&format!("{url}.sha1"), cancel).await? {
-            for _ in 0..=self.settings.retries {
+            for _ in 0..=self.retries {
                 let result: Result<String> = tokio::select! {
                     _ = cancel.cancelled() => bail!("操作已取消"),
                     r = async {
@@ -888,7 +866,7 @@ impl Downloader {
                         })
                         .await?;
                     }
-                    for attempt in 0..=self.settings.retries {
+                    for attempt in 0..=self.retries {
                         let download = async {
                             let mut offset = partial_size(&part).await?;
                             if file.size > 0 && offset >= file.size {
@@ -1021,7 +999,7 @@ impl Downloader {
                                 errors.push(format!("{e:#}"));
                                 // Repeating the same URL cannot fix a permanent
                                 // HTTP error or certificate. Try the next source.
-                                if certificate || permanent || attempt == self.settings.retries {
+                                if certificate || permanent || attempt == self.retries {
                                     break;
                                 }
                                 if stalled {
@@ -1051,7 +1029,7 @@ impl Downloader {
                                         "重试 {}（{}/{}）",
                                         file.path.file_name().unwrap_or_default().to_string_lossy(),
                                         attempt + 1,
-                                        self.settings.retries + 1
+                                        self.retries + 1
                                     ),
                                 ));
                             }
@@ -1401,11 +1379,11 @@ mod tests {
                 temp.path(),
                 Settings {
                     proxy_mode: "none".into(),
-                    retries: 1,
                     ..Settings::default()
                 },
             )
-            .unwrap();
+            .unwrap()
+            .with_retries(1);
             d.stall_policy = crate::download_stall::StallPolicy {
                 idle: Duration::from_millis(150),
                 headers: Duration::from_millis(200),
@@ -1486,11 +1464,11 @@ mod tests {
             temp.path(),
             Settings {
                 proxy_mode: "none".into(),
-                retries: 0,
                 ..Settings::default()
             },
         )
-        .unwrap();
+        .unwrap()
+        .with_retries(0);
         d.stall_policy = crate::download_stall::StallPolicy {
             idle: Duration::from_millis(200),
             headers: Duration::from_secs(1),
@@ -1524,11 +1502,11 @@ mod tests {
             Settings {
                 proxy_mode: "none".into(),
                 download_source: "official".into(),
-                retries: 0,
                 ..Settings::default()
             },
         )
-        .unwrap();
+        .unwrap()
+        .with_retries(0);
         let spec = |body: &str, path: &str| FileSpec {
             url: format!("{url}/{path}"),
             path: root.path().join(path),
@@ -1599,11 +1577,11 @@ mod tests {
             root.path(),
             Settings {
                 proxy_mode: "none".into(),
-                retries: 2,
                 ..Default::default()
             },
         )
-        .unwrap();
+        .unwrap()
+        .with_retries(2);
         let (url, server) = crate::test_http::serve_with_headers(vec![
             (404, String::new(), "missing".into()),
             (206, "Content-Range: bytes 3-7/8\r\n".into(), "ified".into()),
@@ -1644,12 +1622,10 @@ mod tests {
     #[ignore = "requires CurseForge application credential and downloads a 75 MB archive into a temporary directory"]
     async fn live_curseforge_archive_download_uses_official_cdn_fallback() {
         let root = tempfile::tempdir().unwrap();
-        let settings = Settings {
-            retries: 0,
-            ..Default::default()
-        };
+        let settings = Settings::default();
         let d = Downloader::new(root.path(), settings.clone())
             .unwrap()
+            .with_retries(0)
             .with_curseforge_key(root.path(), &settings, crate::curseforge::key().unwrap())
             .unwrap();
         let file = FileSpec {
@@ -1696,11 +1672,11 @@ mod tests {
                 proxy_mode: "none".into(),
                 concurrency: 1,
                 adaptive_concurrency: false,
-                retries: 0,
                 ..Default::default()
             },
         )
-        .unwrap();
+        .unwrap()
+        .with_retries(0);
         let failed = FileSpec {
             url: format!("{url}/failed"),
             path: root.path().join("a.jar"),
@@ -1852,11 +1828,11 @@ mod tests {
             temp.path(),
             Settings {
                 proxy_mode: "none".into(),
-                retries: 3,
                 ..Settings::default()
             },
         )
-        .unwrap();
+        .unwrap()
+        .with_retries(3);
         let url = format!("https://localhost:{port}/version.json");
         let cancel = CancellationToken::new();
         // June 2027: one year beyond the test's June 2026 reference clock.
@@ -2362,11 +2338,12 @@ mod tests {
         for valid in [true, false] {
             let t = tempfile::tempdir().unwrap();
             let settings = Settings {
-                retries: if valid { 1 } else { 0 },
                 adaptive_concurrency: true,
                 ..Settings::default()
             };
-            let d = Downloader::new(t.path(), settings).unwrap();
+            let d = Downloader::new(t.path(), settings)
+                .unwrap()
+                .with_retries(if valid { 1 } else { 0 });
             let content = "verified";
             let replies = if valid {
                 vec![(503, "retry".into()), (200, content.into())]
@@ -2410,11 +2387,11 @@ mod tests {
                 root.path(),
                 Settings {
                     proxy_mode: "none".into(),
-                    retries: 1,
                     ..Default::default()
                 },
             )
-            .unwrap();
+            .unwrap()
+            .with_retries(1);
             let (url, server) =
                 crate::test_http::serve(vec![(status, "retry".into()), (200, "ok".into())]).await;
             let file = FileSpec {
@@ -2517,11 +2494,11 @@ mod tests {
                 temp.path(),
                 Settings {
                     proxy_mode: "none".into(),
-                    retries: 0,
                     ..Settings::default()
                 },
             )
-            .unwrap();
+            .unwrap()
+            .with_retries(0);
             let replies = match mode {
                 "ignored" => vec![(200, "".into(), "abcdefghi".into())],
                 "invalid" => vec![(206, "Content-Range: bytes 0-2/9\r\n".into(), "ghi".into())],

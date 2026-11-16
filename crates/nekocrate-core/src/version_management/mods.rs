@@ -381,7 +381,8 @@ impl Launcher {
                 serde_json::from_str::<serde_json::Value>(input).context("JSON 配置格式错误")?;
             }
             Some("toml") => {
-                toml::from_str::<toml::Value>(input).context("TOML 配置格式错误")?;
+                crate::mod_metadata::parse("config.toml", input.as_bytes())
+                    .context("TOML 配置格式错误")?;
             }
             _ => {}
         }

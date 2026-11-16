@@ -5,16 +5,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     fs,
-    io::Read,
     path::{Path, PathBuf},
 };
 
-mod cache;
 mod declarations;
 pub mod details;
 pub mod mods;
 pub mod presentation;
-pub(crate) use cache::SummaryCache;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct LocalContentFile {
@@ -235,12 +232,10 @@ impl Launcher {
         let mut content = read_content(&working, resolved.as_ref(), ContentKind::Mods, false)?;
         let mut pending = Vec::new();
         for file in &mut content.files {
-            if let Some(identity) = self
-                .0
-                .mod_summaries
-                .get(&content.directory.join(&file.file_name))
+            if let Some(identity) =
+                crate::mod_metadata::get(&content.directory.join(&file.file_name))
             {
-                apply_identity(file, identity);
+                apply_identity(file, mod_identity(&identity));
             } else {
                 pending.push(file.file_name.clone());
             }
@@ -302,7 +297,7 @@ impl Launcher {
             }
             apply_identity(
                 &mut file,
-                self.0.mod_summaries.read(&content.directory.join(name)),
+                mod_metadata(&content.directory.join(name)).unwrap_or_default(),
             );
             result.push(file);
         }
@@ -393,7 +388,7 @@ impl Launcher {
             .context("此实例未添加该版本")?;
         let game = self.available_game_dir(id)?;
         let resolved = if version::metadata_path(&game, version_id)?.is_file() {
-            Some(version::resolve(self.root(), &game, version_id)?)
+            Some(version::resolve(&game, version_id)?)
         } else {
             None
         };
@@ -593,52 +588,19 @@ pub(crate) struct ModIdentity {
 }
 
 pub(crate) fn mod_metadata(path: &Path) -> Option<ModIdentity> {
-    let mut archive = zip::ZipArchive::new(fs::File::open(path).ok()?).ok()?;
-    let mut result = ModIdentity::default();
-    for descriptor in details::MOD_DESCRIPTORS {
-        let Ok(mut file) = archive.by_name(descriptor) else {
+    let metadata = crate::mod_metadata::read(path);
+    metadata.check().ok()?;
+    Some(mod_identity(&metadata))
+}
+fn mod_identity(metadata: &crate::mod_metadata::Metadata) -> ModIdentity {
+    let mut result = ModIdentity {
+        has_metadata: !metadata.documents.is_empty(),
+        ..Default::default()
+    };
+    for document in &metadata.documents {
+        let Ok(value) = &document.value else { continue };
+        let Ok(infos) = crate::mod_metadata::infos(document.name, value) else {
             continue;
-        };
-        result.has_metadata = true;
-        if file.size() > 1024 * 1024 {
-            continue;
-        }
-        let mut bytes = Vec::new();
-        if file
-            .by_ref()
-            .take(1024 * 1024 + 1)
-            .read_to_end(&mut bytes)
-            .is_err()
-            || bytes.len() > 1024 * 1024
-        {
-            continue;
-        }
-        let value: Option<Value> = if descriptor.ends_with(".toml") {
-            std::str::from_utf8(&bytes)
-                .ok()
-                .and_then(|s| toml::from_str::<toml::Value>(s).ok())
-                .and_then(|v| serde_json::to_value(v).ok())
-        } else if descriptor == "fabric.mod.json" {
-            crate::fabric_metadata::parse(&bytes).ok()
-        } else {
-            serde_json::from_slice(&bytes).ok()
-        };
-        let Some(value) = value else { continue };
-        let infos: Vec<&Value> = if descriptor == "quilt.mod.json" {
-            vec![&value["quilt_loader"]]
-        } else if descriptor.ends_with(".toml") {
-            value["mods"]
-                .as_array()
-                .map(|a| a.iter().collect())
-                .unwrap_or_default()
-        } else if descriptor == "mcmod.info" {
-            value
-                .as_array()
-                .or_else(|| value["modList"].as_array())
-                .map(|a| a.iter().collect())
-                .unwrap_or_default()
-        } else {
-            vec![&value]
         };
         for info in infos {
             let id = info["id"]
@@ -679,7 +641,7 @@ pub(crate) fn mod_metadata(path: &Path) -> Option<ModIdentity> {
             }
         }
     }
-    Some(result)
+    result
 }
 
 #[cfg(test)]
@@ -787,7 +749,6 @@ mod tests {
     }
     #[test]
     fn progressive_mod_index_reuses_summaries_and_invalidates_replaced_files() {
-        use std::sync::atomic::Ordering;
         let temp = tempfile::tempdir().unwrap();
         let launcher = Launcher::open(Some(temp.path().join("launcher"))).unwrap();
         let instance = launcher.create_instance("Game", "pack").unwrap();
@@ -809,19 +770,16 @@ mod tests {
             .unwrap();
         assert_eq!(cold.pending.len(), 2);
         assert_eq!(cold.content.files[0].name, "first.jar");
-        assert_eq!(launcher.0.mod_summaries.reads.load(Ordering::Relaxed), 0);
         let batch = launcher
             .version_content_summaries(&instance.id, "pack", &cold.pending)
             .unwrap();
         assert_eq!(batch[0].name, "Old mod");
         assert!(!batch[1].enabled);
-        assert_eq!(launcher.0.mod_summaries.reads.load(Ordering::Relaxed), 2);
         let warm = launcher
             .version_content_index(&instance.id, "pack")
             .unwrap();
         assert!(warm.pending.is_empty());
         assert_eq!(warm.content.files[0].name, "Legacy");
-        assert_eq!(launcher.0.mod_summaries.reads.load(Ordering::Relaxed), 2);
         let previous = fs::metadata(&first).unwrap();
         let replacement = game.join("replacement.jar");
         jar(
@@ -847,7 +805,6 @@ mod tests {
             .unwrap();
         assert_eq!(batch[0].name, "New mod");
         assert_eq!(batch[0].mod_ids, vec!["new"]);
-        assert_eq!(launcher.0.mod_summaries.reads.load(Ordering::Relaxed), 3);
         fs::remove_file(first).unwrap();
         let removed = launcher
             .version_content_index(&instance.id, "pack")

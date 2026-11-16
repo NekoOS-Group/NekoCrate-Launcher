@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import WindowControls from "./WindowControls.vue";
 import {
   computed,
   onBeforeUnmount,
@@ -562,7 +561,6 @@ onBeforeUnmount(() => {
             {{ t(plan ? "安装预览" : "添加资源") }}
           </h2>
           <slot name="destination" />
-          <WindowControls v-if="!embedded" />
           <button
             v-if="!embedded"
             class="icon-button resource-close"
@@ -956,6 +954,9 @@ onBeforeUnmount(() => {
 .resource-header h2 {
   margin: 0;
   font-size: 18px;
+}
+.resource-close {
+  margin-left: auto;
 }
 .resource-categories {
   display: flex;

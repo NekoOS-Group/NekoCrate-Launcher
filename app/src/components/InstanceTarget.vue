@@ -140,7 +140,7 @@ onBeforeUnmount(() =>
           >
             <InstanceIcon
               v-if="target"
-              :icon="resolveInstanceIcon(target.icon, target.id)"
+              :icon="resolveInstanceIcon(target.icon)"
             />
             <Plus v-else :size="22" />
           </span>
@@ -183,7 +183,7 @@ onBeforeUnmount(() =>
           @pointerdown.prevent
           @click="choose(item.id)"
         >
-          <InstanceIcon :icon="resolveInstanceIcon(item.icon, item.id)" />
+          <InstanceIcon :icon="resolveInstanceIcon(item.icon)" />
           <span>{{ item.name }}</span>
         </button>
         <button

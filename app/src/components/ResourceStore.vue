@@ -17,11 +17,10 @@ import ModpackBrowser from "./ModpackBrowser.vue";
 import ResourceLibraryBrowser from "./ResourceLibraryBrowser.vue";
 import StoreCatalogBrowser from "./StoreCatalogBrowser.vue";
 import StoreSkinBrowser from "./StoreSkinBrowser.vue";
-import WindowControls from "./WindowControls.vue";
 import { t } from "../i18n";
 import type { VersionManifest } from "../types";
 import type { ResourceKind, ResourcePlatform } from "../resources";
-const props = defineProps<{
+defineProps<{
   rpc: <T>(op: string, data?: Record<string, unknown>) => Promise<T>;
   manifest: VersionManifest | null;
   busy: boolean;
@@ -120,7 +119,6 @@ function scrollTabs(event: WheelEvent) {
           <component :is="category.icon" :size="16" />{{ t(category.label) }}
         </button>
       </nav>
-      <WindowControls />
       <button
         class="icon-button"
         :aria-label="t('关闭对话框')"

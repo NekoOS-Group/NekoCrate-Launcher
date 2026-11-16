@@ -58,7 +58,7 @@ test("optional widgets and subscriptions tolerate old/corrupt preferences", () =
   );
   assert.equal(
     readQuoteStyle('{"version":1,"quoteStyle":"minecraft"}'),
-    "splash",
+    "simple",
   );
   assert.equal(readQuoteStyle('{"version":1,"quoteStyle":"splash"}'), "splash");
   assert.equal(

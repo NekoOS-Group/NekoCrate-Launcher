@@ -26,7 +26,6 @@ pub(crate) struct Install<'a> {
     pub downloader: &'a Downloader,
     pub cancel: &'a CancellationToken,
     pub sink: &'a EventSink,
-    pub auto_java: bool,
 }
 impl Install<'_> {
     #[inline(never)]
@@ -140,7 +139,6 @@ impl Install<'_> {
                 working: self.working_directory,
                 version,
                 explicit_java: self.explicit_java,
-                auto_java: self.auto_java,
                 downloader: self.downloader,
                 cancel: self.cancel,
                 sink: self.sink,
@@ -270,7 +268,7 @@ impl Install<'_> {
             let mut source = zip.by_name(entry)?;
             std::fs::create_dir_all(out.parent().unwrap())?;
             std::io::copy(&mut source, &mut File::create(&out)?)?;
-            let sha1 = sha1_file(&out)?;
+            let sha1 = crate::file_hash::sha1(&out, self.cancel)?;
             for library in profile["libraries"]
                 .as_array_mut()
                 .context("加载器依赖缺失")?
@@ -309,7 +307,7 @@ impl Install<'_> {
                 let hash = if !url.is_empty() {
                     self.downloader.maven_sha1(url, self.cancel).await?
                 } else if path.is_file() {
-                    sha1_file(&path)?
+                    crate::file_hash::sha1(&path, self.cancel)?
                 } else {
                     continue;
                 };
@@ -349,14 +347,12 @@ impl Install<'_> {
             let requirement = java::JavaRequirement::for_working_directory(
                 &resolved.version,
                 self.working_directory,
-                self.explicit_java,
             )
             .await?;
             let runtime = java::ensure(
                 self.root,
                 requirement,
                 self.explicit_java,
-                self.auto_java,
                 self.downloader,
                 self.cancel,
                 &self.step("loader"),
@@ -489,7 +485,7 @@ impl Install<'_> {
             let a = &mut library["downloads"]["artifact"];
             if a.is_object() && a["sha1"].as_str().unwrap_or("").is_empty() {
                 let path = safe_output(&libraries, a["path"].as_str().context("依赖路径缺失")?)?;
-                a["sha1"] = json!(sha1_file(&path)?);
+                a["sha1"] = json!(crate::file_hash::sha1(&path, self.cancel)?);
                 a["size"] = json!(std::fs::metadata(path)?.len());
             }
         }
@@ -572,20 +568,6 @@ fn safe_output(root: &Path, path: &str) -> Result<PathBuf> {
     }
     Ok(output)
 }
-fn sha1_file(path: &Path) -> Result<String> {
-    use sha1::{Digest, Sha1};
-    let mut file = File::open(path)?;
-    let mut hash = Sha1::new();
-    let mut buffer = [0_u8; 65536];
-    loop {
-        let n = file.read(&mut buffer)?;
-        if n == 0 {
-            break;
-        }
-        hash.update(&buffer[..n]);
-    }
-    Ok(hex::encode(hash.finalize()))
-}
 fn main_class(path: &Path) -> Result<String> {
     let mut zip = zip::ZipArchive::new(File::open(path)?)?;
     let mut text = String::new();
@@ -657,7 +639,7 @@ mod tests {
         zip.finish().unwrap();
         storage::write_json(
             &cache.join("installer.sha1.json"),
-            &sha1_file(&path).unwrap(),
+            &crate::file_hash::sha1(&path, &CancellationToken::new()).unwrap(),
         )
         .unwrap();
         let downloader = Downloader::new(
@@ -665,11 +647,11 @@ mod tests {
             Settings {
                 proxy_mode: "none".into(),
                 download_source: "official".into(),
-                retries: 0,
                 ..Default::default()
             },
         )
-        .unwrap();
+        .unwrap()
+        .with_retries(0);
         let sink: EventSink = Arc::new(|_| {});
         let cancel = CancellationToken::new();
         let result = Install {
@@ -683,7 +665,6 @@ mod tests {
             downloader: &downloader,
             cancel: &cancel,
             sink: &sink,
-            auto_java: false,
         }
         .forge(&loader, &crate::test_http::version_fixture("1.12.2"))
         .await

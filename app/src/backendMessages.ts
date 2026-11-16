@@ -270,13 +270,6 @@ export const backendEnglish: Readonly<Record<string, string>> = {
   整合包不能覆盖版本配置或原始清单:
     "The modpack cannot overwrite its launch profile or original manifest",
   "无法读取整合包清单：{error}": "Could not read the modpack manifest: {error}",
-  "原始整合包缓存不存在，无法迁移":
-    "The original modpack archive is missing; migration could not finish",
-  整合包缓存路径无效: "Invalid modpack cache path",
-  "版本目录中的整合包缓存与原记录不一致，未覆盖文件":
-    "The local modpack archive differs from the old record. No files were overwritten",
-  "保存迁移结果失败，版本文件保留在：{path}":
-    "Could not save the migration. Version files remain at: {path}",
   完成整合包安装: "Finishing modpack installation",
   安装游戏与加载器: "Installing Minecraft and loader",
   写入整合包配置: "Applying modpack overrides",
@@ -380,8 +373,6 @@ export const backendEnglish: Readonly<Record<string, string>> = {
     "Mod Java requirements conflict with the known compatible range: {path}",
   "没有同时满足游戏、加载器和模组约束的 Java：{reason}":
     "No Java version satisfies the game, loader and mod constraints: {reason}",
-  "未找到兼容的 {runtime}，请指定 Java 路径或允许自动下载。":
-    "No compatible {runtime} found. Select a Java executable or allow automatic downloads.",
   "无法检查模组的 Java 兼容性": "Could not check mod Java compatibility",
   "解析 Fabric 版本": "Resolving Fabric version",
   "Fabric 版本号无效": "Invalid Fabric version",
@@ -482,8 +473,6 @@ export const backendEnglish: Readonly<Record<string, string>> = {
   "Java 版本不完整": "Incomplete Java version",
   "此游戏需要 Java {major}，所选路径是 Java {0}。请切换 Java 或清空路径启用自动匹配。":
     "This game needs Java {major}; the selected path uses Java {0}. Change Java or clear the path to auto-detect.",
-  "未找到 Java {major}，请指定 Java 路径或在设置中允许自动下载。":
-    "Java {major} was not found. Specify a Java path or enable automatic downloads.",
   "使用本地 Java：{version} · {path}": "Using local Java: {version} · {path}",
   "需要 {requirement}；未检测到可用的本地 Java":
     "Requires {requirement}; no working local Java was detected",
@@ -588,15 +577,10 @@ export const backendEnglish: Readonly<Record<string, string>> = {
   不支持的游戏语言: "Unsupported game language",
   无法读取游戏语言设置: "Could not read game language settings",
   无法保存游戏语言设置: "Could not save game language settings",
-  "不支持的数据格式版本 {schema}": "Unsupported data format version {schema}",
-  实例数据无效: "Invalid instance data",
-  旧实例缺少版本: "Legacy instance is missing its version",
   无法读取实例数据: "Could not read instance data",
   "实例 {0} 的关联目录必须是绝对路径":
     "The linked directory for instance {0} must be an absolute path",
   "实例 {0} 的所选版本不存在": "Selected version is missing from instance {0}",
-  "实例 {0} 同时存在 game 与 .minecraft，未覆盖任何游戏文件":
-    "Instance {0} contains both game and .minecraft folders. No game files were overwritten",
   "无法读取 {0}": "Could not read {0}",
   "JSON 损坏：{0}，请保留原文件后恢复备份":
     "Corrupt JSON: {0}. Keep the original file before restoring a backup",
@@ -612,21 +596,11 @@ export const backendEnglish: Readonly<Record<string, string>> = {
     "Destination must not be inside the source folder",
   "迁移目录含符号链接，请先将链接替换为实际文件：{0}":
     "The source contains symbolic links. Replace them with actual files first: {0}",
-  "网络不可用，使用已缓存版本目录":
-    "Network unavailable. Using the cached version list",
-  "未找到该官方游戏版本；原型暂不支持自定义加载器版本":
-    "Official game version not found. Custom loaders are not supported yet",
-  "未在官方版本目录中找到此版本；自定义加载器版本暂不支持":
-    "This version is not in the official version list. Custom loaders are not supported yet",
   "该本地版本使用自定义加载器，启动器暂不支持安装或修复":
     "This local version uses a custom loader. Installing or repairing it is not supported yet",
   无效游戏版本: "Invalid game version",
   "当前原型仅支持独立的官方 Java 版元数据":
     "This prototype supports standalone official Java Edition metadata only",
-  "当前原型支持 Minecraft 1.13 及更新的官方版本；旧版本启动协议将在后续加入。":
-    "This prototype supports official Minecraft 1.13+ releases. Older launch protocols are not supported yet.",
-  "此版本未提供 Apple Silicon 原生库；原型在 Apple Silicon 上请使用 1.19 或更新版本。":
-    "This version has no Apple Silicon native libraries. Use Minecraft 1.19+ on Apple Silicon.",
   库文件缺少路径: "Library file is missing its path",
   元数据缺少客户端文件: "Metadata is missing the game client",
   资源索引校验值无效: "Invalid asset index checksum",
@@ -637,7 +611,6 @@ export const backendEnglish: Readonly<Record<string, string>> = {
   原生库含越界路径: "Native library contains a path outside its destination",
   原生库包含不支持的符号链接:
     "Native library contains unsupported symbolic links",
-  不支持旧版本启动参数: "Legacy launch arguments are not supported",
   启动参数不是字符串: "Launch argument is not a string",
   无法识别的启动参数格式: "Unrecognized launch argument format",
   版本使用了尚未支持的启动参数占位符:
@@ -663,8 +636,9 @@ export const backendEnglish: Readonly<Record<string, string>> = {
   实例中不存在该版本: "Version not found in this instance",
   "有任务正在运行，请完成后修改设置":
     "A task is running. Change settings when it finishes",
-  "并发应为 1–256，重试次数应为 0–5":
-    "Parallel downloads must be 1–256; retry attempts must be 0–5",
+  "并发数应为 1–256": "Parallel downloads must be 1–256",
+  "不支持的数据格式版本，仅支持 schema 3":
+    "Unsupported data format; schema 3 is required",
   未知下载源: "Unknown download source",
   不支持的语言选项: "Unsupported language preference",
   "Client ID 应为 UUID": "Client ID must be a UUID",

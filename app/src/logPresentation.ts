@@ -1,4 +1,5 @@
 import { createLog4jDecoder } from "./log4jPresentation.ts";
+import { logBranch, logMessageTemplate, logSeparator } from "./logStructure.ts";
 
 export type LogLine = {
   time: string;
@@ -20,11 +21,20 @@ export type LogRow = ParsedLog & {
   count: number;
   scope: string;
   filterLevel: LogLevel | "";
+  filterSource: string;
   group: number;
   search: string;
   originals: LogLine[];
+  variants?: { message: string; time: string; count: number }[];
+  block?: boolean;
 };
-export type LogFilter = { scope: string; level: string; query: string };
+export type LogFilter = {
+  scope: string;
+  source?: string;
+  level: string;
+  query: string;
+};
+export const unattributedLogSource = "\0";
 
 const levels = "TRACE|DEBUG|INFO|WARN(?:ING)?|ERROR|FATAL";
 const threadLevel = new RegExp(`^\\[([^\\]\\n]+)\/(${levels})\\]\\s*:? ?`, "i");
@@ -92,22 +102,20 @@ let nextId = 0;
 const identity = (message: string) => message;
 const cache = new WeakMap<
   LogLine,
-  { id: number; parsed: ParsedLog; search: string }
+  { id: number; parsed: ParsedLog; search: string; template?: string }
 >();
-
-/** Cache parsing per immutable stream entry; only adjacent equal entries collapse. */
-export function presentLogs(
-  lines: readonly LogLine[],
-  translate: (message: string) => string = identity,
-): LogRow[] {
-  return createLogPresenter().update(lines, translate);
-}
 
 /** Append batches without rebuilding historical rows; reset after clear or locale changes. */
 export function createLogPresenter() {
   let rows: LogRow[] = [];
   const xml = createLog4jDecoder();
-  const contexts = new Map<string, { level: LogLevel | ""; group: number }>();
+  const contexts = new Map<
+    string,
+    { level: LogLevel | ""; group: number; source: string }
+  >();
+  let lastTemplate: string | undefined;
+  let banner:
+    { row: LogRow; marker: string; time: string; lines: number } | undefined;
   let previous: LogLine | undefined;
   let first: LogLine | undefined;
   let processed = 0;
@@ -129,6 +137,8 @@ export function createLogPresenter() {
         xml.clear();
         processed = 0;
         previous = undefined;
+        lastTemplate = undefined;
+        banner = undefined;
       }
       translationKey = key;
       first = lines[0];
@@ -152,6 +162,7 @@ export function createLogPresenter() {
               id: entry?.id ?? nextId++,
               parsed,
               search: `${parsed.source}\n${parsed.message}`.toLowerCase(),
+              template: logMessageTemplate(parsed.message),
             };
             cache.set(line, entry);
           }
@@ -162,27 +173,91 @@ export function createLogPresenter() {
           const last = rows.at(-1);
           const scope = line.instanceId || "launcher";
           const context = contexts.get(scope);
+          const branch = logBranch(parsed.message);
+          const continuation = !!(branch || parsed.detail);
+          const filterSource =
+            parsed.source ||
+            (continuation ? context?.source : undefined) ||
+            (scope === "launcher" ? "NekoCrate" : "");
           const filterLevel =
             parsed.detail === "cause"
               ? "ERROR"
               : parsed.detail === "stack"
                 ? context?.level || "ERROR"
-                : parsed.level;
+                : parsed.level || (branch ? context?.level || "" : "");
           const group =
-            parsed.detail &&
+            continuation &&
             context &&
-            ["WARN", "ERROR", "FATAL"].includes(context.level)
+            ((branch && filterSource === context.source) ||
+              (parsed.detail &&
+                ["WARN", "ERROR", "FATAL"].includes(context.level)))
               ? context.group
               : entry.id;
+          // Explicit divider-bounded announcements are one multiline message.
+          // An interrupted or unclosed block cannot absorb a different stream.
+          if (
+            banner &&
+            (last !== banner.row ||
+              line.kind !== "log" ||
+              scope !== last.scope ||
+              filterSource !== last.filterSource ||
+              parsed.level !== last.level ||
+              line.time !== banner.time ||
+              banner.lines >= 128 ||
+              last.message.length > 65536)
+          )
+            banner = undefined;
+          if (banner) {
+            const block = banner.row;
+            block.originals.push(...(display.originals || [line]));
+            block.lastTime = line.time;
+            banner.lines++;
+            if (parsed.message.trim() === banner.marker) banner = undefined;
+            else {
+              block.message = block.block
+                ? `${block.message}\n${parsed.message}`
+                : parsed.message;
+              block.block = true;
+              block.search = `${block.source}\n${block.message}`.toLowerCase();
+            }
+            previous = line;
+            continue;
+          }
+          const similar = !!(
+            last &&
+            entry.template &&
+            entry.template === lastTemplate &&
+            parsed.source &&
+            !parsed.detail &&
+            !branch &&
+            ["INFO", "WARN", "DEBUG", "TRACE"].includes(parsed.level)
+          );
           if (
             last &&
             previous?.kind === line.kind &&
             previous.instanceId === line.instanceId &&
             parsed.message !== "" &&
-            last.message === parsed.message &&
+            (last.message === parsed.message || similar) &&
+            !last.block &&
             last.level === parsed.level &&
             last.source === parsed.source
           ) {
+            if (last.message !== parsed.message && !last.variants)
+              last.variants = [
+                { message: last.message, time: last.time, count: last.count },
+              ];
+            if (last.variants) {
+              const variant = last.variants.at(-1)!;
+              if (variant.message === parsed.message) variant.count++;
+              else {
+                last.variants.push({
+                  message: parsed.message,
+                  time: line.time,
+                  count: 1,
+                });
+                last.search += `\n${parsed.message.toLowerCase()}`;
+              }
+            }
             last.count++;
             last.lastTime = line.time;
             last.originals.push(...(display.originals || [line]));
@@ -195,6 +270,7 @@ export function createLogPresenter() {
               count: 1,
               scope,
               filterLevel,
+              filterSource,
               group,
               search:
                 line.kind === "log"
@@ -206,7 +282,20 @@ export function createLogPresenter() {
           contexts.set(scope, {
             level: filterLevel,
             group: rows.at(-1)!.group,
+            source: filterSource,
           });
+          lastTemplate = entry.template;
+          if (
+            line.kind === "log" &&
+            !parsed.detail &&
+            logSeparator(parsed.message)
+          )
+            banner = {
+              row: rows.at(-1)!,
+              marker: parsed.message.trim(),
+              time: line.time,
+              lines: 1,
+            };
           previous = line;
         }
       }
@@ -220,11 +309,22 @@ export function createLogPresenter() {
 /** Preserve matching exception blocks, including their otherwise unlabelled frames. */
 export function filterLogs(rows: readonly LogRow[], filter: LogFilter) {
   const query = filter.query.trim().toLowerCase();
-  if (filter.scope === "all" && filter.level === "all" && !query) return rows;
+  if (
+    filter.scope === "all" &&
+    !filter.source &&
+    filter.level === "all" &&
+    !query
+  )
+    return rows;
   const scoped =
-    filter.scope === "all"
+    filter.scope === "all" && !filter.source
       ? rows
-      : rows.filter((row) => row.scope === filter.scope);
+      : rows.filter(
+          (row) =>
+            (filter.scope === "all" || row.scope === filter.scope) &&
+            (!filter.source ||
+              (row.filterSource || unattributedLogSource) === filter.source),
+        );
   const queryGroups = query
     ? new Set(
         scoped

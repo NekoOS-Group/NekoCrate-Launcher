@@ -116,13 +116,13 @@ test("internal collection calls the library and preserves global identity when c
       kind: "cache_resources",
       sources: [source],
     });
-    f.handlers.copy_resource = () => true;
-    await f.context.copyDraggedResource(
-      { ...source, global: true, instance: "", version: "" },
+    f.handlers.copy_resources = () => true;
+    await f.context.copyDraggedResources(
+      [{ ...source, global: true, instance: "", version: "" }],
       { instance: "instance-b", version: "1.20.1" },
     );
     assert.equal(
-      f.calls.find((c) => c.op === "copy_resource").source.global,
+      f.calls.find((c) => c.op === "copy_resources").sources[0].global,
       true,
     );
   } finally {

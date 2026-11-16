@@ -1,11 +1,8 @@
+import { presentLogs } from "./presentLogs.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createLogStore, logRefreshMs } from "../src/logStore.ts";
-import {
-  presentLogs,
-  createLogPresenter,
-  copyLogRows,
-} from "../src/logPresentation.ts";
+import { createLogPresenter, copyLogRows } from "../src/logPresentation.ts";
 import { LogViewport } from "../src/logViewport.ts";
 
 const line = (i, instanceId = "a") => ({

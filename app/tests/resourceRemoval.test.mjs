@@ -95,9 +95,7 @@ function dragFixture() {
         ],
         running: () => state.running,
         busy: () => state.busy,
-        copy: async (source, target) =>
-          copied.push({ sources: [source], target }),
-        copyMany: async (sources, target) => copied.push({ sources, target }),
+        copy: async (sources, target) => copied.push({ sources, target }),
         remove: async (sources) => removed.push(sources),
         export: async (source) => exported.push(source),
       });
@@ -258,7 +256,7 @@ test("world drag copies to an explicit version and hands a folder to the native 
     f.start(world);
     f.move(5, 350);
     await new Promise(setImmediate);
-    assert.deepEqual(f.exported, [world]);
+    assert.deepEqual(f.exported, [[world]]);
     assert.equal(f.removed.length, 0);
   } finally {
     f.dispose();

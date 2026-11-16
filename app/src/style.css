@@ -3345,7 +3345,7 @@ input:read-only {
 }
 .log-filters {
   display: grid;
-  grid-template-columns: minmax(120px, 1fr) minmax(110px, 0.85fr) minmax(
+  grid-template-columns: minmax(150px, 1.5fr) minmax(110px, 0.85fr) minmax(
       140px,
       1.5fr
     );
@@ -3356,33 +3356,6 @@ input:read-only {
 .log-filters .source-select-trigger {
   height: 34px;
   font-size: 12px;
-}
-.log-recovery {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 4px 16px;
-  flex-shrink: 0;
-  padding: 0 var(--panel-inset) 10px;
-  font-size: 11px;
-}
-.log-recovery-target {
-  min-width: 0;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--muted);
-}
-.log-recovery-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 14px;
-}
-.log-recovery-actions .text-button {
-  min-height: 28px;
-  padding: 0;
-  font-size: 11px;
 }
 .log-filters .sr-only {
   position: absolute;
@@ -3419,16 +3392,6 @@ input:read-only {
 .log-search input:focus {
   border: 0;
   box-shadow: none;
-}
-.log-latest {
-  position: absolute;
-  right: var(--panel-inset);
-  bottom: 12px;
-  padding: 6px 10px;
-  border: 1px solid var(--glass-stroke);
-  background: var(--surface);
-  box-shadow: 0 0 16px var(--glow);
-  font-size: 12px;
 }
 .log-panel header > h2 {
   display: flex;
@@ -3493,9 +3456,47 @@ input:read-only {
   font-variant-numeric: tabular-nums;
 }
 .log-message {
+  position: relative;
   min-width: 0;
+  padding-left: calc(var(--log-depth, 0) * 12px + 18px);
   white-space: pre-wrap;
   tab-size: 2;
+}
+.log-child .log-message::before {
+  content: "";
+  position: absolute;
+  left: calc(var(--log-depth) * 12px - 6px);
+  top: -3px;
+  bottom: -3px;
+  border-left: 1px solid var(--line);
+}
+.log-fold {
+  position: absolute;
+  left: calc(var(--log-depth, 0) * 12px);
+  top: 2px;
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+}
+.log-fold:hover,
+.log-fold:focus-visible {
+  color: var(--blue);
+}
+.log-fold svg {
+  transition: transform 160ms var(--motion-ease);
+}
+.log-fold[aria-expanded="true"] svg {
+  transform: rotate(90deg);
+}
+.log-fold-count {
+  margin-left: 1ch;
+  color: var(--muted);
+  font-size: 10px;
 }
 .log-content time {
   color: var(--muted);

@@ -64,7 +64,7 @@ impl Launcher {
         };
         // The existing parent has been canonicalized; validate even before the
         // child exists so nested instances cannot create files in another game.
-        self.check_external_directory(&game, None)?;
+        self.check_external_directory(&game)?;
         if let Err(error) = fs::create_dir(&game) {
             if error.kind() == ErrorKind::AlreadyExists {
                 bail!("该位置已有 .minecraft，请导入已有目录或选择其他位置");

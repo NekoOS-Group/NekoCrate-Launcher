@@ -2,7 +2,7 @@
 //! build hint, not @Mod.acceptedMinecraftVersions, so it is not a hard bound.
 use anyhow::{Context, Result};
 use serde_json::Value;
-use std::{collections::BTreeMap, fs, io::Read, path::Path};
+use std::{collections::BTreeMap, fs, path::Path};
 
 #[derive(Clone)]
 pub(super) struct Dependency {
@@ -36,29 +36,15 @@ fn text(value: &Value) -> Option<String> {
         .filter(|s| !s.is_empty() && !s.contains("${"))
         .map(str::to_owned)
 }
-fn entry(zip: &mut zip::ZipArchive<fs::File>, name: &str) -> Result<Option<Vec<u8>>> {
-    let mut file = match zip.by_name(name) {
-        Ok(file) => file,
-        Err(zip::result::ZipError::FileNotFound) => return Ok(None),
-        Err(e) => return Err(e.into()),
-    };
-    anyhow::ensure!(file.size() <= 1024 * 1024, "元数据超过 1 MiB");
-    let mut bytes = Vec::new();
-    file.by_ref()
-        .take(1024 * 1024 + 1)
-        .read_to_end(&mut bytes)?;
-    anyhow::ensure!(bytes.len() <= 1024 * 1024, "元数据超过 1 MiB");
-    Ok(Some(bytes))
-}
 fn metadata(
     path: &Path,
     loader: &str,
     legacy: bool,
     runtime: &BTreeMap<String, String>,
 ) -> Result<(Vec<Component>, bool)> {
-    let mut zip = zip::ZipArchive::new(fs::File::open(path)?)?;
-    if loader == "fabric" && zip.index_for_name("fabric.mod.json").is_some() {
-        drop(zip);
+    let metadata = crate::mod_metadata::read(path);
+    metadata.check()?;
+    if loader == "fabric" && metadata.has("fabric.mod.json") {
         let mods = crate::resources::fabric_mod_metadata(
             path,
             &tokio_util::sync::CancellationToken::new(),
@@ -94,32 +80,21 @@ fn metadata(
         // Fabric ignores ordinary / Forge-only jars without fabric.mod.json.
         return Ok((vec![], true));
     }
-    let descriptor =
-        if loader == "neoforge" && zip.index_for_name("META-INF/neoforge.mods.toml").is_some() {
-            "META-INF/neoforge.mods.toml"
-        } else if !legacy
-            && matches!(loader, "forge" | "neoforge")
-            && zip.index_for_name("META-INF/mods.toml").is_some()
-        {
-            "META-INF/mods.toml"
-        } else {
-            "mcmod.info"
-        };
-    let Some(bytes) = entry(&mut zip, descriptor)? else {
+    let descriptor = if loader == "neoforge" && metadata.has("META-INF/neoforge.mods.toml") {
+        "META-INF/neoforge.mods.toml"
+    } else if !legacy
+        && matches!(loader, "forge" | "neoforge")
+        && metadata.has("META-INF/mods.toml")
+    {
+        "META-INF/mods.toml"
+    } else {
+        "mcmod.info"
+    };
+    let Some(value) = metadata.value(descriptor)? else {
         return Ok((vec![], false));
     };
     let modern = descriptor.ends_with(".toml");
-    let value: Value = if modern {
-        serde_json::to_value(toml::from_str::<toml::Value>(std::str::from_utf8(&bytes)?)?)?
-    } else {
-        crate::fabric_metadata::parse(&bytes)?
-    };
-    let infos = if modern {
-        value["mods"].as_array()
-    } else {
-        value.as_array().or_else(|| value["modList"].as_array())
-    }
-    .context("未找到 Mod 元数据列表")?;
+    let infos = crate::mod_metadata::infos(descriptor, value)?;
     let mut components = Vec::new();
     for info in infos {
         let id = text(&info[if modern { "modId" } else { "modid" }]).context("缺少 Mod ID")?;
@@ -195,10 +170,7 @@ fn metadata(
     }
     // Nested Forge jars and annotation-only old Forge Mods need the loader's
     // actual discovery table to establish missing IDs. Never guess absence.
-    let complete = modern
-        && zip
-            .index_for_name("META-INF/jarjar/metadata.json")
-            .is_none();
+    let complete = modern && !metadata.nested_forge;
     Ok((components, complete))
 }
 

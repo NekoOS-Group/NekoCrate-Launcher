@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-// Stable persisted IDs, matching app/src/instanceIcons.ts (0–3 are legacy icons).
+// Stable persisted IDs, matching app/src/instanceIcons.ts.
 pub const INSTANCE_ICON_COUNT: u8 = 16;
 
 /// Write-only IPC input. Never serialize or include credentials in debug output.
@@ -18,7 +18,6 @@ impl std::fmt::Debug for ProxyPassword {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default)]
 pub struct Settings {
     /// Optional developer override; empty uses NekoCrate's registered public client.
     pub microsoft_client_id: String,
@@ -32,8 +31,6 @@ pub struct Settings {
     pub proxy_password: Option<ProxyPassword>,
     pub concurrency: usize,
     pub adaptive_concurrency: bool,
-    pub retries: usize,
-    pub auto_java: bool,
     pub language: String,
     pub apply_language_to_game: bool,
 }
@@ -50,8 +47,6 @@ impl Default for Settings {
             proxy_password: None,
             concurrency: 8,
             adaptive_concurrency: false,
-            retries: 2,
-            auto_java: true,
             language: "system".into(),
             apply_language_to_game: false,
         }
@@ -62,18 +57,15 @@ impl Default for Settings {
 pub struct Instance {
     pub id: String,
     pub name: String,
-    #[serde(default)]
     pub icon: Option<u8>,
     /// Imported directories stay in place. None denotes a launcher-managed directory.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub game_directory: Option<PathBuf>,
     pub versions: Vec<InstanceVersion>,
     pub selected_version: Option<String>,
     pub memory_mb: u32,
-    #[serde(default)]
     pub memory_mode: MemoryMode,
     pub java_path: Option<String>,
-    #[serde(default)]
     pub launch: crate::launch_options::LaunchOptions,
     pub created_at: u64,
     pub last_played: Option<u64>,
@@ -89,20 +81,18 @@ pub enum MemoryMode {
     Custom,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct InstanceVersion {
     pub id: String,
     /// User-facing alias; version metadata, inheritance and directories keep their IDs.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub minecraft_version: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub loader: Option<ModLoader>,
-    #[serde(default)]
     pub modpack: bool,
     pub installed: bool,
-    #[serde(default)]
     pub download_progress: f64,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -139,7 +129,6 @@ pub struct Account {
     pub expires_at: u64,
     pub client_id: String,
     pub owned: bool,
-    #[serde(default)]
     pub skin: Option<AccountSkin>,
 }
 
@@ -150,7 +139,6 @@ pub struct AccountSkin {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(default)]
 pub struct Database {
     pub schema: u32,
     pub ui_preferences: std::collections::BTreeMap<String, String>,

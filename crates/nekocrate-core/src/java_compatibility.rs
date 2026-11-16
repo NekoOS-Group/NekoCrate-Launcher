@@ -390,6 +390,7 @@ fn inspect_cached(path: &Path, loader: &str, overrides: &Value) -> Arc<ModEviden
             return Ok(value.clone());
         }
         let mut zip = zip::ZipArchive::new(std::fs::File::open(path)?)?;
+        let metadata = crate::mod_metadata::read(path);
         let mut budget = 64 * 1024 * 1024;
         let value = Arc::new(inspect_archive(
             &mut zip,
@@ -398,6 +399,7 @@ fn inspect_cached(path: &Path, loader: &str, overrides: &Value) -> Arc<ModEviden
             0,
             &mut budget,
             overrides,
+            Some(&metadata),
         )?);
         let mut cache = cache.lock().unwrap();
         cache.retain(|k, _| k.path != path || k.loader != loader);
@@ -414,26 +416,6 @@ fn inspect_cached(path: &Path, loader: &str, overrides: &Value) -> Arc<ModEviden
         })
     })
 }
-fn read_entry<R: Read + Seek>(
-    zip: &mut zip::ZipArchive<R>,
-    name: &str,
-    limit: u64,
-) -> Result<Option<Vec<u8>>> {
-    let mut entry = match zip.by_name(name) {
-        Ok(entry) => entry,
-        Err(zip::result::ZipError::FileNotFound) => return Ok(None),
-        Err(e) => return Err(e.into()),
-    };
-    if entry.size() > limit {
-        bail!("Java 兼容元数据过大");
-    }
-    let mut bytes = Vec::new();
-    (&mut entry).take(limit + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > limit {
-        bail!("Java 兼容元数据过大");
-    }
-    Ok(Some(bytes))
-}
 fn inspect_archive<R: Read + Seek>(
     zip: &mut zip::ZipArchive<R>,
     loader: &str,
@@ -441,15 +423,14 @@ fn inspect_archive<R: Read + Seek>(
     depth: u32,
     budget: &mut u64,
     overrides: &Value,
+    cached: Option<&crate::mod_metadata::Metadata>,
 ) -> Result<ModEvidence> {
     if depth > 4 {
         bail!("嵌套模组过深");
     }
     let mut result = ModEvidence::default();
     let mut nested = vec![];
-    let fabric = read_entry(zip, "fabric.mod.json", 1024 * 1024)?
-        .map(|bytes| crate::fabric_metadata::parse(&bytes))
-        .transpose()?;
+    let fabric = crate::mod_metadata::document(zip, "fabric.mod.json", cached)?;
     // Some Forge packs load this Fabric mod through a bridge. Inspect its identity
     // independently of the selected loader; do not require a JDK for all mods.
     result.requires_jdk = fabric.as_ref().is_some_and(|meta| {
@@ -459,7 +440,12 @@ fn inspect_archive<R: Read + Seek>(
     });
     if loader == "fabric" {
         if let Some(mut meta) = fabric {
-            apply_fabric_overrides(&mut meta, overrides);
+            if meta["id"]
+                .as_str()
+                .is_some_and(|id| overrides["overrides"].get(id).is_some())
+            {
+                apply_fabric_overrides(meta.to_mut(), overrides);
+            }
             if meta["environment"] == "server" {
                 return Ok(result);
             }
@@ -499,18 +485,17 @@ fn inspect_archive<R: Read + Seek>(
         } else {
             "META-INF/mods.toml"
         };
-        let bytes = read_entry(zip, name, 1024 * 1024)?;
+        let meta = crate::mod_metadata::document(zip, name, cached)?;
         // Early NeoForge still used mods.toml.
-        let bytes = if bytes.is_none() && loader == "neoforge" {
-            read_entry(zip, "META-INF/mods.toml", 1024 * 1024)?
+        let meta = if meta.is_none() && loader == "neoforge" {
+            crate::mod_metadata::document(zip, "META-INF/mods.toml", cached)?
         } else {
-            bytes
+            meta
         };
-        if let Some(bytes) = bytes {
-            let meta: toml::Value = toml::from_str(std::str::from_utf8(&bytes)?)?;
-            if let Some(features) = meta.get("features").and_then(toml::Value::as_table) {
+        if let Some(meta) = meta {
+            if let Some(features) = meta.get("features").and_then(Value::as_object) {
                 for feature in features.values() {
-                    if let Some(range) = feature.get("javaVersion").and_then(toml::Value::as_str) {
+                    if let Some(range) = feature.get("javaVersion").and_then(Value::as_str) {
                         result.constraints.push(Constraint {
                             ranges: vec![range.into()],
                             deny: false,
@@ -520,23 +505,24 @@ fn inspect_archive<R: Read + Seek>(
                 }
             }
             result.uncertain = result.constraints.is_empty();
-            if let Some(mods) = meta.get("mods").and_then(toml::Value::as_array) {
+            if let Some(mods) = meta.get("mods").and_then(Value::as_array) {
                 result.uncertain |= mods.iter().any(|module| {
-                    let Some(id) = module.get("modId").and_then(toml::Value::as_str) else {
+                    let Some(id) = module.get("modId").and_then(Value::as_str) else {
                         return true;
                     };
                     meta.get("features")
                         .and_then(|features| features.get(id))
                         .and_then(|feature| feature.get("javaVersion"))
-                        .and_then(toml::Value::as_str)
+                        .and_then(Value::as_str)
                         .is_none()
                 });
             }
         } else {
             result.uncertain = root;
         }
-        if let Some(bytes) = read_entry(zip, "META-INF/jarjar/metadata.json", 1024 * 1024)? {
-            let meta: Value = serde_json::from_slice(&bytes)?;
+        if let Some(meta) =
+            crate::mod_metadata::document(zip, "META-INF/jarjar/metadata.json", None)?
+        {
             for jar in meta["jars"].as_array().context("嵌套模组清单无效")? {
                 nested.push(jar["path"].as_str().context("嵌套模组路径无效")?.to_owned());
             }
@@ -547,13 +533,21 @@ fn inspect_archive<R: Read + Seek>(
     }
     for path in nested {
         let child = (|| -> Result<ModEvidence> {
-            let bytes =
-                read_entry(zip, &path, (*budget).min(32 * 1024 * 1024))?.context("嵌套模组缺失")?;
+            let bytes = crate::mod_metadata::entry(zip, &path, (*budget).min(32 * 1024 * 1024))?
+                .context("嵌套模组缺失")?;
             *budget = budget
                 .checked_sub(bytes.len() as u64)
                 .context("嵌套模组过大")?;
             let mut child = zip::ZipArchive::new(Cursor::new(bytes))?;
-            inspect_archive(&mut child, loader, false, depth + 1, budget, overrides)
+            inspect_archive(
+                &mut child,
+                loader,
+                false,
+                depth + 1,
+                budget,
+                overrides,
+                None,
+            )
         })();
         match child {
             Ok(evidence) => {

@@ -10,7 +10,7 @@ pub(super) struct LoaderInstall<'a> {
     pub record: InstallRecord,
     pub instance: Instance,
     pub downloader: Downloader,
-    pub auto_java: bool,
+
     pub cancel: &'a CancellationToken,
     pub sink: &'a EventSink,
     pub profile: Option<serde_json::Value>,
@@ -103,7 +103,6 @@ impl LoaderInstall<'_> {
             downloader,
             cancel,
             sink: &progress,
-            auto_java: self.auto_java,
         }
         .run()
         .await;

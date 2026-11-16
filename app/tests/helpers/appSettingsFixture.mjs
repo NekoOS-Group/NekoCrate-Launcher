@@ -105,8 +105,7 @@ export async function settingsFixture() {
           proxy_password_key: null,
           concurrency: 8,
           adaptive_concurrency: false,
-          retries: 2,
-          auto_java: true,
+
           language: "zh-CN",
           apply_language_to_game: false,
         },

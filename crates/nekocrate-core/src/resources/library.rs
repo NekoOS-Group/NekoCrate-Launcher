@@ -39,7 +39,7 @@ impl Launcher {
             let path = listing.directory.join(&file.file_name);
             crate::resource_manager::owned(&root, path.strip_prefix(&root)?)?;
             if kind == ContentKind::Mods {
-                content::apply_identity(file, self.0.mod_summaries.read(&path));
+                content::apply_identity(file, content::mod_metadata(&path).unwrap_or_default());
             }
         }
         crate::sorting::sort_by_cached_key(&mut listing.files, |f| {

@@ -77,13 +77,12 @@ test("dragging adds a deduplicated draft without copying; destination changes pr
       file: "Ice.zip",
     };
     const target = { selection: true, instance: "", version: "" };
-    await ui.copyDraggedResource(source, target);
+    await ui.copyDraggedResources([source], target);
     await ui.copyDraggedResources([source, cached], target);
     assert.deepEqual(ui.selectedLocalResources.value, [source, cached]);
     assert.equal(
       f.calls.some((call) =>
         [
-          "copy_resource",
           "copy_resources",
           "resource_manager",
           "queue_version_resources",
@@ -96,7 +95,7 @@ test("dragging adds a deduplicated draft without copying; destination changes pr
     assert.equal(ui.selectedLocalResources.value.length, 2);
     ui.removeSelectedLocalResource(source);
     assert.deepEqual(ui.selectedLocalResources.value, [cached]);
-    await ui.copyDraggedResource({ ...source, kind: "mods" }, target);
+    await ui.copyDraggedResources([{ ...source, kind: "mods" }], target);
     assert.equal(ui.selectedLocalResources.value.length, 1);
     assert.equal(ui.error.value, "请先选择 Mod 加载器");
     ui.form.version = "1.21.1";
@@ -157,7 +156,7 @@ test("Mod copy sends a listed identity, refreshes views on success, and retains 
     f.context.setVersionManager("test-window", {
       refresh: async () => refreshed++,
     });
-    f.handlers.copy_resource = () => true;
+    f.handlers.copy_resources = () => true;
     const selected = f.context.instances.value[0].selected_version;
     const source = {
       kind: "mods",
@@ -166,28 +165,30 @@ test("Mod copy sends a listed identity, refreshes views on success, and retains 
       file: "example.jar.disabled",
       name: "Example",
     };
-    await f.context.copyDraggedResource(source, {
+    await f.context.copyDraggedResources([source], {
       instance: "instance-b",
       version: "target",
     });
-    const call = f.calls.find((c) => c.op === "copy_resource");
+    const call = f.calls.find((c) => c.op === "copy_resources");
     assert.deepEqual(call, {
-      op: "copy_resource",
-      source: {
-        kind: source.kind,
-        instance: source.instance,
-        version: source.version,
-        file: source.file,
-      },
+      op: "copy_resources",
+      sources: [
+        {
+          kind: source.kind,
+          instance: source.instance,
+          version: source.version,
+          file: source.file,
+        },
+      ],
       id: "instance-b",
       version: "target",
     });
     assert.equal(refreshed, 1);
     assert.equal(f.context.instances.value[0].selected_version, selected);
-    f.handlers.copy_resource = () => {
+    f.handlers.copy_resources = () => {
       throw Error("conflicting file");
     };
-    await f.context.copyDraggedResource(source, {
+    await f.context.copyDraggedResources([source], {
       instance: "instance-b",
       version: "target",
     });
@@ -196,28 +197,6 @@ test("Mod copy sends a listed identity, refreshes views on success, and retains 
   } finally {
     f.dispose();
   }
-});
-
-test("a Mod cannot be copied into a resource-pack tab even when its parent is a valid target", () => {
-  const source = {
-    kind: "mods",
-    instance: "a",
-    version: "one",
-    file: "a.jar",
-    name: "a",
-  };
-  const row = { dataset: { resourceInstance: "b", resourceVersion: "two" } };
-  const element = {
-    closest: (selector) =>
-      selector.includes("data-drop-kind")
-        ? { dataset: { dropKind: "resourcepacks" } }
-        : row,
-  };
-  const instances = [{ id: "b", versions: [{ id: "two", installed: true }] }];
-  assert.equal(
-    resourceCopyDestination(element, source, instances, []),
-    undefined,
-  );
 });
 
 test("existing dock browsing opens the folded area and a version menu without changing selected instance", async () => {

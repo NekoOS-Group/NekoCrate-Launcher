@@ -244,11 +244,11 @@ mod tests {
             Settings {
                 proxy_mode: "none".into(),
                 download_source: "official".into(),
-                retries: 0,
                 ..Settings::default()
             },
         )
         .unwrap()
+        .with_retries(0)
     }
 
     #[tokio::test]

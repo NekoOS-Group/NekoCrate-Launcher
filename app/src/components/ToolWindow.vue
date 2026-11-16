@@ -5,9 +5,7 @@ import {
   onBeforeUnmount,
   onMounted,
   ref,
-  provide,
 } from "vue";
-import { t } from "../i18n";
 import { activateDialog, registerDialog } from "../dialogSurface";
 import { dropInteraction } from "../dropSurface";
 import { rememberDialogFocus } from "../dialogMotion";
@@ -16,7 +14,6 @@ import {
   raiseToolWindow,
   registerToolWindow,
   toolOrder,
-  windowControlsKey,
 } from "../toolWindows";
 import {
   fitWindow,
@@ -236,10 +233,6 @@ function maximize() {
   }
   save();
 }
-provide(windowControlsKey, {
-  expanded: computed(() => !!snap.value),
-  toggle: maximize,
-});
 function doubleClick(event: MouseEvent) {
   if (titleTarget(event.target)) {
     event.preventDefault();
@@ -478,12 +471,6 @@ onBeforeUnmount(() => {
 }
 .tool-window-frame .resource-main > .resource-results {
   min-height: 0;
-}
-.tool-window-frame .resource-header > .window-maximize {
-  margin-left: auto;
-}
-.tool-window-frame .resource-header > .window-maximize + .resource-close {
-  margin-left: 0;
 }
 .tool-window-frame .version-download {
   overflow: hidden;

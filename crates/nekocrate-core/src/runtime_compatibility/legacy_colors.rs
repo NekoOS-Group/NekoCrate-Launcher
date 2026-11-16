@@ -222,7 +222,6 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let game = temp.path().join("a game with spaces/.minecraft");
         let settings = Settings {
-            retries: 0,
             proxy_mode: "none".into(),
             ..Default::default()
         };

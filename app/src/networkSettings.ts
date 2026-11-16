@@ -20,10 +20,8 @@ export function validProxyUrl(value: string): boolean {
 }
 
 export type ProxyKind = "system" | "http" | "socks";
-export function proxyKind(mode: string, address: string): ProxyKind {
+export function proxyKind(mode: string): ProxyKind {
   if (mode === "http" || mode === "socks") return mode;
-  if (mode === "custom")
-    return /^socks5h?:/i.test(address.trim()) ? "socks" : "http";
   return "system";
 }
 export function validProxySettings(mode: string, address: string): boolean {
@@ -31,7 +29,6 @@ export function validProxySettings(mode: string, address: string): boolean {
   if (!validProxyUrl(address)) return false;
   const protocol = new URL(address.trim()).protocol;
   return (
-    mode === "custom" ||
     (mode === "http" && ["http:", "https:"].includes(protocol)) ||
     (mode === "socks" && ["socks5:", "socks5h:"].includes(protocol))
   );

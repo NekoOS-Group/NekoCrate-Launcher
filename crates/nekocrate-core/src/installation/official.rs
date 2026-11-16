@@ -60,7 +60,7 @@ pub(crate) async fn install(
         downloader,
         cancel,
         sink,
-        auto_java: settings.auto_java,
+
         version: None,
         runtime: None,
         fabric,
@@ -80,7 +80,7 @@ struct Official<'a> {
     downloader: Downloader,
     cancel: &'a CancellationToken,
     sink: &'a EventSink,
-    auto_java: bool,
+
     version: Option<Version>,
     runtime: Option<JavaInfo>,
     fabric: bool,
@@ -129,7 +129,7 @@ impl Official<'_> {
                 .await?;
                 storage::write_json(&version::metadata_path(&self.game, parent_id)?, &parent)?;
             }
-            version::resolve(self.launcher.root(), &self.game, &selected.id)?.version
+            version::resolve(&self.game, &selected.id)?.version
         } else {
             (self.sink)(Event::new("stage", "获取官方版本元数据"));
             minecraft::version(
@@ -194,7 +194,6 @@ impl Official<'_> {
             )?,
             version: self.version.as_ref().context("游戏版本尚未解析")?,
             explicit_java: self.instance.java_path.as_deref(),
-            auto_java: self.auto_java,
             downloader: &self.downloader,
             cancel: self.cancel,
             sink: self.sink,

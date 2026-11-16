@@ -16,6 +16,22 @@ fn write(path: &Path, bytes: &[u8]) {
     fs::write(path, bytes).unwrap();
 }
 
+#[test]
+fn inherited_profiles_require_the_parent_in_the_game_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let game = temp.path().join(".minecraft");
+    let parent = base("1.21.1");
+    save(&game, &json!({"id":"Fabric pack","inheritsFrom":"1.21.1"}));
+    storage::write_json(&temp.path().join("metadata/versions/1.21.1.json"), &parent).unwrap();
+    assert!(resolve(&game, "Fabric pack").is_err());
+    assert!(!describe(&game, "Fabric pack").installed);
+    save(&game, &parent);
+    assert_eq!(
+        resolve(&game, "Fabric pack").unwrap().minecraft_version,
+        "1.21.1"
+    );
+}
+
 #[tokio::test]
 async fn legacy_forge_import_is_ready_without_the_unused_lwjgl_platform_jar() {
     let temp = tempfile::tempdir().unwrap();
@@ -58,7 +74,7 @@ async fn legacy_forge_import_is_ready_without_the_unused_lwjgl_platform_jar() {
         .await
         .unwrap();
     assert!(instance.selected().unwrap().installed);
-    let resolved = resolve(launcher.root(), &game, "RLCraft").unwrap();
+    let resolved = resolve(&game, "RLCraft").unwrap();
     let args = minecraft::arguments_with_memory(
         &resolved.version,
         launcher.root(),
@@ -72,16 +88,16 @@ async fn legacy_forge_import_is_ready_without_the_unused_lwjgl_platform_jar() {
     assert!(cp.contains("lwjgl-3.3.1-natives-windows.jar"));
     assert!(!cp.contains("lwjgl-platform"));
     fs::remove_file(&native_path).unwrap();
-    assert!(!describe(launcher.root(), &game, "RLCraft").installed);
+    assert!(!describe(&game, "RLCraft").installed);
     assert!(
-        check_launch_files(launcher.root(), &game, &resolved)
+        check_launch_files(&game, &resolved)
             .unwrap_err()
             .to_string()
             .contains("natives-windows.jar")
     );
     write(&native_path, b"native");
     fs::remove_file(&forge).unwrap();
-    assert!(!describe(launcher.root(), &game, "RLCraft").installed);
+    assert!(!describe(&game, "RLCraft").installed);
     assert_eq!(
         fs::read(metadata_path(&game, "RLCraft").unwrap()).unwrap(),
         original
@@ -110,7 +126,7 @@ fn forge_launch_arguments_never_export_verbatim_paths_to_java() {
     });
     profile["logging"] = json!({"client":{"argument":"-Dlog=${path}","file":{"id":"client.xml"}}});
     let resolved = resolve_chain(&[profile]).unwrap();
-    let instance: Instance = serde_json::from_value(json!({"id":"fixture","name":"Fixture","game_directory":game,"versions":[],"selected_version":null,"memory_mb":2048,"java_path":null,"created_at":0,"last_played":null})).unwrap();
+    let instance: Instance = serde_json::from_value(json!({"id":"fixture","name":"Fixture","game_directory":game,"versions":[],"selected_version":null,"memory_mb":2048,"memory_mode":"auto","launch":launch_options::LaunchOptions::default(),"java_path":null,"created_at":0,"last_played":null})).unwrap();
     let args = minecraft::arguments_with_memory(
         &resolved.version,
         temp.path(),
@@ -154,7 +170,7 @@ fn inherited_profiles_merge_overrides_natives_and_client_without_child_jar() {
             {"name":"net.fabricmc:fabric-loader:0.16.14","url":"https://maven.fabricmc.net/"}],
         "arguments":{"jvm":["-Dcustom=one value"], "game":[]}}),
     );
-    let resolved = resolve(game, game, "Fabric pack").unwrap();
+    let resolved = resolve(game, "Fabric pack").unwrap();
     assert_eq!(resolved.minecraft_version, "1.21.1");
     assert_eq!(resolved.loader.unwrap().version, "0.16.14");
     assert_eq!(resolved.version.jar.as_deref(), Some("1.21.1"));
@@ -168,7 +184,7 @@ fn inherited_profiles_merge_overrides_natives_and_client_without_child_jar() {
     assert_eq!(resolved.version.libraries.len(), 4);
     assert_eq!(resolved.version.arguments.unwrap().jvm.len(), 4);
     assert_eq!(
-        client_path(game, &resolve(game, game, "Fabric pack").unwrap().version).unwrap(),
+        client_path(game, &resolve(game, "Fabric pack").unwrap().version).unwrap(),
         game.join("versions/1.21.1/1.21.1.jar")
     );
     assert!(!game.join("versions/Fabric pack/Fabric pack.jar").exists());
@@ -180,18 +196,13 @@ fn invalid_inheritance_coordinates_and_jar_paths_fail_without_writes() {
     let game = temp.path();
     save(game, &json!({"id":"a", "inheritsFrom":"b"}));
     save(game, &json!({"id":"b", "inheritsFrom":"a"}));
-    assert!(
-        resolve(game, game, "a")
-            .unwrap_err()
-            .to_string()
-            .contains("循环")
-    );
+    assert!(resolve(game, "a").unwrap_err().to_string().contains("循环"));
     save(game, &json!({"id":"a", "inheritsFrom":"../escape"}));
-    assert!(resolve(game, game, "a").is_err());
+    assert!(resolve(game, "a").is_err());
     let mut value = base("a");
     value["jar"] = json!("../../outside");
     save(game, &value);
-    assert!(resolve(game, game, "a").is_err());
+    assert!(resolve(game, "a").is_err());
     for name in [
         "group:../escape:1",
         "group:name:/tmp",
@@ -213,11 +224,11 @@ async fn fabric_maven_sidecars_fill_missing_checksums_and_invalid_responses_are_
         temp.path(),
         Settings {
             proxy_mode: "none".into(),
-            retries: 0,
             ..Settings::default()
         },
     )
-    .unwrap();
+    .unwrap()
+    .with_retries(0);
     let checksum = "1234567890abcdef1234567890abcdef12345678";
     let (url, server) = test_http::serve(vec![(200, format!("{checksum}  loader.jar\n"))]).await;
     let mut profile =
@@ -279,7 +290,7 @@ fn flattened_legacy_forge_supports_empty_downloads_quotes_and_hmcl_isolation() {
     value["libraries"] =
         json!([{"name":"net.minecraftforge:forge:1.12.2-14.23.5.2860","downloads":{}}]);
     save(game, &value);
-    let resolved = resolve(game, game, "RLCraft").unwrap();
+    let resolved = resolve(game, "RLCraft").unwrap();
     assert_eq!(resolved.minecraft_version, "1.12.2");
     assert_eq!(resolved.loader.as_ref().unwrap().version, "14.23.5.2860");
     assert!(
@@ -293,7 +304,7 @@ fn flattened_legacy_forge_supports_empty_downloads_quotes_and_hmcl_isolation() {
             .unwrap()
             .ends_with("forge-1.12.2-14.23.5.2860.jar")
     );
-    let instance: Instance = serde_json::from_value(json!({"id":"fixture","name":"Fixture","game_directory":game,"versions":[],"selected_version":null,"memory_mb":2048,"java_path":null,"created_at":0,"last_played":null})).unwrap();
+    let instance: Instance = serde_json::from_value(json!({"id":"fixture","name":"Fixture","game_directory":game,"versions":[],"selected_version":null,"memory_mb":2048,"memory_mode":"auto","launch":launch_options::LaunchOptions::default(),"java_path":null,"created_at":0,"last_played":null})).unwrap();
     let pack = game.join("versions/RLCraft");
     fs::create_dir_all(pack.join("mods")).unwrap();
     let mut session = LaunchSession::guest();
@@ -466,7 +477,7 @@ async fn fabric_installs_verifies_and_repairs_from_cache_without_replacing_origi
     let game = launcher.game_dir(&instance.id).unwrap();
     let mut settings = launcher.settings();
     settings.proxy_mode = "none".into();
-    settings.retries = 0;
+
     launcher.save_settings(settings).unwrap();
     let parent_id = "1.21.1";
     let loader = "0.16.14";
@@ -505,8 +516,21 @@ async fn fabric_installs_verifies_and_repairs_from_cache_without_replacing_origi
     .unwrap();
     let sink: EventSink = Arc::new(|_| {});
     let cancel = CancellationToken::new();
+    storage::write_json(
+        &launcher.root().join("metadata/fabric/loaders/1.21.1.json"),
+        &json!([{"version":loader,"stable":true}]),
+    )
+    .unwrap();
     let added = launcher
-        .add_fabric_version(&instance.id, parent_id, loader, &cancel, &sink)
+        .add_loader_version(
+            &instance.id,
+            parent_id,
+            ModLoader {
+                kind: "fabric".into(),
+                version: loader.into(),
+            },
+            &cancel,
+        )
         .await
         .unwrap();
     assert!(!added.selected().unwrap().installed);
@@ -514,7 +538,15 @@ async fn fabric_installs_verifies_and_repairs_from_cache_without_replacing_origi
         .rename_version(&instance.id, &profile_id, "My Fabric")
         .unwrap();
     let readded = launcher
-        .add_fabric_version(&instance.id, parent_id, loader, &cancel, &sink)
+        .add_loader_version(
+            &instance.id,
+            parent_id,
+            ModLoader {
+                kind: "fabric".into(),
+                version: loader.into(),
+            },
+            &cancel,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -557,7 +589,7 @@ async fn fabric_installs_verifies_and_repairs_from_cache_without_replacing_origi
             .exists()
     );
     let persisted: Value = storage::read_json(&metadata_path(&game, &profile_id).unwrap()).unwrap();
-    assert_eq!(persisted["inheritsFrom"], parent_id);
+    assert_eq!(persisted["jar"], parent_id);
     let files = minecraft::cached_installation_files(launcher.root(), &game, &profile_id)
         .await
         .unwrap();

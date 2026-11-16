@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import WindowControls from "./WindowControls.vue";
 import {
   computed,
   inject,
@@ -757,7 +756,6 @@ defineExpose({ refresh });
         >
           <RefreshCw :size="18" :class="{ spin: loading }" />
         </button>
-        <WindowControls />
         <button
           class="icon-button"
           :disabled="saving"

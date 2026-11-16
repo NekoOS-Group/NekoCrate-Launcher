@@ -33,7 +33,7 @@ Minecraft API 审核状态：项目维护者于 2026-10-27 确认已通过 Mojan
 1. 在 Microsoft Entra 的应用注册中创建你自己的应用。
 2. 账户类型需要允许个人 Microsoft 账户（Xbox/Minecraft 使用的消费者账户）。
 3. 在 Authentication → Add a platform → **Mobile and desktop applications** 中登记 `http://localhost`，并保留 Allow public client flows。不要把这个回调登记成 Web 或 SPA。启动器实际使用 `http://localhost:<临时端口>/`；微软匹配 localhost 回调时忽略端口，无需登记每个临时端口。
-4. 点击左上角账户卡片，在卡片下方展开账户列表，再点击「+」直接开始微软登录。下拉面板没有遮罩，不阻止操作主界面；选择账户后收起，点击外部或按 Esc 也可收起，Tab 和方向键可访问账户及管理操作。启动器内置上表中的项目 Client ID，账户界面不再要求用户配置应用 ID。开发者仍可通过数据文件中的 `settings.microsoft_client_id` 覆盖默认值；空值（包括旧版本留下的空配置）自动使用内置 ID。
+4. 点击左上角账户卡片，在卡片下方展开账户列表，再点击「+」直接开始微软登录。下拉面板没有遮罩，不阻止操作主界面；选择账户后收起，点击外部或按 Esc 也可收起，Tab 和方向键可访问账户及管理操作。启动器内置上表中的项目 Client ID，账户界面不再要求用户配置应用 ID。开发者仍可通过数据文件中的 `settings.microsoft_client_id` 覆盖默认值；空值使用内置 ID。
 5. 申请/确认你的应用具备 Minecraft API 的访问许可。微软 OAuth 成功不代表 Minecraft 会接受该应用；若 Minecraft 登录阶段返回应用访问错误，需先处理注册/许可问题。
 6. 点击添加账户后，系统默认浏览器直接打开微软账号选择页。授权请求使用 `prompt=select_account`，不预填 `login_hint`，允许选择记住的账号或使用其他账号。账户列表保持原位，完成授权后直接加入新头像。浏览器打开失败时再次点击加号重试。
 7. 关闭账户列表仅收起面板，不中断浏览器授权，登录成功也不会重新弹出面板。再次点击加号、开始新任务或退出启动器时清理旧会话，迟到结果不能覆盖新会话。
@@ -66,7 +66,7 @@ macOS 的钥匙串授权还取决于程序的代码签名身份。`cargo ui` 使
 
 Windows 使用 Windows Credential Manager 存储刷新令牌，Linux 使用 Secret Service；更新或重新编译不需要照搬 macOS 的应用签名授权流程。用户凭据不会进入构建环境，发布签名私钥也不会装入用户凭据库或分发到客户端，具体见[签名与密钥管理](build-infrastructure.md#签名与密钥管理)。
 
-账户列表始终保留游客入口；选择它会清空 `selected_account`，保留所有微软账户与凭据。游客名称默认 `Player`，可点击游客头像下悬停显示的名称原位修改（1–16 位英文字母、数字或下划线，回车或离开输入框保存，Esc 放弃），单独持久化在 `guest_name`。旧数据库没有这个字段时自动使用默认名称。本地 UUID 继续使用 `a01e3843-e521-3998-958a-f459800e4d11`（原 `OfflinePlayer:Player` 的 Java name-based UUID），改名不改变本地玩家数据的归属。这个身份只用于游戏进程，不创建账户记录，不需要 Client ID，也不访问微软身份服务或钥匙串。无认证的进程参数使用 `accessToken=0`，此占位值与 [Prism 的离线会话实现](https://github.com/PrismLauncher/PrismLauncher/blob/develop/launcher/minecraft/auth/AuthSession.cpp) 一致；它不是凭据，不参与日志令牌替换。需要微软身份验证的在线服务仍需登录账户。
+账户列表始终保留游客入口；选择它会清空 `selected_account`，保留所有微软账户与凭据。游客名称默认 `Player`，可点击游客头像下悬停显示的名称原位修改（1–16 位英文字母、数字或下划线，回车或离开输入框保存，Esc 放弃），单独持久化在 `guest_name`。本地 UUID 继续使用 `a01e3843-e521-3998-958a-f459800e4d11`（原 `OfflinePlayer:Player` 的 Java name-based UUID），改名不改变本地玩家数据的归属。这个身份只用于游戏进程，不创建账户记录，不需要 Client ID，也不访问微软身份服务或钥匙串。无认证的进程参数使用 `accessToken=0`，此占位值与 [Prism 的离线会话实现](https://github.com/PrismLauncher/PrismLauncher/blob/develop/launcher/minecraft/auth/AuthSession.cpp) 一致；它不是凭据，不参与日志令牌替换。需要微软身份验证的在线服务仍需登录账户。
 
 已区分的错误包括：用户拒绝授权、浏览器授权超时、刷新令牌被撤销、Client ID/权限配置错误、Xbox 档案缺失、家庭/年龄限制、游戏权益缺失与 Java 档案未创建。
 

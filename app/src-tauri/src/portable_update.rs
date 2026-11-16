@@ -314,7 +314,15 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join(portable::DATA_DIRECTORY);
         fs::create_dir(&root).unwrap();
-        fs::write(temp.path().join(portable::MARKER), r#"{"schema":1}"#).unwrap();
+        nekocrate_core::storage::write_json(
+            &root.join("portable.json"),
+            &portable::Identity {
+                schema: 1,
+                id: "578f8d98-c319-4e99-8a97-25b0f4ef190b".into(),
+                game_linked: false,
+            },
+        )
+        .unwrap();
         portable::initialize(&root).unwrap();
         let stage = root.join("updates/fixture");
         fs::create_dir_all(&stage).unwrap();

@@ -8,7 +8,6 @@ struct Selection {
     minecraft: String,
     loader: Option<ModLoader>,
     resources: Vec<ResourceSelection>,
-    #[serde(default)]
     local: Vec<ResourceCopySource>,
     plan: Option<String>,
 }

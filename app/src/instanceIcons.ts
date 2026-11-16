@@ -81,10 +81,7 @@ export const instanceIcons: InstanceIconDefinition[] = [
   { id: 15, name: "干草块", faces: { top: hayTop, side: hay } },
 ];
 
-export function resolveInstanceIcon(
-  icon: number | null | undefined,
-  id: string,
-) {
+export function resolveInstanceIcon(icon: number | null | undefined) {
   if (instanceIcons.some((candidate) => candidate.id === icon)) return icon!;
-  return (Number.parseInt(id.replaceAll("-", "").slice(0, 8), 16) || 0) % 4;
+  return 0;
 }

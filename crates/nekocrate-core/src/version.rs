@@ -19,7 +19,7 @@ pub fn metadata_path(game: &Path, id: &str) -> Result<PathBuf> {
     Ok(game.join("versions").join(id).join(format!("{id}.json")))
 }
 
-pub fn resolve(root: &Path, game: &Path, id: &str) -> Result<ResolvedVersion> {
+pub fn resolve(game: &Path, id: &str) -> Result<ResolvedVersion> {
     let mut chain = Vec::new();
     let mut seen = HashSet::new();
     let mut current = id.to_owned();
@@ -28,12 +28,6 @@ pub fn resolve(root: &Path, game: &Path, id: &str) -> Result<ResolvedVersion> {
             bail!("版本继承存在循环或层数过多：{id}");
         }
         let path = metadata_path(game, &current)?;
-        let path = if !path.is_file() && current != id {
-            root.join("metadata/versions")
-                .join(format!("{current}.json"))
-        } else {
-            path
-        };
         let value: Value = storage::read_json(&path)
             .with_context(|| format!("缺少或无法读取版本配置：{current}"))?;
         if value["id"].as_str() != Some(&current) {
@@ -435,18 +429,8 @@ fn existing_working_directory(game: &Path, id: &str) -> Result<PathBuf> {
     Ok(game.to_owned())
 }
 
-pub fn local_library(root: &Path, game: &Path, artifact: &Artifact) -> Result<PathBuf> {
-    let local = minecraft::library_path(game, artifact)?;
-    let legacy = minecraft::library_path(root, artifact)?;
-    Ok(if local.is_file() || !legacy.is_file() {
-        local
-    } else {
-        legacy
-    })
-}
-
 /// A quick readiness check, not a full repair/hash pass over thousands of assets.
-pub fn check_launch_files(root: &Path, game: &Path, resolved: &ResolvedVersion) -> Result<()> {
+pub fn check_launch_files(game: &Path, resolved: &ResolvedVersion) -> Result<()> {
     let version = &resolved.version;
     let runtime_arch = crate::java::JavaRequirement::for_version(version).arch;
     let mut files = vec![client_path(game, version)?];
@@ -456,10 +440,10 @@ pub fn check_launch_files(root: &Path, game: &Path, resolved: &ResolvedVersion) 
         .filter(|l| minecraft::is_allowed_on(l, runtime_arch))
     {
         if let Some(a) = minecraft::classpath_artifact(library) {
-            files.push(local_library(root, game, a)?);
+            files.push(minecraft::library_path(game, a)?);
         }
         if let Some(a) = minecraft::native_artifact(library) {
-            files.push(local_library(root, game, a)?);
+            files.push(minecraft::library_path(game, a)?);
         }
     }
     for path in files {
@@ -470,18 +454,18 @@ pub fn check_launch_files(root: &Path, game: &Path, resolved: &ResolvedVersion) 
     Ok(())
 }
 
-pub fn describe(root: &Path, game: &Path, id: &str) -> InstanceVersion {
+pub fn describe(game: &Path, id: &str) -> InstanceVersion {
     if let Ok(managed) = crate::loader::describe(game, id) {
         return managed;
     }
-    match resolve(root, game, id) {
+    match resolve(game, id) {
         Ok(resolved) => InstanceVersion {
             id: id.into(),
             name: None,
             modpack: false,
             minecraft_version: Some(resolved.minecraft_version.clone()),
             loader: resolved.loader.clone(),
-            installed: check_launch_files(root, game, &resolved).is_ok(),
+            installed: check_launch_files(game, &resolved).is_ok(),
             download_progress: 0.0,
         },
         Err(_) => {

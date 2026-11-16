@@ -9,7 +9,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-pub const MARKER: &str = "nekocrate.portable.json";
 pub const RUNTIME_CONFIG: &str = "nekocrate.runtime.json";
 pub const DATA_DIRECTORY: &str = ".nekocrate";
 const PREFIX: &str = "nekocrate-portable:/";
@@ -18,7 +17,6 @@ const PREFIX: &str = "nekocrate-portable:/";
 pub struct Identity {
     pub schema: u32,
     pub id: String,
-    #[serde(default)]
     pub game_linked: bool,
 }
 
@@ -183,11 +181,10 @@ fn detect_mode(executable: &Path, platform: &str, portable: bool) -> Result<Opti
         Some(true) => true,
         None => portable,
     };
-    let base = package_directory(executable, platform)?;
-    let marker = base.join(MARKER);
-    if !portable && !marker.try_exists()? {
+    if !portable {
         return Ok(None);
     }
+    let base = package_directory(executable, platform)?;
     ensure!(
         platform != "macos"
             || !base
@@ -195,9 +192,6 @@ fn detect_mode(executable: &Path, platform: &str, portable: bool) -> Result<Opti
                 .any(|part| part.as_os_str() == "AppTranslocation"),
         "macOS 正在临时隔离目录中运行此应用。请关闭启动器，用 Finder 将 .app 移到目标游戏文件夹后重新打开。\nmacOS is running this app in a temporary location. Close it, move the .app in Finder to your game folder, then reopen it."
     );
-    if !portable {
-        validate_marker(&marker)?;
-    }
     let root = base.join(DATA_DIRECTORY);
     if let Ok(meta) = fs::symlink_metadata(&root) {
         ensure!(
@@ -222,12 +216,8 @@ fn initialize_mode(root: &Path, embedded: bool) -> Result<Option<Identity>> {
     if root.file_name().is_none_or(|name| name != DATA_DIRECTORY) {
         return Ok(None);
     }
-    if !embedded {
-        let marker = root.parent().unwrap().join(MARKER);
-        if !marker.try_exists()? {
-            return Ok(None);
-        }
-        validate_marker(&marker)?;
+    if !embedded && identity(root).is_none() {
+        return Ok(None);
     }
     let path = root.join("portable.json");
     let identity = if path.try_exists()? {
@@ -247,15 +237,6 @@ fn initialize_mode(root: &Path, embedded: bool) -> Result<Option<Identity>> {
     };
     cleanup_updates(root);
     Ok(Some(identity))
-}
-
-fn validate_marker(path: &Path) -> Result<()> {
-    let value: Value = storage::read_json(path).context("便携模式标记无效")?;
-    ensure!(
-        value.get("schema").and_then(Value::as_u64) == Some(1),
-        "不支持的便携模式版本"
-    );
-    Ok(())
 }
 
 fn cleanup_updates(root: &Path) {
@@ -416,10 +397,33 @@ mod tests {
     use super::*;
     use crate::Launcher;
 
+    #[test]
+    fn retired_portable_marker_does_not_select_a_data_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("nekocrate.portable.json"),
+            r#"{"schema":1}"#,
+        )
+        .unwrap();
+        for (platform, name) in [
+            ("windows", "launcher.exe"),
+            ("linux", "launcher.elf"),
+            ("macos", "Neko.app/Contents/MacOS/launcher"),
+        ] {
+            let executable = temp.path().join(name);
+            assert!(detect_mode(&executable, platform, false).unwrap().is_none());
+            assert_eq!(
+                detect_mode(&executable, platform, true).unwrap(),
+                Some(temp.path().join(DATA_DIRECTORY))
+            );
+        }
+    }
     fn package(base: &Path) -> PathBuf {
         fs::create_dir_all(base).unwrap();
-        fs::write(base.join(MARKER), r#"{"schema":1}"#).unwrap();
-        base.join(DATA_DIRECTORY)
+        let root = base.join(DATA_DIRECTORY);
+        fs::create_dir_all(&root).unwrap();
+        initialize_mode(&root, true).unwrap();
+        root
     }
 
     #[test]
@@ -519,9 +523,9 @@ mod tests {
             fs::write(&configuration, r#"{"schema":1,"mode":"installed"}"#).unwrap();
             assert!(detect_mode(&executable, platform, true).unwrap().is_none());
             // An old portable marker cannot override an explicit installed mode.
-            fs::write(base.join(MARKER), r#"{"schema":1}"#).unwrap();
+            fs::write(base.join("nekocrate.portable.json"), r#"{"schema":1}"#).unwrap();
             assert!(detect_mode(&executable, platform, true).unwrap().is_none());
-            fs::remove_file(base.join(MARKER)).unwrap();
+            fs::remove_file(base.join("nekocrate.portable.json")).unwrap();
             fs::remove_file(&configuration).unwrap();
             assert_eq!(detect_mode(&executable, platform, true).unwrap(), expected);
         }
@@ -585,7 +589,7 @@ mod tests {
         fs::create_dir(&root).unwrap();
         let first = initialize_mode(&root, true).unwrap().unwrap();
         assert_eq!(initialize_mode(&root, true).unwrap().unwrap().id, first.id);
-        assert!(!temp.path().join(MARKER).exists());
+        assert!(!temp.path().join("nekocrate.portable.json").exists());
         assert!(
             initialize_mode(&temp.path().join("explicit-data"), true)
                 .unwrap()
@@ -599,30 +603,6 @@ mod tests {
     #[test]
     fn portable_mac_refuses_a_translocated_directory() {
         assert!(detect_mode(Path::new("/private/var/folders/test/AppTranslocation/random/d/Any.app/Contents/MacOS/launcher"), "macos", true).is_err());
-    }
-
-    #[test]
-    fn detects_only_explicit_packages_and_uses_outer_bundle_directory() {
-        let temp = tempfile::tempdir().unwrap();
-        fs::create_dir(temp.path().join(".minecraft")).unwrap();
-        assert!(
-            detect(&temp.path().join("launcher"), "linux")
-                .unwrap()
-                .is_none()
-        );
-        let root = package(temp.path());
-        for (platform, name) in [
-            ("windows", "launcher.exe"),
-            ("linux", "launcher.elf"),
-            ("macos", "Neko.app/Contents/MacOS/launcher"),
-        ] {
-            assert_eq!(
-                detect(&temp.path().join(name), platform).unwrap(),
-                Some(root.clone())
-            );
-        }
-        fs::write(temp.path().join(MARKER), r#"{"schema":2}"#).unwrap();
-        assert!(detect(&temp.path().join("launcher"), "linux").is_err());
     }
 
     #[test]

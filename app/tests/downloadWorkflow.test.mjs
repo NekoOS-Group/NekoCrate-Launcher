@@ -1,3 +1,4 @@
+import { fileWindow } from "./fileWindow.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { computed, reactive } from "vue";
@@ -5,7 +6,6 @@ import {
   createWorkflow,
   applyWorkflowEvent,
   finishWorkflow,
-  fileWindow,
   filePercent,
 } from "../src/downloadWorkflow.ts";
 import { activeDialog, registerDialog } from "../src/dialogSurface.ts";
@@ -318,12 +318,14 @@ test("IPC 文件事件只更新所属任务，失败统一提供给角落通知�
       "仅流程测试事件可写日志，文件事件不写日志",
     );
     download.reject(
-      new Error("未找到该官方游戏版本；原型暂不支持自定义加载器版本"),
+      new Error(
+        "未在官方版本目录中找到此版本，请检查游戏版本号或关联已安装的加载器目录",
+      ),
     );
     await installing;
     assert.equal(ui.showDownloads.value, true);
     assert.equal(ui.displayedTask.value.status, "error");
-    assert.match(ui.visibleError.value, /未找到该官方游戏版本/);
+    assert.match(ui.visibleError.value, /未在官方版本目录中找到此版本/);
     ui.dismissError();
     await flush();
     assert.equal(ui.visibleError.value, "");

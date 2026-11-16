@@ -275,11 +275,10 @@ async fn modrinth_pending_files_are_categorized_without_network_or_local_archive
     );
 }
 
-fn seed_mod_cache(launcher: &Launcher) {
+fn seed_mod_cache(game: &Path) {
     let hash = hex::encode(Sha1::digest(b"mod"));
-    let cached = launcher
-        .root()
-        .join("cache/objects/sha1")
+    let cached = game
+        .join(".nekocrate/downloads/sha1")
         .join(&hash[..2])
         .join(hash);
     fs::create_dir_all(cached.parent().unwrap()).unwrap();
@@ -306,7 +305,7 @@ async fn individual_mod_download_only_installs_selected_file_and_preserves_pack_
         .prepare_modpack(&instance.id, &source, "Pack", &[])
         .await
         .unwrap();
-    seed_mod_cache(&launcher);
+    seed_mod_cache(&game.join("versions/Pack"));
     let sink: EventSink = Arc::new(|_| {});
     let output = launcher
         .download_declared_mod(
@@ -355,7 +354,7 @@ async fn individual_external_mod_checks_hashes_and_never_overwrites_conflicts() 
     let mut manifest = mr(vec![pack_file("mods/one.jar", "required")]);
     manifest["files"][0]["hashes"]["sha512"] = json!("0".repeat(128));
     storage::write_json(&game.join("modrinth.index.json"), &manifest).unwrap();
-    seed_mod_cache(&launcher);
+    seed_mod_cache(&game);
     let cancel = CancellationToken::new();
     let sink: EventSink = Arc::new(|_| {});
     let error = launcher

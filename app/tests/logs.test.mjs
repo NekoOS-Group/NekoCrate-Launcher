@@ -1,12 +1,8 @@
+import { presentLogs } from "./presentLogs.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { settingsFixture, flush } from "./helpers/appSettingsFixture.mjs";
-import {
-  parseLog,
-  presentLogs,
-  filterLogs,
-  copyLogRows,
-} from "../src/logPresentation.ts";
+import { parseLog, filterLogs, copyLogRows } from "../src/logPresentation.ts";
 
 test("Minecraft/Forge/Fabric headers use one time column and distinct severity/source", () => {
   assert.deepEqual(

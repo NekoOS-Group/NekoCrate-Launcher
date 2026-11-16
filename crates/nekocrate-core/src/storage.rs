@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Serialize, de::DeserializeOwned};
 use std::{
     fs,
+    io::Read,
     path::{Component, Path, PathBuf},
 };
 
@@ -10,6 +11,17 @@ pub fn now() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/// Share bounded reads across archive entries and ordinary files without
+/// instantiating the allocation/read loop for every reader type.
+pub(crate) fn read_bounded(reader: &mut dyn std::io::Read, limit: u64) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader.take(limit + 1).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > limit {
+        bail!("元数据内容过大");
+    }
+    Ok(bytes)
 }
 
 /// Resolve the path without opening/locking the database, so early startup
@@ -42,30 +54,6 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
 #[inline(never)]
 fn read_json_bytes(path: &Path) -> Result<Vec<u8>> {
     fs::read(path).with_context(|| format!("无法读取 {}", path.display()))
-}
-pub(crate) fn same_file_contents(a: &Path, b: &Path) -> Result<bool> {
-    use ring::digest::{Context, SHA256};
-    use std::io::Read;
-    if !a.is_file() || !b.is_file() || fs::metadata(a)?.len() != fs::metadata(b)?.len() {
-        return Ok(false);
-    }
-    let hash = |path: &Path| -> Result<_> {
-        let mut hash = Context::new(&SHA256);
-        let mut file = fs::File::open(path)?;
-        let mut buffer = vec![0_u8; 64 * 1024];
-        loop {
-            let count = match file.read(&mut buffer) {
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                result => result?,
-            };
-            if count == 0 {
-                break;
-            }
-            hash.update(&buffer[..count]);
-        }
-        Ok(hash.finish())
-    };
-    Ok(hash(a)?.as_ref() == hash(b)?.as_ref())
 }
 // Keep each record serializer shared across checkpoint call sites.
 #[inline(never)]

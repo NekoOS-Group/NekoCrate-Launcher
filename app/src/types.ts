@@ -12,8 +12,7 @@ export interface Settings {
   proxy_password?: string;
   concurrency: number;
   adaptive_concurrency: boolean;
-  retries: number;
-  auto_java: boolean;
+
   language: string;
   apply_language_to_game: boolean;
 }
@@ -140,10 +139,6 @@ export interface ContentMetadata {
     dependencies: { id: string; requirement: string; relation: string }[];
     issue: string | null;
   }[];
-}
-export interface FabricLoaderVersion {
-  version: string;
-  stable: boolean;
 }
 export interface Account {
   id: string;
@@ -294,18 +289,6 @@ export interface VersionMetadata {
   documents: MetadataDocument[];
   libraries: { name: string; detail: string | null }[];
   issue: string | null;
-}
-export interface VersionStorage {
-  directory: string;
-  relative: string;
-  exists: boolean;
-  files: {
-    name: string;
-    relative: string;
-    directory: boolean;
-    symlink: boolean;
-    size: number;
-  }[];
 }
 
 export interface ModpackFile {

@@ -169,13 +169,6 @@ pub(super) fn read_pack(path: PathBuf) -> MetadataDocument {
     document
 }
 
-pub(super) fn cached_pack(path: PathBuf, manifest: &Value) -> MetadataDocument {
-    let mut document = empty(path, String::new(), "整合包清单");
-    document.json = Some(manifest.to_string());
-    parse_pack(&mut document, manifest);
-    document
-}
-
 fn parse_pack(document: &mut MetadataDocument, value: &Value) {
     fields(
         document,

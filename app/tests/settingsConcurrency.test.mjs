@@ -87,21 +87,19 @@ test("游戏和 Mod 来源独立保存，无效代理草稿不阻塞其他设置
     ui.toggleUtility("settings");
     await flush();
     ui.settings.download_source = "bmclapi";
-    ui.settings.mod_download_source = "official";
-    ui.settings.proxy_mode = "custom";
+    ui.settings.mod_download_source = "modrinth";
+    ui.settings.proxy_mode = "socks";
     ui.settings.proxy_url = "http://";
-    ui.settings.retries = 4;
     await flush();
     assert.equal(fixture.state.database.settings.download_source, "bmclapi");
     assert.equal(
       fixture.state.database.settings.mod_download_source,
-      "official",
+      "modrinth",
     );
     assert.equal(fixture.state.database.settings.proxy_mode, "system");
-    assert.equal(fixture.state.database.settings.retries, 4);
     ui.settings.proxy_url = " socks5://127.0.0.1:1080 ";
     await flush();
-    assert.equal(fixture.state.database.settings.proxy_mode, "custom");
+    assert.equal(fixture.state.database.settings.proxy_mode, "socks");
     assert.equal(
       fixture.state.database.settings.proxy_url,
       "socks5://127.0.0.1:1080",
@@ -119,7 +117,7 @@ test("游戏和 Mod 来源独立保存，无效代理草稿不阻塞其他设置
       (call) => call.op === "save_settings",
     )) {
       assert.ok(
-        call.settings.proxy_mode !== "custom" ||
+        call.settings.proxy_mode !== "socks" ||
           call.settings.proxy_url === "socks5://127.0.0.1:1080",
       );
       assert.ok(!call.settings.proxy_url.includes("secret"));
@@ -305,7 +303,6 @@ test("无效数字不写入也不阻止其他选项生效，合法数值立即�
     ui.toggleUtility("settings");
     await flush();
     ui.settings.concurrency = "";
-    ui.settings.retries = 9;
     await flush();
     assert.equal(
       fixture.calls.filter((call) => call.op === "save_settings").length,
@@ -317,20 +314,15 @@ test("无效数字不写入也不阻止其他选项生效，合法数值立即�
     assert.equal(fixture.state.database.settings.language, "en-US");
     assert.equal(fixture.state.database.settings.download_source, "bmclapi");
     assert.equal(fixture.state.database.settings.concurrency, 8);
-    assert.equal(fixture.state.database.settings.retries, 2);
     assert.equal(ui.settings.concurrency, "");
-    assert.equal(ui.settings.retries, 9);
     ui.settings.concurrency = 12;
-    ui.settings.retries = 0;
     await flush();
     assert.equal(fixture.state.database.settings.concurrency, 12);
-    assert.equal(fixture.state.database.settings.retries, 0);
     ui.toggleUtility("settings");
     await flush();
     ui.toggleUtility("settings");
     await flush();
     assert.equal(ui.settings.concurrency, 12);
-    assert.equal(ui.settings.retries, 0);
   } finally {
     dispose();
   }

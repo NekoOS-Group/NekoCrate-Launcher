@@ -141,7 +141,7 @@ test("real log panel browses all session entries with bounded DOM, filters/copie
     time: "12:00:00",
     kind: "log",
     instanceId: i % 2 ? "b" : "a",
-    message: `[INFO] line ${i}`,
+    message: `[worker-${i % 2 ? "b" : "a"}/INFO]: line ${i}`,
   });
   for (let i = 0; i < 10000; i++) store.append(entry(i));
   let snapshots = 0,
@@ -154,10 +154,6 @@ test("real log panel browses all session entries with bounded DOM, filters/copie
         return store.snapshot();
       },
     },
-    instances: [
-      { id: "a", name: "A" },
-      { id: "b", name: "B" },
-    ],
     initialScope: "all",
     session: 1,
     onCopy(text) {
@@ -206,7 +202,10 @@ test("real log panel browses all session entries with bounded DOM, filters/copie
     1,
     "earliest logs remain accessible after 10,000 entries",
   );
-  assert.ok(find((n) => n.props.class === "log-latest text-button"));
+  assert.equal(
+    find((n) => n.props.class === "log-latest text-button"),
+    undefined,
+  );
   const before = snapshots;
   for (let i = 10000; i < 12000; i++) store.append(entry(i));
   await settle();
@@ -221,12 +220,12 @@ test("real log panel browses all session entries with bounded DOM, filters/copie
   );
   assert.equal(rows()[0].props["aria-setsize"], 12000);
   assert.ok(rows().length <= 17);
-  find((n) => n.props.id === "log-scope").props.onChange("a");
+  find((n) => n.props.id === "log-sender").props.onChange("worker-a");
   await settle();
   assert.equal(rows().at(-1).props["aria-setsize"], 6000);
   find((n) => n.props["aria-label"] === "复制筛选后的日志").props.onClick();
   assert.equal(copied.split("\n").length, 6000);
-  assert.ok(copied.startsWith("[12:00:00] [INFO] line 0\n"));
+  assert.ok(copied.startsWith("[12:00:00] [worker-a/INFO]: line 0\n"));
   find((n) => n.tag === "input").props["onUpdate:modelValue"]("line 11998");
   await settle();
   assert.equal(rows().length, 1);
@@ -270,26 +269,58 @@ test("real log panel browses all session entries with bounded DOM, filters/copie
     recovered = [target.instanceId, action];
   };
   await settle();
-  const buttons = () =>
-    find((n) => n.props.class === "log-recovery-actions").children.filter(
-      (n) => n.tag === "button",
-    );
-  assert.equal(buttons().length, 2);
-  buttons()[0].props.onClick();
+  assert.equal(
+    find((n) => n.props.class === "log-recovery"),
+    undefined,
+  );
+  assert.equal(
+    find((n) => n.props["aria-label"] === "打开日志文件"),
+    undefined,
+  );
+  const repairButton = () =>
+    find((n) => n.props["aria-label"] === "修复游戏文件");
+  repairButton().props.onClick();
   assert.deepEqual(recovered, ["b", "repair"]);
   props.busy = true;
   await settle();
-  assert.equal(buttons()[0].props.disabled, true);
-  assert.equal(buttons()[1].props.disabled, false);
-  find((n) => n.props.id === "log-scope").props.onChange("a");
+  assert.equal(repairButton().props.disabled, true);
+  props.initialScope = "a";
+  props.session++;
   await settle();
-  assert.equal(buttons().length, 1);
-  find((n) => n.props.id === "log-scope").props.onChange("launcher");
+  assert.ok(find((n) => n.props["aria-label"] === "选择 Java"));
+  props.initialScope = "launcher";
+  props.session++;
   await settle();
-  assert.equal(
-    find((n) => n.props.class === "log-recovery-actions"),
-    undefined,
-  );
+  assert.equal(repairButton(), undefined);
+  // Folding affects presentation only; copying still includes every original.
+  store.clear();
+  const messages = [
+    "[main/INFO]: Loading 2 mods:",
+    "\t- parent 1.0",
+    "\t  |-- child 2.0",
+    "\t- sibling 1.0",
+    "[main/INFO]: Ready",
+  ];
+  for (const message of messages) store.append({ ...entry(0), message });
+  props.initialScope = "a";
+  props.session++;
+  await settle();
+  assert.equal(rows().length, 5);
+  const foldButtons = () =>
+    all(root).filter((n) => n.props.class === "log-fold");
+  foldButtons()[0].props.onClick();
+  await settle();
+  assert.equal(rows().length, 2);
+  assert.equal(foldButtons()[0].props["aria-expanded"], false);
+  find((n) => n.props["aria-label"] === "复制筛选后的日志").props.onClick();
+  assert.equal(copied.split("\n").length, 5);
+  foldButtons()[0].props.onClick();
+  await settle();
+  assert.equal(rows().length, 5);
+  foldButtons()[0].props.onClick();
+  find((n) => n.tag === "input").props["onUpdate:modelValue"]("child");
+  await settle();
+  assert.ok(all(root).some((n) => n.text === "child 2.0"));
   app.unmount();
   await settle();
   assert.equal(observer.disconnected, true);

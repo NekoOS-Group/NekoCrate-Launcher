@@ -1,3 +1,4 @@
+import { fileWindow } from "./fileWindow.mjs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { computed, reactive } from "vue";
@@ -13,7 +14,6 @@ import {
   clearWorkflowFiles,
   resumeWorkflow,
   setWorkflowPaused,
-  fileWindow,
 } from "../src/downloadWorkflow.ts";
 
 const file = (id, status = "queued") => ({

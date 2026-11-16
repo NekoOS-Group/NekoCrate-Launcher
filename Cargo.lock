@@ -2565,7 +2565,7 @@ dependencies = [
 
 [[package]]
 name = "nekocrate-cli"
-version = "0.10.0-dev.1"
+version = "0.10.1-dev.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -2577,7 +2577,7 @@ dependencies = [
 
 [[package]]
 name = "nekocrate-core"
-version = "0.10.0-dev.1"
+version = "0.10.1-dev.1"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -2616,7 +2616,7 @@ dependencies = [
 
 [[package]]
 name = "nekocrate-desktop"
-version = "0.10.0-dev.1"
+version = "0.10.1-dev.1"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2650,7 +2650,7 @@ dependencies = [
 
 [[package]]
 name = "nekocrate-dev"
-version = "0.10.0-dev.1"
+version = "0.10.1-dev.1"
 dependencies = [
  "serde_json",
 ]

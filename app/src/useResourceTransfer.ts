@@ -150,16 +150,11 @@ export function useResourceTransfer(options: {
   running: () => readonly string[];
   busy: () => boolean;
   copy: (
-    source: ResourceCopySource,
-    target: ResourceDestination,
-  ) => Promise<void>;
-  copyMany?: (
     sources: ResourceCopySource[],
     target: ResourceDestination,
   ) => Promise<void>;
-  exportMany?: (sources: ResourceCopySource[]) => Promise<unknown>;
   remove?: (sources: ResourceCopySource[]) => Promise<void>;
-  export?: (source: ResourceCopySource) => Promise<unknown>;
+  export?: (sources: ResourceCopySource[]) => Promise<unknown>;
   preview?: (
     sources: ResourceCopySource[],
     target: ResourceDestination,
@@ -356,9 +351,7 @@ export function useResourceTransfer(options: {
     if (session.element.hasPointerCapture?.(session.pointer))
       session.element.releasePointerCapture(session.pointer);
     try {
-      if (session.sources.length > 1)
-        await options.exportMany?.(session.sources);
-      else await options.export(session.source);
+      await options.export(session.sources);
     } catch (error) {
       options.error?.(error);
     } finally {
@@ -431,15 +424,13 @@ export function useResourceTransfer(options: {
   }
   function complete(x: number, y: number) {
     if (!pending) return;
-    const source = pending.source;
     const sources = pending.sources;
     const target = drag.value && hit(x, y);
     stop();
     if (target && !options.busy()) {
       if (target.trash)
         void options.remove?.(sources).catch((error) => options.error?.(error));
-      else if (sources.length > 1) void options.copyMany?.(sources, target);
-      else void options.copy(source, target);
+      else void options.copy(sources, target);
     }
   }
   function end(event: PointerEvent) {

@@ -128,7 +128,6 @@ import ModpackMissing from "./components/ModpackMissing.vue";
 import type { ModpackPreview, ModpackStatus } from "./types";
 import ManagedVersions from "./components/ManagedVersions.vue";
 import ToolWindow from "./components/ToolWindow.vue";
-import WindowControls from "./components/WindowControls.vue";
 import { focusToolWindow, raiseToolWindow } from "./toolWindows";
 import { activateDialog } from "./dialogSurface";
 import ResourceTransferOverlay from "./components/ResourceTransferOverlay.vue";
@@ -268,8 +267,6 @@ const snapshot = ref<Snapshot>({
       proxy_password_key: null,
       concurrency: 8,
       adaptive_concurrency: false,
-      retries: 2,
-      auto_java: true,
       language: "system",
       apply_language_to_game: false,
     },
@@ -302,7 +299,6 @@ const editableSettings = [
   "proxy_password",
   "concurrency",
   "adaptive_concurrency",
-  "retries",
 ] as const;
 type EditableSetting = (typeof editableSettings)[number];
 const pendingSettings = new Map<EditableSetting, number>();
@@ -338,10 +334,8 @@ function hydrateSettings() {
   hydratingSettings = true;
   settings.proxy_password = undefined;
   Object.assign(settings, snapshot.value.database.settings);
-  if (settings.mod_download_source === "official")
-    settings.mod_download_source = "auto";
   if (settings.proxy_mode !== "none")
-    proxyChoice.value = proxyKind(settings.proxy_mode, settings.proxy_url);
+    proxyChoice.value = proxyKind(settings.proxy_mode);
   hydratingSettings = false;
 }
 async function loadProxyPassword() {
@@ -377,12 +371,6 @@ function validSetting(key: EditableSetting) {
       Number.isInteger(settings.concurrency) &&
       settings.concurrency >= 1 &&
       settings.concurrency <= 256
-    );
-  if (key === "retries")
-    return (
-      Number.isInteger(settings.retries) &&
-      settings.retries >= 0 &&
-      settings.retries <= 5
     );
   return true;
 }
@@ -867,9 +855,6 @@ function closeManagedWindow(id: string) {
   managedWindows.value = managedWindows.value.filter((item) => item.id !== id);
 }
 const instanceWrites = reactive(new Set<string>());
-const instanceSaving = computed(
-  () => !!editing.value && instanceWrites.has(editing.value.id),
-);
 const instanceHeader = ref<InstanceType<typeof InstanceHeader>>();
 const editingDirectory = ref("");
 const directoryLoading = ref(false);
@@ -1845,7 +1830,7 @@ function closeUtility() {
   utility.value = null;
 }
 function instanceMaterial(instance: Instance) {
-  return resolveInstanceIcon(instance.icon, instance.id);
+  return resolveInstanceIcon(instance.icon);
 }
 function selectInstance(id: string) {
   selectedInstanceId.value = id;
@@ -2352,8 +2337,7 @@ const resourceTransfer = useResourceTransfer({
   instances: () => instances.value,
   running: () => snapshot.value.running,
   busy: () => busy.value || libraryBusy.value || managing.value,
-  copy: copyDraggedResource,
-  copyMany: copyDraggedResources,
+  copy: copyDraggedResources,
   remove: removeResources,
   preview: async (sources, target) => {
     if (target.selection) {
@@ -2374,8 +2358,7 @@ const resourceTransfer = useResourceTransfer({
         })
       : undefined;
   },
-  exportMany: (sources) => rpc("export_resources", { sources }),
-  export: (source) => rpc("export_resource", { source }),
+  export: (sources) => rpc("export_resources", { sources }),
   browse: browseDropTarget,
   finishBrowse: finishDropBrowse,
   error: (problem) => {
@@ -2531,9 +2514,24 @@ async function copyDraggedResources(
     ...(target.world ? { world: target.world } : {}),
   });
   if (copied === undefined) return;
-  if (copied) notify(t("已复制 {count} 项资源", { count: sources.length }));
-  await refreshVersionManagers();
-  await resourceManager.value?.refresh();
+  if (sources.length === 1) {
+    notify(
+      copied
+        ? t("已复制 {name} 到 {version}", {
+            name: sources[0].name,
+            version: target.version,
+          })
+        : t("目标版本已有此资源"),
+    );
+  } else if (copied) {
+    notify(t("已复制 {count} 项资源", { count: sources.length }));
+  }
+  if (copied || sources.length > 1) {
+    await Promise.all([
+      refreshVersionManagers(),
+      resourceManager.value?.refresh(),
+    ]);
+  }
   if (copied)
     announceResources(
       target.instance,
@@ -2545,47 +2543,6 @@ async function copyDraggedResources(
           : s.file,
       ),
     );
-}
-async function copyDraggedResource(
-  source: ResourceCopySource,
-  target: ResourceDestination,
-) {
-  if (target.global || target.selection) {
-    await copyDraggedResources([source], target);
-    return;
-  }
-  const copied = await action<boolean>("复制资源", "copy_resource", {
-    source: {
-      ...(source.global ? { global: true } : {}),
-      kind: source.kind,
-      instance: source.instance,
-      version: source.version,
-      file: source.file,
-    },
-    id: target.instance,
-    version: target.version,
-    ...(target.world ? { world: target.world } : {}),
-  });
-  if (copied === undefined) return;
-  notify(
-    copied
-      ? t("已复制 {name} 到 {version}", {
-          name: source.name,
-          version: target.version,
-        })
-      : t("目标版本已有此资源"),
-  );
-  if (copied) {
-    await Promise.all([
-      refreshVersionManagers(),
-      resourceManager.value?.refresh(),
-    ]);
-    announceResources(target.instance, target.version, source.kind, [
-      source.kind === "datapacks" && target.world
-        ? `saves/${target.world}/datapacks/${source.file.split("/").pop()}`
-        : source.file,
-    ]);
-  }
 }
 function openResourceManager() {
   error.value = "";
@@ -5908,7 +5865,6 @@ onUnmounted(() => {
       >
         <LogPanel
           :store="logStore"
-          :instances="snapshot.database.instances"
           :initial-scope="logScope"
           :session="logSession"
           :recoveries="recoveries"
@@ -5990,7 +5946,6 @@ onUnmounted(() => {
             </DownloadWorkflow>
             <div v-else class="workflow-empty" data-window-title>
               <span>{{ t("暂无下载任务") }}</span>
-              <WindowControls />
               <button
                 class="icon-button"
                 :aria-label="t('关闭面板')"
@@ -6335,7 +6290,6 @@ onUnmounted(() => {
                   <Trash2 :size="16" />
                 </button>
               </template>
-              <WindowControls v-if="modal === 'add' || modal === 'create'" />
               <button
                 class="icon-button"
                 :disabled="modal !== 'edit' && busy"

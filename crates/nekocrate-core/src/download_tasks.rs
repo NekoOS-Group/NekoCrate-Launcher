@@ -20,7 +20,6 @@ struct Record {
     game: PathBuf,
     version: String,
     task: String,
-    #[serde(default)]
     complete: bool,
     files: BTreeSet<PathBuf>,
 }
@@ -160,11 +159,6 @@ impl DownloadTask {
             {
                 paths.insert(file.path.clone());
             }
-            // A legacy global copy may be reused by a task with a version-local cache.
-            let old = object_path(&self.root.join("cache/objects"), file)?;
-            if old != object_path(cache, file)? && old.is_file() {
-                paths.insert(old);
-            }
         }
         let this = self.clone();
         tokio::task::spawn_blocking(move || {
@@ -299,14 +293,6 @@ pub(crate) fn remove_local_objects(root: &Path, mut files: BTreeSet<PathBuf>) ->
     }
     ensure!(files.is_empty(), "下载暂存文件不属于当前任务");
     Ok(())
-}
-
-pub(crate) fn pending_files(root: &Path) -> Result<BTreeSet<PathBuf>> {
-    Ok(records(root)?
-        .into_iter()
-        .filter(|(_, record)| !record.complete)
-        .flat_map(|(_, record)| record.files)
-        .collect())
 }
 
 /// Finish interrupted cleanup. Missing external disks do not mean deleted versions.

@@ -78,7 +78,7 @@ const label = computed(() =>
       @focus="emit('preview', $event)"
       @blur="emit('leave')"
     >
-      <InstanceIcon :icon="resolveInstanceIcon(instance.icon, instance.id)" />
+      <InstanceIcon :icon="resolveInstanceIcon(instance.icon)" />
       <i v-if="running" class="running-dot" />
     </button>
     <InstanceProgress

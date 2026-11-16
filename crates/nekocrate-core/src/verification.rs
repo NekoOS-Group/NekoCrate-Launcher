@@ -1,13 +1,10 @@
 //! Reuse successful hashes only while the file's identity and metadata match.
 //! Explicit repair bypasses receipts; new/unrecorded files always get hashed.
 use anyhow::Result;
-use ring::digest::{Context as HashContext, SHA256};
 use serde::{Deserialize, Serialize};
-use sha1::{Digest, Sha1};
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    io::Read,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex, OnceLock, Weak,
@@ -158,30 +155,6 @@ impl std::ops::Deref for Receipts {
     }
 }
 
-/// Read only valid receipts for legacy archive cleanup; no payload rehash on a hit.
-pub(crate) fn recorded_sha256(root: &Path, paths: &[PathBuf]) -> HashMap<PathBuf, String> {
-    let index = fs::read(root.join("cache/verified-files.json"))
-        .ok()
-        .and_then(|bytes| crate::portable::from_slice::<Index>(root, &bytes).ok())
-        .filter(|index| index.version == 1)
-        .unwrap_or_default();
-    paths
-        .iter()
-        .filter_map(|path| {
-            let receipt = index.entries.get(path)?;
-            if !receipt.sha256
-                || receipt.hash.len() != 64
-                || !receipt.hash.bytes().all(|b| b.is_ascii_hexdigit())
-            {
-                return None;
-            }
-            let metadata = fs::symlink_metadata(path).ok()?;
-            (Fingerprint::read_at(path, &metadata)? == receipt.fingerprint)
-                .then(|| (path.clone(), receipt.hash.to_ascii_lowercase()))
-        })
-        .collect()
-}
-
 pub(crate) struct VerificationCache {
     path: PathBuf,
     loaded: OnceCell<()>,
@@ -304,15 +277,13 @@ impl VerificationCache {
                 return Ok(());
             }
             let mut input = fs::File::open(&path)?;
-            let mut digest = Sha1::new();
-            let mut buffer = vec![0; 256 * 1024];
-            loop {
-                let n = input.read(&mut buffer)?;
-                if n == 0 {
-                    break;
-                }
-                digest.update(&buffer[..n]);
-            }
+            let hash = crate::file_hash::read(
+                &mut input,
+                None,
+                crate::file_hash::Algorithm::Sha1,
+                &CancellationToken::new(),
+            )?
+            .sha1;
             if Fingerprint::read(&input.metadata()?, Some(&input)) == Some(before.clone())
                 && Fingerprint::read_at(&path, &fs::symlink_metadata(&path)?)
                     == Some(before.clone())
@@ -320,7 +291,7 @@ impl VerificationCache {
                 store.entries.lock().unwrap().insert(
                     path,
                     Receipt {
-                        hash: hex::encode(digest.finalize()),
+                        hash,
                         sha256: false,
                         fingerprint: before,
                     },
@@ -482,27 +453,14 @@ fn inspect(
     if let Some((store, _)) = store {
         store.hashes.fetch_add(1, Ordering::Relaxed);
     }
-    let mut a = Sha1::new();
-    let mut b = HashContext::new(&SHA256);
-    let mut buffer = vec![0u8; 256 * 1024];
-    loop {
-        crate::download::check_cancel(cancel)?;
-        let n = file.read(&mut buffer)?;
-        if n == 0 {
-            break;
-        }
-        if sha256 {
-            b.update(&buffer[..n]);
-        } else {
-            a.update(&buffer[..n]);
-        }
-    }
-    let matched = (if sha256 {
-        hex::encode(b.finish())
+    let algorithm = if sha256 {
+        crate::file_hash::Algorithm::Sha256
     } else {
-        hex::encode(a.finalize())
-    })
-    .eq_ignore_ascii_case(hash);
+        crate::file_hash::Algorithm::Sha1
+    };
+    let matched = crate::file_hash::read(&mut file, None, algorithm, cancel)?
+        .selected(sha256)
+        .eq_ignore_ascii_case(hash);
     let unchanged = before.is_some()
         && before == Fingerprint::read(&file.metadata()?, Some(&file))
         && fs::symlink_metadata(path)
@@ -532,36 +490,8 @@ fn inspect(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ring::digest::digest;
-
-    #[tokio::test]
-    async fn sha256_file_hashes_match_known_vectors_across_read_boundaries() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("payload");
-        for (bytes, expected) in [
-            (
-                b"abc".to_vec(),
-                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-            ),
-            (
-                vec![b'a'; 1_000_000],
-                "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0",
-            ),
-        ] {
-            fs::write(&path, &bytes).unwrap();
-            assert!(
-                verify_full(&path, &expected.to_uppercase(), true, bytes.len() as u64)
-                    .await
-                    .unwrap()
-            );
-            fs::write(&path, vec![b'b'; bytes.len()]).unwrap();
-            assert!(
-                !verify_full(&path, expected, true, bytes.len() as u64)
-                    .await
-                    .unwrap()
-            );
-        }
-    }
+    use ring::digest::{SHA256, digest};
+    use sha1::{Digest, Sha1};
 
     #[cfg(windows)]
     #[tokio::test]

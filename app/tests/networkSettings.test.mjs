@@ -7,9 +7,9 @@ import {
   validProxySettings,
 } from "../src/networkSettings.ts";
 
-test("旧手动代理识别协议，切换时保留 IPv6 和端口，拒绝协议不匹配或凭据", () => {
-  assert.equal(proxyKind("custom", "socks5h://localhost:1080"), "socks");
-  assert.equal(proxyKind("custom", "https://localhost:7890"), "http");
+test("切换时保留 IPv6 和端口，拒绝协议不匹配或凭据", () => {
+  assert.equal(proxyKind("socks"), "socks");
+  assert.equal(proxyKind("http"), "http");
   assert.equal(
     proxyAddressForKind("http://[::1]:7890", "socks"),
     "socks5h://[::1]:7890",

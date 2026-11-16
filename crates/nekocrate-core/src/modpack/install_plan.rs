@@ -10,7 +10,6 @@ pub(super) struct InstallPack<'a> {
     pub target: &'a Path,
     pub instance: &'a Instance,
     pub job: &'a mut Job,
-    pub settings: &'a Settings,
     pub downloader: &'a Downloader,
     pub cancel: &'a CancellationToken,
     pub sink: &'a EventSink,
@@ -53,7 +52,6 @@ impl InstallPack<'_> {
             downloader: self.downloader,
             cancel: self.cancel,
             sink: &loader_sink,
-            auto_java: self.settings.auto_java,
         };
         if restore {
             if !installer
@@ -84,7 +82,7 @@ impl Handler for InstallPack<'_> {
                         let Some(path) = &file.path else {
                             return Ok(false);
                         };
-                        if self.job.overridden.as_ref().is_some_and(|paths| paths.contains(&path.to_lowercase()))
+                        if self.job.overridden.contains(&path.to_lowercase())
                             // Manual dependencies are checked at publication. Missing ones
                             // must not restart successful resolution/download work.
                             || file.urls.is_empty()

@@ -318,7 +318,7 @@ impl Launcher {
         let working = if let Some(instance) = source_instance {
             version::instance_working_directory(&game, &instance, &id)?
         } else {
-            version::working_directory(&game, &version::resolve(self.root(), &game, &id)?.version)?
+            version::working_directory(&game, &version::resolve(&game, &id)?.version)?
         };
         ensure!(
             working == game || working == source,
@@ -706,7 +706,7 @@ mod tests {
         );
     }
     #[test]
-    fn export_collects_inherited_configuration_and_legacy_shared_files() {
+    fn export_collects_inherited_configuration_and_local_shared_files() {
         let (_dir, launcher, i) = fixture();
         let game = i.game_dir(launcher.root());
         let path = version::metadata_path(&game, "pack").unwrap();
@@ -715,17 +715,8 @@ mod tests {
         profile["libraries"] = json!([{"name":"example:shared:1","downloads":{"artifact":{"path":"example/shared/1/shared-1.jar","url":"https://example.invalid/shared.jar","sha1":"0000000000000000000000000000000000000000","size":6}}}]);
         storage::write_json(&path, &profile).unwrap();
         let parent = version::metadata_path(&game, "1.20.1").unwrap();
-        fs::create_dir_all(launcher.root().join("metadata/versions")).unwrap();
-        fs::rename(
-            parent,
-            launcher.root().join("metadata/versions/1.20.1.json"),
-        )
-        .unwrap();
-        put(
-            launcher.root(),
-            "libraries/example/shared/1/shared-1.jar",
-            "shared",
-        );
+        assert!(parent.is_file());
+        put(&game, "libraries/example/shared/1/shared-1.jar", "shared");
         let output = launcher
             .export_game(&i.id, None, None, &CancellationToken::new(), &sink())
             .unwrap();
@@ -740,8 +731,7 @@ mod tests {
                 .is_ok()
         );
         assert!(
-            !game
-                .join("libraries/example/shared/1/shared-1.jar")
+            game.join("libraries/example/shared/1/shared-1.jar")
                 .exists()
         );
     }

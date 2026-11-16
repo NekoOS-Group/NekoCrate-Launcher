@@ -2,6 +2,7 @@ mod archive_support;
 pub mod auth;
 pub mod crash;
 mod curseforge;
+mod database;
 pub mod diagnostics;
 mod directory_lock;
 pub mod download;
@@ -11,13 +12,13 @@ mod download_tasks;
 pub mod fabric;
 mod fabric_metadata;
 mod fabric_version;
+mod file_hash;
 pub mod folder_import;
 pub mod game_export;
 pub mod game_import;
 mod game_options;
 pub mod home_dashboard;
 mod installation;
-mod installer_cache;
 mod instance_creation;
 pub mod instance_discovery;
 pub mod isolation;
@@ -27,8 +28,8 @@ mod language;
 pub mod launch_options;
 pub mod loader;
 pub mod memory;
-mod migration;
 pub mod minecraft;
+mod mod_metadata;
 pub mod model;
 #[cfg(test)]
 mod modloader_tests;
@@ -78,8 +79,6 @@ struct Shared {
     active_modpack: Mutex<Option<(String, String)>>,
     progress_scanned: tokio::sync::Mutex<HashSet<(String, String)>>,
     games: Mutex<HashMap<String, CancellationToken>>,
-    mod_summaries: version_management::SummaryCache,
-    modpack_migration_issues: Mutex<HashMap<(String, String), String>>,
     sessions: auth::SessionCache,
 }
 impl Drop for Shared {
@@ -120,16 +119,8 @@ impl Launcher {
             .context("该数据目录已被另一个 NekoCrate 进程占用，请先关闭它")?;
         let portable = portable::initialize(&root)?;
         let dbpath = root.join("database.json");
-        let db = migration::load_database(&root, &dbpath)?;
-        for dir in [
-            "instances",
-            "cache",
-            "metadata",
-            "assets",
-            "libraries",
-            "versions",
-            "runtimes",
-        ] {
+        let db = database::load(&root, &dbpath)?;
+        for dir in ["instances", "cache", "metadata", "runtimes"] {
             fs::create_dir_all(root.join(dir))?;
         }
         let launcher = Self(Arc::new(Shared {
@@ -145,8 +136,6 @@ impl Launcher {
             active_modpack: Mutex::new(None),
             progress_scanned: tokio::sync::Mutex::new(HashSet::new()),
             games: Mutex::new(HashMap::new()),
-            mod_summaries: version_management::SummaryCache::default(),
-            modpack_migration_issues: Mutex::default(),
             sessions: auth::SessionCache::default(),
         }));
         if let Some(mut portable) = portable
@@ -170,9 +159,7 @@ impl Launcher {
             portable.game_linked = true;
             storage::write_json(&launcher.root().join("portable.json"), &portable)?;
         }
-        launcher.migrate_modpack_records();
         launcher.refresh_local_versions(false)?;
-        launcher.clean_old_java_archives();
         launcher.clean_game_exports();
         if let Err(error) =
             download_tasks::reconcile(launcher.root(), &launcher.snapshot().database.instances)
@@ -268,7 +255,7 @@ impl Launcher {
                     entry.installed = false;
                 }
             }
-            if serde_json::to_value(&versions)? != serde_json::to_value(&instance.versions)? {
+            if versions != instance.versions {
                 updates.push((instance.id, versions));
             }
         }
@@ -430,11 +417,9 @@ impl Launcher {
                 .find(|i| i.id == id)
                 .context("实例不存在")?;
             if !instance.versions.iter().any(|v| v.id == version) {
-                instance.versions.push(version::describe(
-                    self.root(),
-                    &instance.game_dir(self.root()),
-                    version,
-                ));
+                instance
+                    .versions
+                    .push(version::describe(&instance.game_dir(self.root()), version));
             }
             instance.selected_version = Some(version.into());
             Ok(instance.clone())
@@ -515,10 +500,8 @@ impl Launcher {
     ) -> Result<()> {
         // Active jobs own a Settings snapshot. Persist future preferences under
         // the database lock without waiting for downloads or changing their plan.
-        if !(1..=download_concurrency::MAX_CONCURRENCY).contains(&settings.concurrency)
-            || settings.retries > 5
-        {
-            bail!("并发应为 1–256，重试次数应为 0–5");
+        if !(1..=download_concurrency::MAX_CONCURRENCY).contains(&settings.concurrency) {
+            bail!("并发数应为 1–256");
         }
         settings.proxy_url = settings.proxy_url.trim().to_owned();
         network::validate(&settings)?;
@@ -615,7 +598,8 @@ impl Launcher {
         }
         Ok(i)
     }
-    pub fn update_instance(
+    #[cfg(test)]
+    fn update_instance(
         &self,
         id: &str,
         name: &str,
@@ -691,19 +675,16 @@ impl Launcher {
             Ok(())
         })
     }
-    fn linkable_directory(&self, source: &Path, except_id: Option<&str>) -> Result<PathBuf> {
+    fn linkable_directory(&self, source: &Path) -> Result<PathBuf> {
         let source = folder_import::resolve_game_directory(source)?;
-        self.check_external_directory(&source, except_id)?;
+        self.check_external_directory(&source)?;
         Ok(source)
     }
-    fn check_external_directory(&self, source: &Path, except_id: Option<&str>) -> Result<()> {
+    fn check_external_directory(&self, source: &Path) -> Result<()> {
         if source.starts_with(self.root()) || self.root().starts_with(source) {
             bail!("游戏目录不能与启动器数据目录重叠，请选择其他位置");
         }
         for existing in &self.snapshot().database.instances {
-            if except_id == Some(existing.id.as_str()) {
-                continue;
-            }
             let directory = existing.game_dir(self.root());
             let directory = directory.canonicalize().unwrap_or(directory);
             if source.starts_with(&directory) || directory.starts_with(source) {
@@ -747,7 +728,7 @@ impl Launcher {
                     &entry.path().join(format!("{id}.json")),
                 ) && metadata["id"].as_str() == Some(&id)
                 {
-                    versions.push(version::describe(self.root(), source, &id));
+                    versions.push(version::describe(source, &id));
                 }
             }
         }
@@ -759,83 +740,9 @@ impl Launcher {
         crate::sorting::sort_by(&mut versions, |a, b| a.id.cmp(&b.id));
         if !version.is_empty() && !versions.iter().any(|v| v.id == version) {
             storage::safe_version(version)?;
-            versions.push(version::describe(self.root(), source, version));
+            versions.push(version::describe(source, version));
         }
         Ok(versions)
-    }
-    /// Change only the association. Never copy, move or delete either game tree.
-    /// Previously installed versions must exist unchanged at the new location.
-    pub async fn relink_instance(&self, id: &str, source: PathBuf) -> Result<Instance> {
-        let _guard = self.0.operation.lock().await;
-        let _directory_guard = self.idle(id)?;
-        let previous = self.instance(id)?;
-        let source = self.linkable_directory(&source, Some(id))?;
-        let old_game = previous.game_dir(self.root());
-        let mut versions = self.discover_versions(&source, "")?;
-        for old in &previous.versions {
-            if old.installed {
-                let old_version = version::resolve(self.root(), &old_game, &old.id)?;
-                let new_version = version::resolve(self.root(), &source, &old.id)?;
-                if serde_json::to_value(&old_version.version)?
-                    != serde_json::to_value(&new_version.version)?
-                {
-                    bail!("目标目录的版本配置不同：{}，原关联未修改", old.id);
-                }
-                for (old_path, new_path) in [
-                    (
-                        version::metadata_path(&old_game, &old.id)?,
-                        version::metadata_path(&source, &old.id)?,
-                    ),
-                    (
-                        version::client_path(&old_game, &old_version.version)?,
-                        version::client_path(&source, &new_version.version)?,
-                    ),
-                ] {
-                    if !storage::same_file_contents(&old_path, &new_path)? {
-                        bail!(
-                            "目标目录缺少或包含不同的已安装版本 {}；请先核对文件，原关联未修改",
-                            old.id
-                        );
-                    }
-                }
-            }
-            if let Some(found) = versions.iter_mut().find(|v| v.id == old.id) {
-                found.installed = old.installed;
-                found.name = old.name.clone();
-                found.download_progress = old.download_progress;
-            } else if old.installed {
-                bail!("目标目录无法识别已安装版本 {}，原关联未修改", old.id);
-            } else {
-                versions.push(old.clone());
-            }
-        }
-        crate::sorting::sort_by_cached_key(&mut versions, |version| {
-            previous
-                .versions
-                .iter()
-                .position(|old| old.id == version.id)
-                .unwrap_or(usize::MAX)
-        });
-        let selected = previous
-            .selected_version
-            .as_ref()
-            .filter(|id| versions.iter().any(|v| &v.id == *id))
-            .cloned()
-            .or_else(|| versions.first().map(|v| v.id.clone()));
-        let backup = self.instance_dir(id)?.join("directory-link-before.json");
-        storage::write_json(&backup, &previous)?;
-        self.mutate(|db| {
-            let target = db
-                .instances
-                .iter_mut()
-                .find(|i| i.id == id)
-                .context("实例不存在")?;
-            target.game_directory = Some(source);
-            target.versions = versions;
-            target.selected_version = selected;
-            Ok(())
-        })?;
-        self.instance(id)
     }
     pub async fn import_instance(
         &self,
@@ -847,7 +754,7 @@ impl Launcher {
         self.import_unlocked(source, name, version)
     }
     fn import_unlocked(&self, source: PathBuf, name: String, version: String) -> Result<Instance> {
-        let source = self.linkable_directory(&source, None)?;
+        let source = self.linkable_directory(&source)?;
         let versions = self.discover_versions(&source, &version)?;
         let name = if name.trim().is_empty() {
             folder_import::default_name(&source)
@@ -948,85 +855,7 @@ impl Launcher {
     pub fn cached_versions(&self) -> Option<VersionManifest> {
         storage::read_json(&self.root().join("metadata/manifest.json")).ok()
     }
-    pub async fn fabric_versions(
-        &self,
-        game_version: &str,
-        cancel: &CancellationToken,
-    ) -> Result<Vec<fabric::LoaderVersion>> {
-        fabric::versions(
-            self.root(),
-            game_version,
-            &download::Downloader::new(self.root(), self.settings())?,
-            cancel,
-        )
-        .await
-    }
 
-    pub async fn add_fabric_version(
-        &self,
-        id: &str,
-        game_version: &str,
-        loader_version: &str,
-        cancel: &CancellationToken,
-        sink: &EventSink,
-    ) -> Result<Instance> {
-        let _guard = self.0.operation.lock().await;
-        let _directory_guard = self.idle(id)?;
-        let game = self.available_game_dir(id)?;
-        let profile_id = fabric::version_id(game_version, loader_version)?;
-        let path = version::metadata_path(&game, &profile_id)?;
-        let downloader = download::Downloader::new(self.root(), self.settings())?;
-        sink(Event::workflow("metadata", "解析 Fabric 版本"));
-        let profile = fabric::profile(
-            self.root(),
-            game_version,
-            loader_version,
-            &downloader,
-            cancel,
-        )
-        .await?;
-        let parent =
-            minecraft::version(self.root(), game_version, &downloader, cancel, sink).await?;
-        // Resolve everything before touching an existing game tree.
-        version::resolve_chain(&[serde_json::to_value(&parent)?, profile.clone()])?;
-        download::check_cancel(cancel)?;
-        let parent_path = version::metadata_path(&game, game_version)?;
-        if !parent_path.exists() {
-            storage::write_json(&parent_path, &parent)?;
-        }
-        if path.exists() {
-            let existing: serde_json::Value = storage::read_json(&path)?;
-            if version::detect_loader(&existing) != version::detect_loader(&profile)
-                || existing["inheritsFrom"].as_str() != Some(game_version)
-            {
-                bail!("同名版本已经存在且配置不同，请保留原版本或使用其他加载器版本");
-            }
-        } else {
-            storage::write_json(&path, &profile)?;
-        }
-        let mut entry = version::describe(self.root(), &game, &profile_id);
-        entry.minecraft_version = Some(game_version.into());
-        entry.loader = Some(ModLoader {
-            kind: "fabric".into(),
-            version: loader_version.into(),
-        });
-        self.mutate(|db| {
-            let instance = db
-                .instances
-                .iter_mut()
-                .find(|i| i.id == id)
-                .context("实例不存在")?;
-            if let Some(existing) = instance.versions.iter_mut().find(|v| v.id == profile_id) {
-                entry.name = existing.name.clone();
-                entry.download_progress = existing.download_progress;
-                *existing = entry;
-            } else {
-                instance.versions.push(entry);
-            }
-            instance.selected_version = Some(profile_id);
-            Ok(instance.clone())
-        })
-    }
     pub async fn install(
         &self,
         id: &str,
@@ -1387,7 +1216,7 @@ impl Launcher {
         instance.launch.validate()?;
         let working_directory =
             version::instance_working_directory(&game, &instance, &selected.id)?;
-        let mut resolved = version::resolve(self.root(), &game, &selected.id)?;
+        let mut resolved = version::resolve(&game, &selected.id)?;
         if let Some(world) = world
             && let Some(notice) = home_dashboard::apply_world_launch(
                 &mut instance,
@@ -1403,15 +1232,12 @@ impl Launcher {
             .for_installation(self.root(), id, &game, &selected.id, "launch")?;
         runtime_compatibility::prepare(&game, &mut resolved.version, &downloader, cancel, &sink)
             .await?;
-        version::check_launch_files(self.root(), &game, &resolved)?;
+        version::check_launch_files(&game, &resolved)?;
         // Assess Java against the original entry point/libraries: the color
         // overlay must not relax LaunchWrapper's existing Java 8 restriction.
-        let mut java_requirement = java::JavaRequirement::for_working_directory(
-            &resolved.version,
-            &working_directory,
-            instance.java_path.as_deref(),
-        )
-        .await?;
+        let mut java_requirement =
+            java::JavaRequirement::for_working_directory(&resolved.version, &working_directory)
+                .await?;
         if let Some(history) = &mut java_requirement.history {
             history.include_options(&instance.launch)?;
         }
@@ -1429,12 +1255,11 @@ impl Launcher {
         if let Some(server) = server {
             home_dashboard::apply_server_launch(&mut instance, &v, server)?;
         }
-        let root = self.root().to_owned();
         let native_game = game.clone();
         let native_version = v.clone();
         let native_cancel = cancel.clone();
         tokio::task::spawn_blocking(move || {
-            minecraft::prepare_local_natives(&root, &native_game, &native_version, &native_cancel)
+            minecraft::prepare_local_natives(&native_game, &native_version, &native_cancel)
         })
         .await??;
         runtime_compatibility::prepare_openal(&game, &v, &downloader, cancel, &sink).await?;
@@ -1443,7 +1268,6 @@ impl Launcher {
             self.root(),
             java_requirement,
             instance.java_path.as_deref(),
-            settings.auto_java,
             &downloader,
             cancel,
             &Event::scoped(&sink, id, Some("java")),
@@ -1727,8 +1551,7 @@ mod tests {
         let instance = launcher.create_instance("Options", "1.20.1").unwrap();
         let mut old = serde_json::to_value(&instance).unwrap();
         old.as_object_mut().unwrap().remove("launch");
-        let legacy: Instance = serde_json::from_value(old).unwrap();
-        assert_eq!(legacy.launch, launch_options::LaunchOptions::default());
+        assert!(serde_json::from_value::<Instance>(old).is_err());
         let launch = launch_options::LaunchOptions {
             window_mode: launch_options::WindowMode::Windowed,
             width: 1440,
@@ -2037,7 +1860,7 @@ mod tests {
             apply_language_to_game: true,
             download_source: "bmclapi".into(),
             concurrency: 3,
-            retries: 4,
+
             ..launcher.settings()
         };
         launcher.save_settings(preferences).unwrap();
@@ -2066,7 +1889,6 @@ mod tests {
         assert_eq!(launcher.settings().language, "en-US");
         assert!(launcher.settings().apply_language_to_game);
         assert_eq!(launcher.settings().concurrency, 3);
-        assert_eq!(launcher.settings().retries, 4);
         assert!(
             launcher
                 .instance(&instance.id)
@@ -2236,7 +2058,7 @@ mod tests {
         }
         let selected_icon = Some(INSTANCE_ICON_COUNT - 1);
 
-        // Missing icon fields from older clients must not reset the saved choice.
+        // A partial update without an icon retains the saved choice.
         launcher
             .update_instance(&instance.id, "新名称", 2048, None, None)
             .unwrap();
@@ -2265,21 +2087,6 @@ mod tests {
         assert_eq!(reopened.instance(&instance.id).unwrap().name, "新名称");
         assert_eq!(reopened.game_dir(&instance.id).unwrap(), directory);
         drop(reopened);
-
-        // Existing schema-2 databases contain no icon field.
-        let file = temp.path().join("database.json");
-        let mut legacy: serde_json::Value = storage::read_json(&file).unwrap();
-        legacy["instances"][0]
-            .as_object_mut()
-            .unwrap()
-            .remove("icon");
-        storage::write_json(&file, &legacy).unwrap();
-        let legacy_launcher = Launcher::open(Some(temp.path().into())).unwrap();
-        assert_eq!(legacy_launcher.instance(&instance.id).unwrap().icon, None);
-        assert_eq!(
-            legacy_launcher.instance(&instance.id).unwrap().name,
-            "新名称"
-        );
     }
 
     #[tokio::test]
@@ -2423,8 +2230,7 @@ mod tests {
         // Existing databases keep their previous default Player identity.
         let mut legacy = serde_json::to_value(&reopened.snapshot().database).unwrap();
         legacy.as_object_mut().unwrap().remove("guest_name");
-        let legacy: Database = serde_json::from_value(legacy).unwrap();
-        assert_eq!(legacy.guest_name, "Player");
+        assert!(serde_json::from_value::<Database>(legacy).is_err());
     }
 
     #[cfg(unix)]
@@ -2887,100 +2693,6 @@ printf '%s\n' 'offline session 0 started'
         assert_eq!(persisted.versions.len(), 2);
         assert_eq!(persisted.selected_version.as_deref(), Some("1.21.1"));
         assert!(persisted.selected().unwrap().installed);
-    }
-
-    #[tokio::test]
-    async fn relink_preserves_identity_and_games_and_rejects_missing_installed_versions() {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("launcher");
-        let source = temp.path().join("original/.minecraft");
-        fs::create_dir_all(source.join("saves/world")).unwrap();
-        fs::write(source.join("saves/world/level.dat"), b"original-world").unwrap();
-        let launcher = Launcher::open(Some(root.clone())).unwrap();
-        let instance = launcher.create_instance("Existing", "1.21.1").unwrap();
-        launcher
-            .update_instance(
-                &instance.id,
-                "My game",
-                4096,
-                Some("my-java".into()),
-                Some(8),
-            )
-            .unwrap();
-        let old_game = launcher.game_dir(&instance.id).unwrap();
-        let relative = PathBuf::from("versions/1.21.1");
-        let metadata = crate::test_http::version_fixture("1.21.1");
-        storage::write_json(&old_game.join(&relative).join("1.21.1.json"), &metadata).unwrap();
-        fs::write(old_game.join(&relative).join("1.21.1.jar"), b"client").unwrap();
-        fs::write(old_game.join("keep-me"), b"old-copy").unwrap();
-        launcher
-            .set_installed(&instance.id, "1.21.1", true)
-            .unwrap();
-        let before = fs::read(root.join("database.json")).unwrap();
-        assert!(
-            launcher
-                .relink_instance(&instance.id, source.clone())
-                .await
-                .is_err()
-        );
-        assert_eq!(fs::read(root.join("database.json")).unwrap(), before);
-        storage::write_json(&source.join(&relative).join("1.21.1.json"), &metadata).unwrap();
-        fs::write(source.join(&relative).join("1.21.1.jar"), b"other!").unwrap();
-        assert!(
-            launcher
-                .relink_instance(&instance.id, source.clone())
-                .await
-                .is_err()
-        );
-        assert_eq!(fs::read(root.join("database.json")).unwrap(), before);
-        fs::write(source.join(&relative).join("1.21.1.jar"), b"client").unwrap();
-        let linked = launcher
-            .relink_instance(&instance.id, source.clone())
-            .await
-            .unwrap();
-        assert_eq!(linked.id, instance.id);
-        assert_eq!(linked.name, "My game");
-        assert_eq!(linked.memory_mb, 4096);
-        assert_eq!(linked.java_path.as_deref(), Some("my-java"));
-        assert_eq!(linked.icon, Some(8));
-        assert_eq!(linked.selected_version, instance.selected_version);
-        assert!(linked.selected().unwrap().installed);
-        assert_eq!(linked.game_directory, Some(source.canonicalize().unwrap()));
-        assert_eq!(fs::read(old_game.join("keep-me")).unwrap(), b"old-copy");
-        assert!(!source.join("keep-me").exists());
-        assert_eq!(
-            fs::read(source.join("saves/world/level.dat")).unwrap(),
-            b"original-world"
-        );
-        let backup: Instance = storage::read_json(
-            &launcher
-                .instance_dir(&instance.id)
-                .unwrap()
-                .join("directory-link-before.json"),
-        )
-        .unwrap();
-        assert_eq!(backup.game_directory, None);
-        let second = launcher.create_instance("Other", "").unwrap();
-        assert!(
-            launcher
-                .relink_instance(&second.id, source.clone())
-                .await
-                .is_err()
-        );
-        drop(launcher);
-        let reopened = Launcher::open(Some(root)).unwrap();
-        assert_eq!(
-            reopened.game_dir(&instance.id).unwrap(),
-            source.canonicalize().unwrap()
-        );
-        assert!(
-            reopened
-                .instance(&instance.id)
-                .unwrap()
-                .selected()
-                .unwrap()
-                .installed
-        );
     }
 
     #[tokio::test]

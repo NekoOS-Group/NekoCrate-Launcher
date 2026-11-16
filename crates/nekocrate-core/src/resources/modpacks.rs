@@ -71,19 +71,16 @@ fn search_parameters(
                 ("limit", "20".into()),
                 ("facets", json!(facets).to_string()),
             ];
-            // Keep the default query/cache key compatible with existing catalogs.
-            if !matches!(filters.sort, ModpackSort::Relevance) {
-                args.push((
-                    "index",
-                    match filters.sort {
-                        ModpackSort::Downloads => "downloads",
-                        ModpackSort::Updated => "updated",
-                        ModpackSort::Newest => "newest",
-                        ModpackSort::Relevance => "relevance",
-                    }
-                    .into(),
-                ));
-            }
+            args.push((
+                "index",
+                match filters.sort {
+                    ModpackSort::Downloads => "downloads",
+                    ModpackSort::Updated => "updated",
+                    ModpackSort::Newest => "newest",
+                    ModpackSort::Relevance => "relevance",
+                }
+                .into(),
+            ));
             Ok(("search", args))
         }
         Platform::Curseforge => {
@@ -228,17 +225,6 @@ fn archive_file(version: &ResourceVersion, platform: Platform) -> Result<&Resour
 }
 
 impl Launcher {
-    pub async fn search_modpacks(
-        &self,
-        platform: Platform,
-        query: &str,
-        offset: usize,
-        cancel: &CancellationToken,
-    ) -> Result<SearchResult> {
-        self.search_modpacks_filtered(platform, query, offset, &ModpackFilters::default(), cancel)
-            .await
-    }
-
     pub async fn modpack_categories(
         &self,
         platform: Platform,

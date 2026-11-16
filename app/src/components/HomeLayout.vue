@@ -94,7 +94,7 @@ import {
   readHomeAttachments,
   type WidgetResizeEdge,
   type HomeItem,
-  type SavedHomePositions,
+  type HomePositions,
   type HomeRects,
   type Point,
   type InstanceLayout,
@@ -113,7 +113,7 @@ function storedLayout(key = HOME_LAYOUT_KEY) {
 }
 const stored = storedLayout();
 const editing = ref(false);
-const saved = ref<SavedHomePositions | null>(readHomeLayout(stored));
+const saved = ref<HomePositions | null>(readHomeLayout(stored));
 const savedHiddenGroups = ref(readHiddenHomeGroups(stored));
 const draftHiddenGroups = ref([...savedHiddenGroups.value]);
 const hiddenGroups = computed(() =>
@@ -233,7 +233,7 @@ const toolIcons = {
   logs: Terminal,
   store: Download,
 };
-const draft = ref<SavedHomePositions | null>(null);
+const draft = ref<HomePositions | null>(null);
 const dragging = ref<HomeItem>();
 const resizingPanel = ref(false);
 const resizingWheel = ref(false);

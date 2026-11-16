@@ -935,6 +935,7 @@ async fn modpack_catalog_is_independent_of_destination_game_and_pages_versions()
             ("offset", "20".into()),
             ("limit", "20".into()),
             ("facets", json!([["project_type:modpack"]]).to_string()),
+            ("index", "relevance".into()),
         ],
         json!({"hits":[{"project_id":"cats","title":"Cats","project_type":"modpack"}],"total_hits":21}),
     );
@@ -954,7 +955,13 @@ async fn modpack_catalog_is_independent_of_destination_game_and_pages_versions()
     cache(&launcher, "project/cats/version", &[], json!(versions));
     let cancel = CancellationToken::new();
     let result = launcher
-        .search_modpacks(Platform::Modrinth, "cats", 20, &cancel)
+        .search_modpacks_filtered(
+            Platform::Modrinth,
+            "cats",
+            20,
+            &ModpackFilters::default(),
+            &cancel,
+        )
         .await
         .unwrap();
     assert_eq!(result.total, 21);
@@ -974,7 +981,13 @@ async fn modpack_catalog_is_independent_of_destination_game_and_pages_versions()
     assert!(!last.more);
     assert!(
         launcher
-            .search_modpacks(Platform::Modrinth, "cats", 10000, &cancel)
+            .search_modpacks_filtered(
+                Platform::Modrinth,
+                "cats",
+                10000,
+                &ModpackFilters::default(),
+                &cancel
+            )
             .await
             .is_err()
     );
@@ -1113,7 +1126,13 @@ async fn live_curseforge_build_credential_search_and_files() {
         .unwrap();
     assert!(filtered.total > 0);
     let result = launcher
-        .search_modpacks(Platform::Curseforge, "", 0, &cancel)
+        .search_modpacks_filtered(
+            Platform::Curseforge,
+            "",
+            0,
+            &ModpackFilters::default(),
+            &cancel,
+        )
         .await
         .unwrap();
     let project = &result.hits.first().expect("Minecraft modpacks").id;
@@ -1152,7 +1171,13 @@ async fn live_online_modpack_search_download_and_preview() {
     let launcher = Launcher::open(Some(temp.path().join("launcher"))).unwrap();
     let cancel = CancellationToken::new();
     let result = launcher
-        .search_modpacks(Platform::Modrinth, "Fabulously Optimized", 0, &cancel)
+        .search_modpacks_filtered(
+            Platform::Modrinth,
+            "Fabulously Optimized",
+            0,
+            &ModpackFilters::default(),
+            &cancel,
+        )
         .await
         .unwrap();
     let project = &result.hits.first().unwrap().id;
@@ -1342,12 +1367,12 @@ fn search_metadata_preserves_authors_and_featured_categories_for_both_providers(
     assert_eq!(cf.categories, ["Magic", "Adventure and RPG"]);
     assert_eq!(cf.updated.as_deref(), Some("2026-11-03T00:00:00Z"));
     assert_eq!(cf.latest_version.as_deref(), Some("101"));
-    let old: Project = serde_json::from_value(json!({
-        "id": "old", "name": "Old", "description": "", "downloads": 0, "url": ""
-    }))
-    .unwrap();
-    assert!(old.authors.is_empty());
-    assert!(old.categories.is_empty());
+    assert!(
+        serde_json::from_value::<Project>(json!({
+            "id":"cat", "name":"Cat", "description":"", "downloads":0, "url":""
+        }))
+        .is_err()
+    );
 }
 
 #[test]

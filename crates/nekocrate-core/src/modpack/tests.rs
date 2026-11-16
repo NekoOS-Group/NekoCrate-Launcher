@@ -4,7 +4,6 @@ use serde_json::json;
 use sha1::{Digest, Sha1};
 use std::{fs, io::Write};
 mod content;
-mod recovery;
 
 #[tokio::test]
 async fn sha512_pack_hash_matches_known_vector_and_rejects_corruption() {
@@ -41,44 +40,6 @@ fn archive(path: &Path, manifest: &str, value: &Value, extras: &[(&str, &[u8])])
         zip.write_all(data).unwrap();
     }
     zip.finish().unwrap();
-}
-fn make_legacy(launcher: &Launcher, instance: &Instance, id: &str, name: &str) -> PathBuf {
-    let mut job = launcher.pack_job(&instance.id, id).unwrap();
-    let cache = launcher.root().join("modpacks").join(id);
-    fs::create_dir_all(&cache).unwrap();
-    let source = cache.join("source.zip");
-    fs::rename(&job.archive, &source).unwrap();
-    fs::remove_dir_all(
-        instance
-            .game_dir(launcher.root())
-            .join("versions")
-            .join(id)
-            .join(".nekocrate"),
-    )
-    .unwrap();
-    job.instance = instance.id.clone();
-    job.name = name.into();
-    job.archive = source.clone();
-    storage::write_json(
-        &launcher.root().join("modpacks").join(format!("{id}.json")),
-        &job,
-    )
-    .unwrap();
-    launcher
-        .mutate(|db| {
-            db.instances
-                .iter_mut()
-                .find(|i| i.id == instance.id)
-                .unwrap()
-                .versions
-                .iter_mut()
-                .find(|v| v.id == id)
-                .unwrap()
-                .name = Some(name.into());
-            Ok(())
-        })
-        .unwrap();
-    source
 }
 #[test]
 fn modrinth_optional_environment_and_client_override_precedence() {
@@ -368,62 +329,6 @@ async fn identical_pack_names_in_different_game_directories_have_independent_job
 }
 
 #[tokio::test]
-async fn legacy_pending_pack_metadata_uses_the_cached_manifest_without_a_launch_profile() {
-    let temp = tempfile::tempdir().unwrap();
-    let launcher = Launcher::open(Some(temp.path().join("root"))).unwrap();
-    let instance = launcher.create_instance("Legacy", "").unwrap();
-    let path = temp.path().join("pack.zip");
-    let manifest = json!({"manifestType":"minecraftModpack","manifestVersion":1,"name":"All the Mods 9","version":"1.0","minecraft":{"version":"1.20.1","modLoaders":[]},"files":[{"projectID":123,"fileID":456,"required":true}],"overrides":"overrides"});
-    archive(&path, "manifest.json", &manifest, &[]);
-    let old = format!("pack-{}", uuid::Uuid::new_v4());
-    launcher
-        .prepare_modpack(&instance.id, &path, &old, &[])
-        .await
-        .unwrap();
-    let old_source = make_legacy(&launcher, &instance, &old, "All the Mods 9");
-    fs::remove_file(
-        instance
-            .game_dir(launcher.root())
-            .join("versions")
-            .join(&old)
-            .join("manifest.json"),
-    )
-    .unwrap();
-    let metadata = launcher.version_metadata(&instance.id, &old).unwrap();
-    assert!(metadata.issue.is_none());
-    assert_eq!(metadata.documents.len(), 1);
-    let document = &metadata.documents[0];
-    assert!(document.issue.is_none());
-    assert_eq!(document.kind, "CurseForge");
-    assert_eq!(
-        serde_json::from_str::<Value>(document.json.as_deref().unwrap()).unwrap(),
-        manifest
-    );
-    assert!(
-        document
-            .path
-            .to_string_lossy()
-            .ends_with("source.zip::manifest.json")
-    );
-    let root = launcher.root().to_owned();
-    let game = instance.game_dir(&root);
-    drop(launcher);
-    let launcher = Launcher::open(Some(root)).unwrap();
-    let restored = launcher.instance(&instance.id).unwrap();
-    assert_eq!(restored.selected_version.as_deref(), Some("All the Mods 9"));
-    assert!(!game.join("versions").join(old).exists());
-    assert!(!old_source.exists());
-    let job = launcher.pack_job(&instance.id, "All the Mods 9").unwrap();
-    assert_eq!(job.pack.files.len(), 1);
-    assert_eq!(
-        job.archive,
-        game.join("versions/All the Mods 9/.nekocrate/source.zip")
-    );
-    assert!(job.archive.is_file());
-    assert!(game.join("versions/All the Mods 9/manifest.json").is_file());
-}
-
-#[tokio::test]
 async fn named_pack_cannot_overwrite_its_launch_profile_or_manifest() {
     let temp = tempfile::tempdir().unwrap();
     let launcher = Launcher::open(Some(temp.path().join("root"))).unwrap();
@@ -533,175 +438,6 @@ async fn moving_a_game_directory_to_a_fresh_launcher_recovers_pending_pack_state
     );
 }
 
-#[tokio::test]
-async fn legacy_migration_preserves_progress_and_partial_bytes_and_reports_conflicts() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("launcher");
-    let launcher = Launcher::open(Some(root.clone())).unwrap();
-    let instance = launcher.create_instance("Legacy", "").unwrap();
-    let game = instance.game_dir(&root);
-    let source = temp.path().join("pack.mrpack");
-    archive(
-        &source,
-        "modrinth.index.json",
-        &mr(vec![pack_file("mods/test.jar", "required")]),
-        &[],
-    );
-    let old = format!("pack-{}", uuid::Uuid::new_v4());
-    launcher
-        .prepare_modpack(&instance.id, &source, &old, &[])
-        .await
-        .unwrap();
-    launcher
-        .save_download_progress(&instance.id, &old, 35.0)
-        .unwrap();
-    let old_source = make_legacy(&launcher, &instance, &old, "Named pack");
-    let spec = FileSpec {
-        url: "https://cdn.modrinth.com/data/test/mod.jar".into(),
-        path: game.join("versions").join(&old).join("mods/test.jar"),
-        hash: hex::encode(Sha1::digest(b"mod")),
-        sha256: false,
-        size: 3,
-    };
-    let partial = crate::download::object_path(&root.join("cache/objects"), &spec)
-        .unwrap()
-        .with_extension("part");
-    fs::create_dir_all(partial.parent().unwrap()).unwrap();
-    fs::write(&partial, b"mo").unwrap();
-    let conflict = game.join("versions/Named pack");
-    fs::create_dir_all(&conflict).unwrap();
-    fs::write(conflict.join("keep"), b"keep").unwrap();
-    drop(launcher);
-    let launcher = Launcher::open(Some(root.clone())).unwrap();
-    assert!(
-        launcher
-            .modpack_migration_issue(&instance.id, &old)
-            .unwrap()
-            .contains("版本名称重复")
-    );
-    assert_eq!(fs::read(conflict.join("keep")).unwrap(), b"keep");
-    assert!(old_source.exists());
-    assert!(
-        launcher
-            .version_metadata(&instance.id, &old)
-            .unwrap()
-            .issue
-            .unwrap()
-            .contains("版本名称重复")
-    );
-    drop(launcher);
-    fs::remove_dir_all(conflict).unwrap();
-    let launcher = Launcher::open(Some(root)).unwrap();
-    let restored = launcher.instance(&instance.id).unwrap();
-    assert_eq!(restored.selected_version.as_deref(), Some("Named pack"));
-    assert_eq!(restored.selected().unwrap().download_progress, 35.0);
-    let local = crate::download::object_path(
-        &game.join("versions/Named pack/.nekocrate/downloads"),
-        &spec,
-    )
-    .unwrap()
-    .with_extension("part");
-    assert_eq!(fs::read(local).unwrap(), b"mo");
-    assert!(!old_source.exists());
-}
-
-#[tokio::test]
-async fn legacy_migration_rolls_back_on_database_failure_and_retries_on_reopen() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("root");
-    let launcher = Launcher::open(Some(root.clone())).unwrap();
-    let instance = launcher.create_instance("Test", "").unwrap();
-    let game = instance.game_dir(&root);
-    let source = temp.path().join("pack.mrpack");
-    archive(&source, "modrinth.index.json", &mr(vec![]), &[]);
-    let old = format!("pack-{}", uuid::Uuid::new_v4());
-    launcher
-        .prepare_modpack(&instance.id, &source, &old, &[])
-        .await
-        .unwrap();
-    let old_source = make_legacy(&launcher, &instance, &old, "Recovered pack");
-    fs::remove_file(root.join("database.json.bak")).unwrap();
-    fs::create_dir(root.join("database.json.bak")).unwrap();
-    launcher.migrate_modpack_records();
-    assert_eq!(
-        launcher
-            .instance(&instance.id)
-            .unwrap()
-            .selected_version
-            .as_deref(),
-        Some(old.as_str())
-    );
-    assert!(game.join("versions").join(&old).is_dir());
-    assert!(!game.join("versions/Recovered pack").exists());
-    assert!(old_source.exists());
-    drop(launcher);
-    fs::remove_dir(root.join("database.json.bak")).unwrap();
-    let launcher = Launcher::open(Some(root)).unwrap();
-    assert_eq!(
-        launcher
-            .instance(&instance.id)
-            .unwrap()
-            .selected_version
-            .as_deref(),
-        Some("Recovered pack")
-    );
-    assert!(!old_source.exists());
-}
-
-#[tokio::test]
-async fn legacy_migration_recovers_a_folder_move_interrupted_before_database_publication() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("root");
-    let launcher = Launcher::open(Some(root.clone())).unwrap();
-    let instance = launcher.create_instance("Test", "").unwrap();
-    let game = instance.game_dir(&root);
-    let source = temp.path().join("pack.mrpack");
-    archive(&source, "modrinth.index.json", &mr(vec![]), &[]);
-    let old = format!("pack-{}", uuid::Uuid::new_v4());
-    launcher
-        .prepare_modpack(&instance.id, &source, &old, &[])
-        .await
-        .unwrap();
-    let old_source = make_legacy(&launcher, &instance, &old, "Recovered pack");
-    let (_, mut job) = launcher.legacy_pack_job(&instance.id, &old).unwrap();
-    let folder = game.join("versions").join(&old);
-    let state = folder.join(".nekocrate");
-    fs::create_dir(&state).unwrap();
-    fs::copy(&old_source, state.join("source.zip")).unwrap();
-    storage::write_json(
-        &state.join("migration.json"),
-        &json!({"instance":instance.id,"version":old,"archive":old_source}),
-    )
-    .unwrap();
-    job.instance.clear();
-    job.version = "Recovered pack".into();
-    job.archive = "source.zip".into();
-    storage::write_json(&state.join("modpack.json"), &job).unwrap();
-    fs::rename(folder, game.join("versions/Recovered pack")).unwrap();
-    drop(launcher);
-    let launcher = Launcher::open(Some(root)).unwrap();
-    assert_eq!(
-        launcher
-            .instance(&instance.id)
-            .unwrap()
-            .selected_version
-            .as_deref(),
-        Some("Recovered pack")
-    );
-    assert!(
-        launcher
-            .pack_job(&instance.id, "Recovered pack")
-            .unwrap()
-            .archive
-            .is_file()
-    );
-    assert!(!old_source.exists());
-    assert!(
-        !game
-            .join("versions/Recovered pack/.nekocrate/migration.json")
-            .exists()
-    );
-}
 #[tokio::test]
 async fn cancellation_and_manual_file_hash_mismatch_cannot_complete_an_install() {
     let temp = tempfile::tempdir().unwrap();
@@ -887,7 +623,7 @@ async fn offline_install_resumes_after_overrides_and_keeps_user_configuration_on
             .unwrap()
             .installed
     );
-    let resolved = version::resolve(&root, &game, &id).unwrap();
+    let resolved = version::resolve(&game, &id).unwrap();
     assert!(
         !directory.join(".nekocrate/source.zip").exists(),
         "successful installation releases its archive"
@@ -934,7 +670,7 @@ async fn offline_install_resumes_after_overrides_and_keeps_user_configuration_on
     record::write_job(&game, &id, &job).unwrap();
     fs::remove_file(version::metadata_path(&game, &id).unwrap()).unwrap();
     let cache = crate::download::object_path(
-        &root.join("cache/objects"),
+        &directory.join(".nekocrate/downloads"),
         &FileSpec {
             url: "https://example.invalid/automatic.jar".into(),
             path: directory.join("mods/automatic.jar"),

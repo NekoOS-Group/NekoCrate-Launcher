@@ -750,7 +750,6 @@ fn raw_metadata_reads_original_text_without_extraction_and_only_reveals_real_fil
 
 #[test]
 fn list_capabilities_distinguish_missing_descriptors_from_invalid_ones_and_keep_provenance() {
-    use std::sync::atomic::Ordering;
     let (_temp, launcher, id, game) = fixture();
     archive(
         &game.join("mods/empty.jar"),
@@ -762,7 +761,6 @@ fn list_capabilities_distinguish_missing_descriptors_from_invalid_ones_and_keep_
     );
     let cold = launcher.version_content_index(&id, "pack").unwrap();
     assert!(cold.content.files.iter().all(|f| f.has_metadata.is_none()));
-    assert_eq!(launcher.0.mod_summaries.reads.load(Ordering::Relaxed), 0);
     let batch = launcher
         .version_content_summaries(&id, "pack", &cold.pending)
         .unwrap();
@@ -784,7 +782,6 @@ fn list_capabilities_distinguish_missing_descriptors_from_invalid_ones_and_keep_
     );
     let warm = launcher.version_content_index(&id, "pack").unwrap();
     assert!(warm.pending.is_empty());
-    assert_eq!(launcher.0.mod_summaries.reads.load(Ordering::Relaxed), 2);
     archive(
         &game.join("resourcepacks/empty.zip"),
         &[("assets/cat.txt", "cat")],

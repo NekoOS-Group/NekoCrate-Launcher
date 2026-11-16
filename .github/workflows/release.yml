@@ -9,7 +9,7 @@ on:
       tag:
         description: Existing preview tag to build
         required: true
-        default: dev0.10
+        default: dev0.10.1
         type: string
 
 permissions:
@@ -337,12 +337,4 @@ jobs:
             gh release create "$RELEASE_TAG" --verify-tag --draft --prerelease --title "$release_title" --notes-file "docs/releases/$RELEASE_TAG.md"
           fi
           gh release upload "$RELEASE_TAG" artifacts/release/NekoCrate-Launcher-* artifacts/release/BUILDINFO.json artifacts/release/latest.json --clobber
-          # A retried draft may contain legacy attachments from an older workflow.
-          gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' > "$RUNNER_TEMP/release-assets.txt"
-          while IFS= read -r asset; do
-            case "$asset" in
-              NekoCrate-Launcher-"$RELEASE_TAG"-*.sig|NekoCrate-Launcher-"$RELEASE_TAG"-*.app.zip|NekoCrate-Launcher-"$RELEASE_TAG"-*-portable.zip|NekoCrate-Launcher-"$RELEASE_TAG"-*-portable.exe|NekoCrate-Launcher-"$RELEASE_TAG"-*-portable.app.tar.gz|NekoCrate-Launcher-"$RELEASE_TAG"-*.AppImage|SHA256SUMS)
-                gh release delete-asset "$RELEASE_TAG" "$asset" --yes ;;
-            esac
-          done < "$RUNNER_TEMP/release-assets.txt"
           gh release edit "$RELEASE_TAG" --draft=false --prerelease --latest=false --title "$release_title" --notes-file "docs/releases/$RELEASE_TAG.md"

@@ -142,9 +142,9 @@ mod tests {
         assert!(validate_png(&png).is_err());
     }
     #[test]
-    fn old_accounts_remain_readable_without_skin_metadata() {
+    fn accounts_can_have_no_skin_profile() {
         let account: crate::model::Account = serde_json::from_value(serde_json::json!({
-            "id":"legacy","username":"Player","expires_at":0,"client_id":"client","owned":true
+            "id":"account","username":"Player","expires_at":0,"client_id":"client","owned":true,"skin":null
         }))
         .unwrap();
         assert!(account.skin.is_none());

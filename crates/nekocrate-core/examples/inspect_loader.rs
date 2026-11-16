@@ -9,7 +9,7 @@ fn main() -> anyhow::Result<()> {
     );
     let root = game.join(".no-legacy-fallback");
     for id in args.iter().skip(1) {
-        let resolved = version::resolve(&root, &game, id)?;
+        let resolved = version::resolve(&game, id)?;
         let instance: Instance = serde_json::from_value(
             serde_json::json!({"id":"diagnostic", "name":id, "game_directory":game, "versions":[],"selected_version":id,"memory_mb":2048,"java_path":null,"created_at":0,"last_played":null}),
         )?;
@@ -34,7 +34,7 @@ fn main() -> anyhow::Result<()> {
             required_java.arch,
             arguments.len(),
             version::working_directory(&game, &resolved.version)?.display(),
-            version::check_launch_files(&root, &game, &resolved).map_err(|e| e.to_string())
+            version::check_launch_files(&game, &resolved).map_err(|e| e.to_string())
         );
     }
     Ok(())

@@ -567,15 +567,9 @@ fn dependencies(
     }
 }
 
-pub(super) fn inspect(
-    root: &Path,
-    game: &Path,
-    id: &str,
-    working: &Path,
-    text: &str,
-) -> Vec<Finding> {
+pub(super) fn inspect(game: &Path, id: &str, working: &Path, text: &str) -> Vec<Finding> {
     let mut out = Findings::default();
-    let resolved = crate::version::resolve(root, game, id);
+    let resolved = crate::version::resolve(game, id);
     let (minecraft, loader) = resolved
         .as_ref()
         .map(|r| (r.minecraft_version.as_str(), r.loader.as_ref()))
@@ -723,7 +717,7 @@ mod tests {
         let before = fs::read(working.join("mods/varied.jar.disabled")).unwrap();
         let error = "Caused by: com.google.gson.JsonSyntaxException: Expected name to be an item, was unknown string 'variedcommodities:coin_diamond'";
         assert_eq!(super::super::analyze(error)[0].code, "registry");
-        let findings = inspect(game, game, "Pack", &working, error);
+        let findings = inspect(game, "Pack", &working, error);
         assert!(evidence(&findings, "pack_disabled").contains("variedcommodities"));
         assert!(evidence(&findings, "pack_missing").contains("missing.jar"));
         assert!(!evidence(&findings, "pack_missing").contains("optional.jar"));
@@ -814,7 +808,7 @@ mod tests {
             "fabric.mod.json",
             r#"{"id":"lib","version":"0"}"#,
         );
-        let findings = inspect(game, game, "Pack", &working, "");
+        let findings = inspect(game, "Pack", &working, "");
         assert!(evidence(&findings, "component_dependencies").contains("absent"));
         assert!(evidence(&findings, "component_versions").contains("lib"));
         assert!(!evidence(&findings, "component_versions").contains("minecraft"));
@@ -824,7 +818,7 @@ mod tests {
             "fabric.mod.json",
             r#"{"id":"lib","version":"2"}"#,
         );
-        let findings = inspect(game, game, "Pack", &working, "");
+        let findings = inspect(game, "Pack", &working, "");
         assert!(evidence(&findings, "component_duplicate").contains("lib-new.jar"));
         assert!(evidence(&findings, "component_versions").is_empty());
         storage::write_json(
@@ -832,7 +826,7 @@ mod tests {
             &json!({"version":1,"overrides":{}}),
         )
         .unwrap();
-        let findings = inspect(game, game, "Pack", &working, "");
+        let findings = inspect(game, "Pack", &working, "");
         assert!(evidence(&findings, "component_dependencies").is_empty());
         assert!(evidence(&findings, "audit_incomplete").contains("覆盖"));
     }
@@ -852,10 +846,10 @@ mod tests {
         );
         let runtime =
             "| LCHI | legacy | 1 | dual.jar | None |\n| LCHI | lib | 1.5 | lib.jar | None |";
-        let findings = inspect(game, game, "Pack", &working, runtime);
+        let findings = inspect(game, "Pack", &working, runtime);
         assert!(evidence(&findings, "component_versions").is_empty());
         assert!(evidence(&findings, "component_dependencies").is_empty());
-        let findings = inspect(game, game, "Pack", &working, &runtime.replace("1.5", "3"));
+        let findings = inspect(game, "Pack", &working, &runtime.replace("1.5", "3"));
         let mismatches = evidence(&findings, "component_versions");
         assert!(mismatches.contains("legacy 需要 lib"));
         assert!(!mismatches.contains("modern"));
@@ -880,11 +874,10 @@ mod tests {
             "mcmod.info",
             r#"[{"modid":"forgeonly","useDependencyInformation":true,"requiredMods":["absent"]}]"#,
         );
-        let findings = inspect(game, game, "Pack", &working, "");
+        let findings = inspect(game, "Pack", &working, "");
         assert!(evidence(&findings, "component_dependencies").is_empty());
         assert!(evidence(&findings, "component_versions").is_empty());
         let findings = inspect(
-            game,
             game,
             "Pack",
             &working,
@@ -908,7 +901,7 @@ mod tests {
         storage::write_json(&working.join("modrinth.index.json"),&json!({"game":"minecraft","dependencies":{"minecraft":"1.20.1","fabric-loader":"0.16.0"},"files":[{"path":"mods/missing.jar","env":{"client":"required"}},{"path":"mods/server.jar","env":{"client":"unsupported"}}]})).unwrap();
         storage::write_json(&working.join("manifest.json"),&json!({"manifestType":"minecraftModpack","files":[{"projectID":1,"fileID":2,"required":true}]})).unwrap();
         archive(&working.join("mods/user.jar"), "mcmod.info", "[]");
-        let findings = inspect(game, game, "Pack", &working, "");
+        let findings = inspect(game, "Pack", &working, "");
         assert!(evidence(&findings, "component_versions").contains("1.20.1"));
         assert!(evidence(&findings, "component_versions").contains("fabric"));
         assert!(evidence(&findings, "pack_missing").contains("mods/missing.jar"));
@@ -956,7 +949,7 @@ versionRange="[1,)"
             "META-INF/mods.toml",
             "[[mods]]\nmodId='lib'\nversion='1'\n",
         );
-        let findings = inspect(game, game, "Pack", &working, "");
+        let findings = inspect(game, "Pack", &working, "");
         assert!(evidence(&findings, "component_versions").contains("lib"));
         let missing = evidence(&findings, "component_dependencies");
         assert!(missing.contains("missing"));
@@ -967,7 +960,7 @@ versionRange="[1,)"
             "META-INF/mods.toml",
             "[[mods]]\nmodId='lib'\nversion='${file.jarVersion}'\n",
         );
-        let findings = inspect(game, game, "Pack", &working, "");
+        let findings = inspect(game, "Pack", &working, "");
         assert!(evidence(&findings, "component_versions").is_empty());
         assert!(evidence(&findings, "audit_incomplete").contains("lib"));
     }
@@ -1027,11 +1020,8 @@ versionRange="[1,)"
         let text =
             super::super::tail(&working.join(std::env::var("NEKOCRATE_AUDIT_REPORT").unwrap()))
                 .unwrap();
-        let root = std::env::var_os("NEKOCRATE_AUDIT_ROOT")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| game.clone());
         let start = std::time::Instant::now();
-        let findings = inspect(&root, &game, &id, &working, &text);
+        let findings = inspect(&game, &id, &working, &text);
         for finding in findings {
             println!(
                 "{}: {}\n{}",

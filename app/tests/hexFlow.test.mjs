@@ -1,7 +1,7 @@
+import { createHexGraph } from "../src/flowGraph.ts";
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  createHexGraph,
   createHexFlow,
   advanceHexFlow,
   sampleHexTransition,

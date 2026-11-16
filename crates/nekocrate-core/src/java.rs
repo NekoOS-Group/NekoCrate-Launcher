@@ -121,7 +121,6 @@ pub struct JavaInfo {
     pub version: String,
     pub arch: String,
     pub jdk: bool,
-    #[serde(default)]
     pub vendor: String,
 }
 pub struct JavaRequirement {
@@ -249,22 +248,9 @@ impl JavaRequirement {
         }
     }
 
-    pub async fn for_instance(
-        version: &crate::model::Version,
-        game: &Path,
-        explicit: Option<&str>,
-    ) -> Result<Self> {
-        Self::for_working_directory(
-            version,
-            &crate::version::working_directory(game, version)?,
-            explicit,
-        )
-        .await
-    }
     pub async fn for_working_directory(
         version: &crate::model::Version,
         working: &Path,
-        _explicit: Option<&str>,
     ) -> Result<Self> {
         let mut requirement = Self::for_version(version);
         let version = version.clone();
@@ -385,7 +371,6 @@ pub fn ensure<'a>(
     root: &'a Path,
     requirement: JavaRequirement,
     explicit: Option<&'a str>,
-    auto: bool,
     downloader: &'a Downloader,
     cancel: &'a CancellationToken,
     sink: &'a EventSink,
@@ -471,12 +456,6 @@ pub fn ensure<'a>(
                     "常见位置未找到匹配 Java，正在补查实例附带运行时",
                 ));
             }
-        }
-        if !auto {
-            bail!(
-                "未找到兼容的 {}，请指定 Java 路径或允许自动下载。",
-                requirement.description()
-            );
         }
         check_cancel(cancel)?;
         let os = if cfg!(target_os = "macos") {
@@ -849,10 +828,7 @@ mod tests {
         let mut version = crate::test_http::version_fixture("1.20.1");
         version.java_version = Some(crate::model::JavaVersion { major: 17 });
         version.main_class = "cpw.mods.bootstraplauncher.BootstrapLauncher".into();
-        let auto = JavaRequirement::for_working_directory(&version, temp.path(), None)
-            .await
-            .unwrap();
-        let manual = JavaRequirement::for_working_directory(&version, temp.path(), Some("java"))
+        let auto = JavaRequirement::for_working_directory(&version, temp.path())
             .await
             .unwrap();
         assert!(!auto.jdk);
@@ -865,7 +841,6 @@ mod tests {
                 jdk: false,
                 vendor: String::new(),
             };
-            assert_eq!(auto.rejection(&java), manual.rejection(&java));
             assert_eq!(auto.matches(&java), major >= 17);
         }
     }
@@ -875,7 +850,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut version = crate::test_http::version_fixture("1.20.1");
         version.java_version = Some(crate::model::JavaVersion { major: 17 });
-        let mut requirement = JavaRequirement::for_instance(&version, temp.path(), None)
+        let mut requirement = JavaRequirement::for_working_directory(&version, temp.path())
             .await
             .unwrap();
         let available: Vec<_> = [17, 21, 26]
@@ -952,11 +927,12 @@ mod tests {
             .unwrap();
             assert_eq!(info.vendor, vendor);
         }
-        let old: JavaInfo = serde_json::from_value(serde_json::json!({
-            "path": "/java", "major": 17, "version": "17.0.1", "arch": "aarch64", "jdk": true
-        }))
-        .unwrap();
-        assert!(old.vendor.is_empty());
+        assert!(
+            serde_json::from_value::<JavaInfo>(serde_json::json!({
+                "path": "/java", "major": 17, "version": "17.0.1", "arch": "aarch64", "jdk": true
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -1000,7 +976,7 @@ mod tests {
         let events = Arc::new(Mutex::new(Vec::new()));
         let captured = events.clone();
         let sink: EventSink = Arc::new(move |event| captured.lock().unwrap().push(event));
-        // Auto-download is disabled; local selection must still succeed.
+        // Local compatible Java must be reused without entering installation.
         let cancel = CancellationToken::new();
         let found = ensure(
             temp.path(),
@@ -1014,7 +990,6 @@ mod tests {
                 history: None,
             },
             None,
-            false,
             &downloader,
             &cancel,
             &sink,
@@ -1047,22 +1022,14 @@ mod tests {
         let mut profile = crate::test_http::version_fixture("1.20.1");
         profile.java_version = Some(crate::model::JavaVersion { major: 17 });
         profile.compatible_java_majors = (17..=26).collect();
-        let requirement = JavaRequirement::for_instance(&profile, temp.path(), None)
+        let requirement = JavaRequirement::for_working_directory(&profile, temp.path())
             .await
             .unwrap();
         // A wider compatible range does not displace an existing recommended JVM.
         assert_eq!(requirement.allowed_majors().last(), Some(&26));
-        let selected = ensure(
-            temp.path(),
-            requirement,
-            None,
-            false,
-            &downloader,
-            &cancel,
-            &sink,
-        )
-        .await
-        .unwrap();
+        let selected = ensure(temp.path(), requirement, None, &downloader, &cancel, &sink)
+            .await
+            .unwrap();
         assert_eq!(selected.major, 17);
         assert!(!events.lock().unwrap().iter().any(|e| e.kind == "stage"));
         // Manual selection must not bypass a known bytecode incompatibility.
@@ -1074,7 +1041,6 @@ mod tests {
             temp.path(),
             JavaRequirement::for_version(&version),
             Some(newer.join("java").to_str().unwrap()),
-            false,
             &downloader,
             &cancel,
             &sink,

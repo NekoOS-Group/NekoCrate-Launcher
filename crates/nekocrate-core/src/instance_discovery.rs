@@ -101,7 +101,7 @@ impl Launcher {
             .filter_map(|(path, source)| {
                 // Also excludes already linked/overlapping folders and launcher data.
                 // Missing/inaccessible optional locations are normal, not UI errors.
-                let path = self.linkable_directory(&path, None).ok()?;
+                let path = self.linkable_directory(&path).ok()?;
                 if !seen.insert(path.clone()) {
                     return None;
                 }

@@ -295,7 +295,15 @@ mod tests {
         let base = temp.path().join("old");
         let root = base.join(crate::portable::DATA_DIRECTORY);
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(base.join(crate::portable::MARKER), r#"{"schema":1}"#).unwrap();
+        crate::storage::write_json(
+            &root.join("portable.json"),
+            &crate::portable::Identity {
+                schema: 1,
+                id: uuid::Uuid::new_v4().to_string(),
+                game_linked: false,
+            },
+        )
+        .unwrap();
         crate::portable::initialize(&root).unwrap();
         let before = super::secret_account(&root, "account");
         let moved = temp.path().join("moved");

@@ -17,8 +17,6 @@ const MANIFEST_MISS_TTL: Duration = Duration::from_secs(15 * 60);
 const UNKNOWN_VERSION: &str =
     "未在官方版本目录中找到此版本，请检查游戏版本号或关联已安装的加载器目录";
 const CUSTOM_VERSION: &str = "该本地版本使用自定义加载器，启动器暂不支持安装或修复";
-const LEGACY_VERSION: &str =
-    "当前原型支持 Minecraft 1.13 及更新的官方版本；旧版本启动协议将在后续加入。";
 
 /// Read only enough local metadata to reject an unsupported install before any
 /// network work. Missing/broken JSON may be repaired using official metadata.
@@ -63,9 +61,6 @@ pub fn check_local_install(game: &Path, id: &str) -> Result<()> {
     });
     if inherits || loader_main || loader_library {
         bail!(CUSTOM_VERSION);
-    }
-    if value["arguments"].is_null() && value["minecraftArguments"].is_string() {
-        bail!(LEGACY_VERSION);
     }
     Ok(())
 }
@@ -162,9 +157,6 @@ pub fn rules_allow(rules: &[Rule], os: &str, arch: &str, features: &HashMap<Stri
         allowed = rule.action == "allow";
     }
     allowed
-}
-pub fn is_allowed(library: &Library) -> bool {
-    rules_allow(&library.rules, os_name(), arch_name(), &HashMap::new())
 }
 pub fn is_allowed_on(library: &Library, arch: &str) -> bool {
     rules_allow(&library.rules, os_name(), arch, &HashMap::new())
@@ -311,7 +303,7 @@ pub async fn cached_installation_files(
     id: &str,
 ) -> Result<Vec<FileSpec>> {
     storage::safe_version(id)?;
-    let local = version::resolve(root, game, id).ok().filter(|resolved| {
+    let local = version::resolve(game, id).ok().filter(|resolved| {
         resolved
             .loader
             .as_ref()
@@ -515,21 +507,8 @@ pub fn arguments_with_memory(
     let game = instance.game_dir(root);
     let working_directory = version::instance_working_directory(&game, instance, &v.id)?;
     let native = game.join("versions").join(&v.id).join("natives");
-    // New installations live entirely in their .minecraft directory. Keep a
-    // read-only fallback for games installed by releases with shared storage.
-    let index = storage::safe_relative(&format!("{}.json", v.asset_index.id))?;
-    let assets = if game.join("assets/indexes").join(&index).is_file()
-        || !root.join("assets/indexes").join(&index).is_file()
-    {
-        game.join("assets")
-    } else {
-        root.join("assets")
-    };
-    let libraries = if game.join("libraries").is_dir() || !root.join("libraries").is_dir() {
-        game.join("libraries")
-    } else {
-        root.join("libraries")
-    };
+    let assets = game.join("assets");
+    let libraries = game.join("libraries");
     let mut classpath = vec![];
     for l in v
         .libraries
@@ -537,14 +516,7 @@ pub fn arguments_with_memory(
         .filter(|l| is_allowed_on(l, runtime_arch))
     {
         if let Some(a) = classpath_artifact(l) {
-            let local = library_path(&game, a)?;
-            let legacy = library_path(root, a)?;
-            let path = if local.is_file() || !legacy.is_file() {
-                local
-            } else {
-                legacy
-            };
-            classpath.push(crate::java::argument_path(&path));
+            classpath.push(crate::java::argument_path(&library_path(&game, a)?));
         }
     }
     let client_path = version::client_path(&game, v)?;
@@ -648,13 +620,7 @@ pub fn arguments_with_memory(
             "${path}",
             &crate::java::argument_path(&{
                 let relative = storage::safe_relative(id)?;
-                let local = game.join("assets/log_configs").join(&relative);
-                let legacy = root.join("assets/log_configs").join(&relative);
-                if local.is_file() || !legacy.is_file() {
-                    local
-                } else {
-                    legacy
-                }
+                game.join("assets/log_configs").join(relative)
             }),
         ));
     }
@@ -774,12 +740,7 @@ fn split_legacy_arguments(input: &str) -> Result<Vec<String>> {
     Ok(tokens)
 }
 
-pub fn prepare_local_natives(
-    root: &Path,
-    game: &Path,
-    v: &Version,
-    cancel: &CancellationToken,
-) -> Result<()> {
+pub fn prepare_local_natives(game: &Path, v: &Version, cancel: &CancellationToken) -> Result<()> {
     let dest = game.join("versions").join(&v.id).join("natives");
     std::fs::create_dir_all(&dest)?;
     let runtime_arch = crate::java::JavaRequirement::for_version(v).arch;
@@ -791,7 +752,7 @@ pub fn prepare_local_natives(
         if let Some(artifact) = native_artifact(library) {
             check_cancel(cancel)?;
             extract_natives(
-                &version::local_library(root, game, artifact)?,
+                &library_path(game, artifact)?,
                 &dest,
                 library.extract.as_ref(),
                 cancel,
@@ -999,11 +960,11 @@ mod tests {
             temp.path(),
             Settings {
                 proxy_mode: "none".into(),
-                retries: 0,
                 ..Settings::default()
             },
         )
-        .unwrap();
+        .unwrap()
+        .with_retries(0);
         // Route any accidental request (including the public manifest) to this
         // local socket. The hit must finish without even opening a connection.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1074,12 +1035,7 @@ mod tests {
             &serde_json::json!({"minecraftArguments": "--version 1.12.2"}),
         )
         .unwrap();
-        assert_eq!(
-            check_local_install(temp.path(), "RLCraft")
-                .unwrap_err()
-                .to_string(),
-            LEGACY_VERSION
-        );
+        check_local_install(temp.path(), "RLCraft").unwrap();
         storage::write_json(&path, &crate::test_http::version_fixture("RLCraft")).unwrap();
         check_local_install(temp.path(), "RLCraft").unwrap();
         std::fs::write(&path, b"broken JSON").unwrap();
@@ -1311,18 +1267,19 @@ mod tests {
                 .join(".minecraft")
                 .exists()
         );
-        // Releases before this fix stored shared resources in the app directory.
+        // Global directories from retired launcher storage are not launch inputs.
         for name in ["libraries", "assets"] {
-            fs::remove_dir_all(root.join(name)).unwrap();
             fs::rename(game.join(name), root.join(name)).unwrap();
         }
-        let legacy_args = arguments(&v, &root, &instance, &LaunchSession::guest()).unwrap();
-        assert!(legacy_args.contains(&crate::java::argument_path(&root.join("assets"))));
-        assert!(legacy_args.iter().any(|arg| {
-            arg.contains(&crate::java::argument_path(
-                &root.join("libraries").join(lib_path),
-            ))
-        }));
+        let args = arguments(&v, &root, &instance, &LaunchSession::guest()).unwrap();
+        assert!(args.contains(&crate::java::argument_path(&game.join("assets"))));
+        assert!(!args.contains(&crate::java::argument_path(&root.join("assets"))));
+        assert!(
+            args.iter()
+                .any(|arg| arg.contains(&crate::java::argument_path(
+                    &game.join("libraries").join(lib_path)
+                )))
+        );
     }
 
     #[tokio::test]

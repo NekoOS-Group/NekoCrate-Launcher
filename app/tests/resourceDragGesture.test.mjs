@@ -75,13 +75,6 @@ function fixture(exportResult, preview) {
         copy: async (...args) => {
           copied.push(args);
         },
-        copyMany: async (...args) => {
-          copied.push(args);
-        },
-        exportMany: async (sources) => {
-          exported.push(sources);
-          return exportResult;
-        },
         export: async (source) => {
           exported.push(source);
           if (exportResult instanceof Error) throw exportResult;
@@ -135,24 +128,6 @@ function fixture(exportResult, preview) {
     },
   };
 }
-
-test("internal drag uses the existing target and cleans up on release", () => {
-  const f = fixture();
-  try {
-    f.start();
-    f.move(150, 120);
-    assert.equal(dropInteraction.value, true);
-    assert.equal(dropHint.value.invalid, false);
-    f.release(150, 120);
-    assert.equal(f.copied.length, 1);
-    assert.deepEqual(f.copied[0][1], { instance: "b", version: "two" });
-    assert.equal(dropInteraction.value, false);
-    assert.equal(f.drag.value, undefined);
-    assert.equal(f.finish(), 1);
-  } finally {
-    f.dispose();
-  }
-});
 
 test("a stationary pointer tracks changed layout and clears a target that moves away", () => {
   const f = fixture();
@@ -321,26 +296,32 @@ const batch = ["cat.jar", "ice.jar.disabled"].map((file) => ({
   file,
   name: file,
 }));
-test("selected resources copy as one batch and native export receives the entire selection", async () => {
-  const f = fixture();
-  try {
-    f.start(batch);
-    f.move(150, 150);
-    assert.equal(f.drag.value.sources.length, 2);
-    f.release(150, 150);
-    await new Promise(setImmediate);
-    assert.equal(f.copied.length, 1);
-    assert.deepEqual(f.copied[0][0], batch);
-  } finally {
-    f.dispose();
-  }
-  const g = fixture({ action: "copy" });
-  try {
-    g.start(batch);
-    g.move(895, 150);
-    await new Promise(setImmediate);
-    assert.deepEqual(g.exported, [batch]);
-  } finally {
-    g.dispose();
+test("one or many resources use the same copy/export flow and clean up after release", async () => {
+  for (const sources of [[batch[0]], batch]) {
+    const f = fixture();
+    try {
+      f.start(sources);
+      f.move(150, 150);
+      assert.equal(dropInteraction.value, true);
+      assert.equal(dropHint.value.invalid, false);
+      f.release(150, 150);
+      assert.deepEqual(f.copied, [
+        [sources, { instance: "b", version: "two" }],
+      ]);
+      assert.equal(dropInteraction.value, false);
+      assert.equal(f.drag.value, undefined);
+      assert.equal(f.finish(), 1);
+    } finally {
+      f.dispose();
+    }
+    const g = fixture({ action: "copy" });
+    try {
+      g.start(sources);
+      g.move(895, 150);
+      await new Promise(setImmediate);
+      assert.deepEqual(g.exported, [sources]);
+    } finally {
+      g.dispose();
+    }
   }
 });

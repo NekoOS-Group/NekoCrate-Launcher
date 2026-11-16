@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import WindowControls from "./WindowControls.vue";
 import { resourceArrival, arrivalFileKey } from "../resourceArrival";
 import {
   cacheResourceParts,
@@ -1060,7 +1059,6 @@ defineExpose({ drop, refresh, resourceUpdated });
           }}</span>
         </button>
       </nav>
-      <WindowControls />
       <button
         class="icon-button"
         :title="t('关闭')"

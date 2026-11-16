@@ -15,20 +15,16 @@ export function readQuoteScales(
           result[style] = Math.round(Math.max(60, Math.min(160, scale)));
       }
   } catch {
-    /* Keep existing layouts at their original text size. */
+    /* Invalid or absent preferences use defaults. */
   }
   return result;
 }
 export function readQuoteStyle(value: string | null): QuoteStyle {
   try {
     const data = JSON.parse(value || "null");
-    if (
-      data?.version === 1 &&
-      ["splash", "minecraft"].includes(data.quoteStyle)
-    )
-      return "splash";
+    if (data?.version === 1 && data.quoteStyle === "splash") return "splash";
   } catch {
-    /* Use simple text for older layouts. */
+    /* Invalid or absent preferences use defaults. */
   }
   return "simple";
 }
@@ -45,7 +41,7 @@ export function readQuoteAngles(
           result[style] = Math.round(Math.max(-45, Math.min(45, angle)));
       }
   } catch {
-    /* Older layouts keep the original angles. */
+    /* Invalid or absent preferences use defaults. */
   }
   return result;
 }
@@ -107,7 +103,7 @@ export function readListWidgetLayout(
         height: widgetHeight(data[widget]?.height),
       };
   } catch {
-    /* Older layouts keep lists visible and left aligned. */
+    /* Invalid or absent preferences use defaults. */
   }
   return { ...edgeWidgetLayout(null), height: null };
 }
@@ -126,7 +122,7 @@ export function readNewsLayout(value: string | null): NewsLayout {
         height: widgetHeight(data.news?.height) ?? defaultNewsHeight,
       };
   } catch {
-    /* Older layouts keep news visible and left aligned. */
+    /* Invalid or absent preferences use defaults. */
   }
   return { align: "left", dock: null, height: defaultNewsHeight };
 }

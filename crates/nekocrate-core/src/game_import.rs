@@ -410,9 +410,8 @@ impl Launcher {
                 if !entry.installed || instance.versions.iter().any(|v| v.id == entry.id) {
                     continue;
                 }
-                let ready = version::resolve(self.root(), &game, &entry.id).and_then(|resolved| {
-                    version::check_launch_files(self.root(), &game, &resolved)
-                });
+                let ready = version::resolve(&game, &entry.id)
+                    .and_then(|resolved| version::check_launch_files(&game, &resolved));
                 if ready.is_err() {
                     entry.installed = false;
                     entry.download_progress = 0.0;
@@ -505,14 +504,7 @@ impl Launcher {
                             .join(format!("{current}.jar")),
                     );
                 }
-                let read_path = if path.is_file() {
-                    path.clone()
-                } else {
-                    self.root()
-                        .join("metadata/versions")
-                        .join(format!("{current}.json"))
-                };
-                let Ok(value) = storage::read_json::<Value>(&read_path) else {
+                let Ok(value) = storage::read_json::<Value>(&path) else {
                     continue;
                 };
                 if value["id"].as_str() != Some(&current) {
@@ -549,7 +541,7 @@ impl Launcher {
                     }
                 }
             }
-            if let Ok(resolved) = version::resolve(self.root(), game, &id) {
+            if let Ok(resolved) = version::resolve(game, &id) {
                 if let Some(file) = resolved
                     .version
                     .logging
@@ -622,26 +614,12 @@ impl Launcher {
                 if target.join(&relative).try_exists()? {
                     continue;
                 }
-                let local = game.join(&relative);
-                let legacy = if relative.starts_with("versions")
-                    && relative.extension().is_some_and(|e| e == "json")
-                {
-                    self.root()
-                        .join("metadata/versions")
-                        .join(relative.file_name().unwrap())
-                } else {
-                    self.root().join(&relative)
-                };
-                let (path, root) = if local.is_file() {
-                    (local, &game)
-                } else {
-                    (legacy, &self.0.root)
-                };
+                let path = game.join(&relative);
                 if !path.is_file() {
                     continue;
                 }
                 let canonical = path.canonicalize()?;
-                if !canonical.starts_with(root) || canonical != path {
+                if !canonical.starts_with(&game) || canonical != path {
                     bail!("版本依赖包含符号链接：{}", path.display());
                 }
                 files.push((path.clone(), relative, fs::metadata(path)?.len()));

@@ -22,7 +22,7 @@ impl ContentInstall<'_> {
     ) -> futures_util::future::BoxFuture<'a, Result<()>> {
         Box::pin(async move {
             let sink = Event::scoped(self.sink, self.id, Some("pack_files"));
-            let overridden = job.overridden.clone().unwrap_or_default();
+            let overridden = job.overridden.clone();
             let total = job.pack.files.len();
             let mut mirrors = HashMap::new();
             for file in &job.pack.files {
@@ -109,9 +109,6 @@ impl ContentInstall<'_> {
                         });
                     }
                     if !files.is_empty() {
-                        downloader
-                            .import_cached_files(self.launcher.root(), &files, self.cancel)
-                            .await?;
                         tokio::select! {
                             _ = self.cancel.cancelled() => bail!("操作已取消"),
                             result = sender.send(files) => result.context("整合包下载队列已关闭")?,

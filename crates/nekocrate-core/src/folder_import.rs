@@ -223,9 +223,7 @@ impl Launcher {
                 entries.skip_current_dir();
                 let same = existing.iter().find(|(directory, _)| directory == path);
                 let blocked = if same.is_none() {
-                    self.linkable_directory(path, None)
-                        .err()
-                        .map(|e| e.to_string())
+                    self.linkable_directory(path).err().map(|e| e.to_string())
                 } else {
                     None
                 };

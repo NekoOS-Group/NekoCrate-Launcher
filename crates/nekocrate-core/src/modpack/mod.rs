@@ -56,30 +56,16 @@ pub struct Preview {
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct Job {
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    instance: String,
     version: String,
     name: String,
     archive: PathBuf,
     pack: Pack,
-    #[serde(default)]
     overrides_done: bool,
-    #[serde(default)]
     files_done: bool,
-    #[serde(default)]
     completed: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pending_profile: Option<Value>,
-    #[serde(default)]
-    overridden: Option<std::collections::HashSet<String>>,
-}
-impl Job {
-    fn override_paths(&self) -> Result<std::collections::HashSet<String>> {
-        self.overridden
-            .clone()
-            .map(Ok)
-            .unwrap_or_else(|| archive::override_paths(&self.archive, &self.pack))
-    }
+    overridden: std::collections::HashSet<String>,
 }
 #[derive(Clone, Debug, Serialize)]
 pub struct PackStatus {
@@ -234,7 +220,6 @@ impl Launcher {
         pack.files
             .retain(|f| !f.optional || optional.contains(&f.key));
         let job = Job {
-            instance: String::new(),
             version: version.clone(),
             name: version.clone(),
             archive,
@@ -243,7 +228,7 @@ impl Launcher {
             files_done: false,
             completed: false,
             pending_profile: None,
-            overridden: Some(overrides),
+            overridden: overrides,
         };
         std::fs::create_dir_all(dir.join("mods"))?;
         std::fs::create_dir_all(dir.join("config"))?;
@@ -306,33 +291,14 @@ impl Launcher {
         if !instance.versions.iter().any(|v| v.id == version) {
             bail!("版本不存在");
         }
-        if let Some(issue) = self.modpack_migration_issue(id, version) {
-            bail!("{issue}");
-        }
         record::read_job(&self.available_game_dir(id)?, version)
     }
 
-    pub(crate) fn cached_modpack_manifest(
-        &self,
-        id: &str,
-        version: &str,
-    ) -> Result<(PathBuf, Value)> {
-        let job = record::read_job(&self.available_game_dir(id)?, version)
-            .or_else(|_| self.legacy_pack_job(id, version).map(|(_, job)| job))?;
-        Ok((
-            PathBuf::from(format!(
-                "{}::{}",
-                job.archive.display(),
-                job.pack.manifest_name()
-            )),
-            job.pack.manifest,
-        ))
-    }
     pub async fn modpack_status(&self, id: &str, version: &str) -> Result<PackStatus> {
         let job = self.pack_job(id, version)?;
         let game = self.available_game_dir(id)?.join("versions").join(version);
         let overridden = if job.overrides_done {
-            job.override_paths()?
+            job.overridden.clone()
         } else {
             std::collections::HashSet::new()
         };
@@ -435,13 +401,10 @@ impl Launcher {
         let _directory_guard = self.idle(id)?;
         let mut job = self.pack_job(id, selected)?;
         let game = self.available_game_dir(id)?;
-        record::recover_manifest(&game, selected, &job)?;
         let target = game.join("versions").join(selected);
         let instance = self.instance(id)?;
         crate::download::check_cancel(cancel)?;
         let sink = Event::scoped(sink, id, None);
-        let overridden = job.override_paths()?;
-        job.overridden = Some(overridden.clone());
         record::write_job(&game, selected, &job)?;
         let settings = self.settings();
         let downloader = Downloader::new(self.root(), settings.clone())?.for_installation(
@@ -481,7 +444,6 @@ impl Launcher {
             target: &target,
             instance: &instance,
             job: &mut job,
-            settings: &settings,
             downloader: &downloader,
             cancel,
             sink: &sink,

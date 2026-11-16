@@ -7,7 +7,6 @@ export type WindowRect = {
 export type WindowArea = { width: number; height: number };
 export type WindowSnap = "left" | "right" | "maximized";
 export type WindowLayout = { rect: WindowRect; snap?: WindowSnap };
-export const WINDOW_MARGIN = 12;
 export const WINDOW_MIN = { width: 340, height: 240 };
 
 export function fitWindow(rect: WindowRect, area: WindowArea): WindowRect {

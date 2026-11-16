@@ -47,12 +47,12 @@ pub fn explain_error(error: anyhow::Error) -> anyhow::Error {
 
 pub fn validate(settings: &Settings) -> Result<()> {
     if !["auto", "official", "bmclapi"].contains(&settings.download_source.as_str())
-        || !["auto", "official", "modrinth", "curseforge", "bbsmc"]
+        || !["auto", "modrinth", "curseforge", "bbsmc"]
             .contains(&settings.mod_download_source.as_str())
     {
         bail!("未知下载源");
     }
-    if !["system", "none", "http", "socks", "custom"].contains(&settings.proxy_mode.as_str()) {
+    if !["system", "none", "http", "socks"].contains(&settings.proxy_mode.as_str()) {
         bail!("未知代理模式");
     }
     if settings.proxy_username.len() > 255
@@ -63,9 +63,7 @@ pub fn validate(settings: &Settings) -> Result<()> {
     {
         bail!("代理账号和密码不能超过 255 字节");
     }
-    if matches!(settings.proxy_mode.as_str(), "http" | "socks" | "custom")
-        || !settings.proxy_url.is_empty()
-    {
+    if matches!(settings.proxy_mode.as_str(), "http" | "socks") || !settings.proxy_url.is_empty() {
         let valid = Url::parse(&settings.proxy_url).is_ok_and(|url| {
             ["http", "https", "socks5", "socks5h"].contains(&url.scheme())
                 && match settings.proxy_mode.as_str() {
@@ -108,7 +106,7 @@ pub fn client_builder(root: &Path, settings: &Settings) -> Result<ClientBuilder>
     ));
     Ok(match settings.proxy_mode.as_str() {
         "none" => builder.no_proxy(),
-        "http" | "socks" | "custom" => {
+        "http" | "socks" => {
             let mut proxy = Proxy::all(&settings.proxy_url)?;
             // Empty fields disable authentication. Credentials are never part of
             // the configured URL, origin headers, snapshots, or application logs.
@@ -303,8 +301,10 @@ mod tests {
 
     #[test]
     fn existing_preferences_and_source_boundaries_are_preserved() {
-        let mut settings: Settings =
-            serde_json::from_str(r#"{"download_source":"official"}"#).unwrap();
+        let mut settings = Settings {
+            download_source: "official".into(),
+            ..Settings::default()
+        };
         assert_eq!(settings.mod_download_source, "auto");
         assert_eq!(settings.proxy_mode, "system");
         let game = "https://libraries.minecraft.net/org/example.jar";
@@ -330,7 +330,7 @@ mod tests {
     #[test]
     fn validates_proxy_without_echoing_secrets() {
         let mut settings = Settings {
-            proxy_mode: "custom".into(),
+            proxy_mode: "http".into(),
             ..Settings::default()
         };
         for url in [
@@ -351,6 +351,12 @@ mod tests {
             "socks5://[::1]:1080",
             "socks5h://localhost:1080",
         ] {
+            settings.proxy_mode = if url.starts_with("socks") {
+                "socks"
+            } else {
+                "http"
+            }
+            .into();
             settings.proxy_url = url.into();
             validate(&settings).unwrap();
         }
@@ -372,13 +378,8 @@ mod tests {
         validate(&settings).unwrap();
         settings.proxy_mode = "none".into();
         validate(&settings).unwrap();
-        let legacy: Settings = serde_json::from_str(
-            r#"{"concurrency":12,"proxy_mode":"custom","proxy_url":"socks5://localhost:1080"}"#,
-        )
-        .unwrap();
-        assert!(!legacy.adaptive_concurrency);
-        assert_eq!(legacy.concurrency, 12);
-        validate(&legacy).unwrap();
+        settings.proxy_mode = "custom".into();
+        assert!(validate(&settings).is_err());
     }
 
     #[tokio::test]

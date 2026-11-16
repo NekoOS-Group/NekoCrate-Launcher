@@ -242,7 +242,6 @@ async fn game_files_resume_offline_after_native_preparation_fails() {
     std::fs::write(&natives, b"occupied").unwrap();
     let settings = Settings {
         proxy_mode: "none".into(),
-        retries: 0,
         ..Default::default()
     };
     let cancel = CancellationToken::new();

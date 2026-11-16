@@ -4,7 +4,6 @@ use serde_json::Value;
 use std::{
     collections::HashSet,
     fs::File,
-    io::Read,
     path::{Path, PathBuf},
 };
 use zip::ZipArchive;
@@ -58,11 +57,12 @@ pub(crate) fn open(path: &Path) -> Result<ZipArchive<File>> {
     Ok(zip)
 }
 pub(crate) fn json(zip: &mut ZipArchive<File>, name: &str) -> Result<Value> {
-    let entry = zip.by_name(name)?;
+    let mut entry = zip.by_name(name)?;
     if entry.size() > 8 * 1024 * 1024 {
         bail!("整合包清单过大");
     }
-    Ok(serde_json::from_reader(entry.take(8 * 1024 * 1024 + 1))?)
+    let bytes = crate::storage::read_bounded(&mut entry, 8 * 1024 * 1024)?;
+    Ok(serde_json::from_slice(&bytes)?)
 }
 pub(crate) fn component(value: &str) -> Result<String> {
     if value.is_empty()
@@ -79,6 +79,7 @@ pub(crate) fn component(value: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
 
     #[test]
     fn independent_zip_fixture_preserves_deflate_zip64_unicode_and_crc_checks() {

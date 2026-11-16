@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import WindowControls from "./WindowControls.vue";
 import { ref, watch } from "vue";
 import { ArrowLeft, Archive, X, Download, LoaderCircle } from "lucide-vue-next";
 import DownloadDestination from "./DownloadDestination.vue";
@@ -76,7 +75,6 @@ function submit() {
         @update:location="$emit('update:location', $event)"
         @browse="$emit('browse')"
       />
-      <WindowControls />
       <button
         class="icon-button"
         :disabled="disabled"

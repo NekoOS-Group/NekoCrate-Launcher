@@ -1,5 +1,5 @@
 //! Small, read-only presentation data for visible local resources. No network or extraction.
-use super::{ContentKind, details::MOD_DESCRIPTORS};
+use super::ContentKind;
 use crate::{Launcher, resources::Platform, storage};
 use anyhow::Result;
 use serde::Serialize;
@@ -7,7 +7,6 @@ use serde_json::Value;
 use std::{fs, io::Read, path::Path};
 
 const ICON_LIMIT: u64 = 512 * 1024;
-const DESCRIPTOR_LIMIT: u64 = 1024 * 1024;
 #[cfg(test)]
 mod tests;
 
@@ -57,17 +56,9 @@ fn project_link(value: &str) -> Option<ContentProject> {
 
 fn entry(archive: &mut zip::ZipArchive<fs::File>, name: &str, limit: u64) -> Option<Vec<u8>> {
     storage::safe_relative(name).ok()?;
-    let mut entry = archive.by_name(name).ok()?;
-    if entry.size() > limit {
-        return None;
-    }
-    let mut bytes = Vec::new();
-    entry
-        .by_ref()
-        .take(limit + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    (bytes.len() as u64 <= limit).then_some(bytes)
+    crate::mod_metadata::entry(archive, name, limit)
+        .ok()
+        .flatten()
 }
 
 fn icon_name(value: &Value) -> Option<&str> {
@@ -97,33 +88,18 @@ fn from_archive(path: &Path, kind: ContentKind) -> ContentPresentation {
     };
     let mut icons = Vec::new();
     if matches!(kind, ContentKind::Mods) {
-        for descriptor in MOD_DESCRIPTORS {
-            let Some(bytes) = entry(&mut archive, descriptor, DESCRIPTOR_LIMIT) else {
+        let metadata = crate::mod_metadata::read(path);
+        for document in &metadata.documents {
+            let Ok(value) = &document.value else { continue };
+            let Ok(infos) = crate::mod_metadata::infos(document.name, value) else {
                 continue;
             };
-            let value: Option<Value> = if descriptor.ends_with(".toml") {
-                std::str::from_utf8(&bytes)
-                    .ok()
-                    .and_then(|s| toml::from_str::<toml::Value>(s).ok())
-                    .and_then(|v| serde_json::to_value(v).ok())
-            } else if descriptor == "fabric.mod.json" {
-                crate::fabric_metadata::parse(&bytes).ok()
-            } else {
-                serde_json::from_slice(&bytes).ok()
-            };
-            let Some(value) = value else { continue };
-            let infos: Vec<&Value> = match descriptor {
-                "quilt.mod.json" => vec![&value["quilt_loader"]["metadata"]],
-                "fabric.mod.json" => vec![&value],
-                "mcmod.info" => value
-                    .as_array()
-                    .or_else(|| value["modList"].as_array())
-                    .into_iter()
-                    .flatten()
-                    .collect(),
-                _ => value["mods"].as_array().into_iter().flatten().collect(),
-            };
             for info in infos {
+                let info = if document.name == "quilt.mod.json" {
+                    &info["metadata"]
+                } else {
+                    info
+                };
                 if let Some(name) = icon_name(&info["icon"])
                     .or_else(|| info["logoFile"].as_str())
                     .or_else(|| value["logoFile"].as_str())

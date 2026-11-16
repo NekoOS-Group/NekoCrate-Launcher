@@ -63,7 +63,7 @@ test("下载中实例打开任务列表并持续更新进度，其他实例仍�
     await ui.openInstance(second);
     assert.equal(ui.modal.value, "edit");
     assert.equal(ui.utility.value, null);
-    assert.equal(ui.instanceSaving.value, false);
+    assert.equal(ui.instanceWrites.has(ui.editing.value?.id), false);
     ui.form.name = "Renamed";
     ui.form.icon = 3;
     ui.form.memory_mb = 4096;
@@ -118,7 +118,7 @@ test("保存失败不会结束下载或关闭设置，可重试且不会重复�
     await ui.edit(second);
     ui.form.memory_mb = 8192;
     const submission = ui.submit();
-    assert.equal(ui.instanceSaving.value, true);
+    assert.equal(ui.instanceWrites.has(ui.editing.value?.id), true);
     await flush();
     assert.equal(
       fixture.calls.filter((call) => call.op === "update").length,
@@ -128,7 +128,7 @@ test("保存失败不会结束下载或关闭设置，可重试且不会重复�
     await submission;
     assert.match(ui.visibleError.value, /write failed/);
     assert.equal(ui.modal.value, "edit");
-    assert.equal(ui.instanceSaving.value, false);
+    assert.equal(ui.instanceWrites.has(ui.editing.value?.id), false);
     assert.equal(ui.form.memory_mb, 8192);
     assert.equal(ui.busy.value, true);
     assert.equal(ui.current.value.status, "running");
@@ -169,7 +169,7 @@ test("关闭后重开的编辑器不被迟到的保存响应关闭或覆盖", as
     await submission;
     assert.equal(ui.modal.value, "edit");
     assert.equal(ui.form.name, "New draft");
-    assert.equal(ui.instanceSaving.value, false);
+    assert.equal(ui.instanceWrites.has(ui.editing.value?.id), false);
   } finally {
     dispose();
   }

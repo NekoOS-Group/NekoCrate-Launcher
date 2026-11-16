@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import WindowControls from "./WindowControls.vue";
 import {
   computed,
   nextTick,
@@ -16,13 +15,11 @@ import {
   Trash2,
   X,
   Search,
-  ArrowDown,
-  Settings2,
+  ChevronRight,
   Coffee,
   MemoryStick,
   Package,
   Wrench,
-  FileText,
 } from "lucide-vue-next";
 import { t, translateMessage, locale } from "../i18n";
 import GlassSelect from "./GlassSelect.vue";
@@ -30,7 +27,13 @@ import {
   createLogPresenter,
   filterLogs,
   copyLogRows,
+  unattributedLogSource,
 } from "../logPresentation";
+import {
+  createLogOutline,
+  visibleLogNodes,
+  type LogNode,
+} from "../logStructure";
 import type { LogStore } from "../logStore";
 import { LogViewport } from "../logViewport";
 import { createViewportMotion } from "../viewportMotion";
@@ -43,7 +46,6 @@ import {
 
 const props = defineProps<{
   store: LogStore;
-  instances: readonly { id: string; name: string }[];
   initialScope: string;
   session: number;
   recoveries?: readonly LaunchRecovery[];
@@ -55,7 +57,12 @@ const emit = defineEmits<{
   recover: [recovery: LaunchRecovery, action: RecoveryAction];
   clear: [scope: string];
 }>();
-const filter = reactive({ scope: props.initialScope, level: "all", query: "" });
+const filter = reactive({
+  scope: props.initialScope,
+  source: "",
+  level: "all",
+  query: "",
+});
 const recovery = computed(() =>
   props.recoveries?.find(
     (item) => filter.scope === "all" || item.instanceId === filter.scope,
@@ -67,15 +74,41 @@ const recoveryIcons = {
   mods: Package,
   dependencies: Wrench,
   repair: Wrench,
-  settings: Settings2,
-  report: FileText,
 };
+const repairActions = computed(
+  () =>
+    recovery.value?.actions.filter(
+      (action) => action !== "settings" && action !== "report",
+    ) || [],
+);
 const raw = shallowRef(props.store.snapshot());
 const presenter = createLogPresenter();
 const rows = computed(() =>
   presenter.update(raw.value, translateMessage, locale.value),
 );
 const filtered = computed(() => filterLogs(rows.value, filter));
+const outline = createLogOutline();
+const expanded = shallowRef(new Map<number, boolean>());
+const outlineKey = computed(() => [
+  filter.scope,
+  filter.source,
+  filter.level,
+  filter.query,
+]);
+const tree = computed(() => outline.build(filtered.value, outlineKey.value));
+const displayed = computed(() =>
+  visibleLogNodes(tree.value, expanded.value, !!filter.query.trim()),
+);
+function isExpanded(node: LogNode) {
+  return (
+    expanded.value.get(node.id) ?? (!!filter.query.trim() || !node.collapsed)
+  );
+}
+function toggle(node: LogNode) {
+  viewport.following = false;
+  expanded.value = new Map(expanded.value).set(node.id, !isExpanded(node));
+  reveal(false);
+}
 const count = computed(() =>
   filtered.value.reduce((sum, row) => sum + row.count, 0),
 );
@@ -84,20 +117,19 @@ const scopedCount = computed(() =>
     .filter((line) => filter.scope === "all" || line.scope === filter.scope)
     .reduce((sum, line) => sum + line.count, 0),
 );
-const scopes = computed(() => {
-  const names = new Map(
-    props.instances.map((instance) => [instance.id, instance.name]),
-  );
-  for (const line of raw.value)
-    if (line.instanceId && !names.has(line.instanceId))
-      names.set(
-        line.instanceId,
-        `${t("已移除实例")} · ${line.instanceId.slice(0, 8)}`,
-      );
+const senders = computed(() => {
+  const names = new Set<string>();
+  for (const line of rows.value)
+    if (filter.scope === "all" || line.scope === filter.scope)
+      names.add(line.filterSource || unattributedLogSource);
   return [
-    { value: "all", label: t("全部实例") },
-    { value: "launcher", label: t("启动器") },
-    ...Array.from(names, ([value, label]) => ({ value, label })),
+    { value: "", label: t("所有发送者") },
+    ...Array.from(names)
+      .sort((a, b) => a.localeCompare(b))
+      .map((value) => ({
+        value,
+        label: value === unattributedLogSource ? t("未标注发送者") : value,
+      })),
   ];
 });
 const levels = [
@@ -107,7 +139,7 @@ const levels = [
   { value: "info", label: "INFO" },
   { value: "debug", label: "DEBUG / TRACE" },
 ];
-const viewport = new LogViewport();
+const viewport = new LogViewport<LogNode>();
 const content = ref<HTMLElement>();
 const visible = shallowRef(viewport.window());
 const motion = createViewportMotion(".log-row, .log-empty", "log-content");
@@ -168,26 +200,43 @@ function refresh() {
 }
 function clear() {
   reveal();
+  expanded.value = new Map();
   props.store.clear(filter.scope);
   emit("clear", filter.scope);
   refresh();
 }
 watch(
-  [filtered, () => filter.scope, () => filter.level, () => filter.query],
+  [
+    displayed,
+    () => filter.scope,
+    () => filter.source,
+    () => filter.level,
+    () => filter.query,
+    expanded,
+  ],
   ([next], previous) => {
     const reset =
       !previous.length ||
       filter.scope !== previous[1] ||
-      filter.level !== previous[2] ||
-      filter.query !== previous[3];
-    viewport.setRows(next, reset);
+      filter.source !== previous[2] ||
+      filter.level !== previous[3] ||
+      filter.query !== previous[4];
+    viewport.setRows(next, reset, expanded.value !== previous[5]);
     publish();
   },
   { immediate: true, flush: "sync" },
 );
 watch(
+  () => filter.query,
+  () => {
+    expanded.value = new Map();
+  },
+  { flush: "sync" },
+);
+watch(
   [
     () => filter.scope,
+    () => filter.source,
     () => filter.level,
     () => filter.query,
     () => props.session,
@@ -201,9 +250,11 @@ watch(
   () => {
     Object.assign(filter, {
       scope: props.initialScope,
+      source: "",
       level: "all",
       query: "",
     });
+    expanded.value = new Map();
     refresh();
     latest();
   },
@@ -271,6 +322,17 @@ onBeforeUnmount(() => {
       </h2>
       <div class="inline-actions">
         <button
+          v-for="action in repairActions"
+          :key="action"
+          class="icon-button"
+          :disabled="busy"
+          :aria-label="t(recoveryLabels[action])"
+          :title="t(recoveryLabels[action])"
+          @click="recovery && emit('recover', recovery, action)"
+        >
+          <component :is="recoveryIcons[action]" :size="16" />
+        </button>
+        <button
           class="icon-button"
           :disabled="!count"
           :aria-label="t('复制筛选后的日志')"
@@ -289,7 +351,6 @@ onBeforeUnmount(() => {
         >
           <Trash2 :size="16" />
         </button>
-        <WindowControls />
         <button
           class="icon-button"
           :aria-label="t('关闭日志')"
@@ -301,11 +362,17 @@ onBeforeUnmount(() => {
     </header>
     <div class="log-filters">
       <div class="list-reveal-item" :style="listRevealStyle(0)">
-        <label id="log-scope-label" class="sr-only">{{ t("日志来源") }}</label
+        <label id="log-sender-label" class="sr-only">{{
+          t("日志发送者")
+        }}</label
         ><GlassSelect
-          id="log-scope"
-          v-model="filter.scope"
-          :options="scopes"
+          id="log-sender"
+          v-model="filter.source"
+          :options="senders"
+          :aria-label="t('日志发送者')"
+          :search-placeholder="t('搜索发送者')"
+          :menu-min-width="480"
+          searchable
           floating
           compact
           literal-labels
@@ -330,34 +397,6 @@ onBeforeUnmount(() => {
           spellcheck="false"
       /></label>
     </div>
-    <div v-if="recovery" class="log-recovery">
-      <span
-        class="log-recovery-target"
-        :title="`${recovery.instanceName} · ${recovery.versionName}`"
-        >{{ recovery.instanceName }} · {{ recovery.versionName }}</span
-      >
-      <div class="log-recovery-actions">
-        <button
-          v-for="action in recovery.actions"
-          :key="action"
-          class="text-button"
-          :disabled="busy && action !== 'report'"
-          @click="emit('recover', recovery, action)"
-        >
-          <component :is="recoveryIcons[action]" :size="14" />
-          {{
-            t(
-              action === "report" &&
-                /^(crash-reports[/\\]|hs_err_pid)/.test(
-                  recovery.report.file?.path || "",
-                )
-                ? "打开崩溃报告"
-                : recoveryLabels[action],
-            )
-          }}
-        </button>
-      </div>
-    </div>
     <div class="log-stage">
       <div
         ref="content"
@@ -379,50 +418,76 @@ onBeforeUnmount(() => {
             class="log-window"
             :style="{ transform: `translateY(${visible.offset}px)` }"
           >
-            <p
+            <div
               v-for="(line, index) in visible.items"
               :key="line.id"
               v-log-row
               :data-log-id="line.id"
               role="listitem"
               :aria-posinset="visible.start + index + 1"
-              :aria-setsize="filtered.length"
+              :aria-setsize="displayed.length"
               class="log-row"
               :class="[
-                line.level && `log-${line.level.toLowerCase()}`,
-                line.detail && `log-${line.detail}`,
+                line.row.level && `log-${line.row.level.toLowerCase()}`,
+                line.row.detail && `log-${line.row.detail}`,
+                { 'log-child': line.depth > 0 },
               ]"
+              :style="{ '--log-depth': Math.min(line.depth, 24) }"
             >
               <time
                 :title="
-                  line.count > 1 ? `${line.time} – ${line.lastTime}` : undefined
+                  line.count > 1
+                    ? `${line.time} – ${line.row.lastTime}`
+                    : undefined
                 "
-                >{{ line.time }}</time
+                >{{ line.continuation ? "" : line.time }}</time
               >
-              <span class="log-level">{{ line.level }}</span>
-              <span class="log-message"
-                ><span v-if="line.source" class="log-source">{{
-                  line.source
-                }}</span
-                ><span class="log-body">{{ line.message }}</span
+              <span class="log-level">{{
+                line.continuation ? "" : line.row.level
+              }}</span>
+              <div class="log-message">
+                <button
+                  v-if="line.children.length"
+                  class="log-fold"
+                  :aria-expanded="isExpanded(line)"
+                  :aria-label="
+                    t(isExpanded(line) ? '收起日志详情' : '展开日志详情')
+                  "
+                  :title="t(isExpanded(line) ? '收起日志详情' : '展开日志详情')"
+                  @click="toggle(line)"
+                >
+                  <ChevronRight :size="13" />
+                </button>
+                <span
+                  v-if="line.row.source && !line.continuation && !line.depth"
+                  class="log-source"
+                  >{{ line.row.source }} ·
+                </span>
+                <span class="log-body">{{ line.text }}</span
                 ><span
                   v-if="line.count > 1"
                   class="log-repeat"
-                  :title="t('重复 {count} 次', { count: line.count })"
+                  :title="
+                    t(
+                      line.row.variants
+                        ? '相似日志 {count} 条'
+                        : '重复 {count} 次',
+                      { count: line.count },
+                    )
+                  "
                   >×{{ line.count }}</span
-                ></span
-              >
-            </p>
+                ><span
+                  v-if="
+                    line.descendants && !line.row.variants && !isExpanded(line)
+                  "
+                  class="log-fold-count"
+                  >{{ t("{count} 条", { count: line.descendants }) }}</span
+                >
+              </div>
+            </div>
           </div>
         </div>
       </div>
     </div>
-    <button
-      v-if="!visible.following"
-      class="log-latest text-button"
-      @click="latest"
-    >
-      <ArrowDown :size="14" />{{ t("回到最新日志") }}
-    </button>
   </section>
 </template>

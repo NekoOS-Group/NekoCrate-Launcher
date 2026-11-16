@@ -277,8 +277,10 @@ impl Provider {
     ) -> Option<(Value, bool)> {
         let path = self.cache_path(url);
         let value = storage::read_json::<Value>(&path).ok()?;
-        let changed =
-            revision.is_some_and(|revision| value.get("_nekocrate_revision") != Some(revision));
+        let changed = match revision {
+            Some(revision) => value.get("_nekocrate_revision")? != revision,
+            None => false,
+        };
         Some((value, changed || !cache_is_fresh(&path, PRESENTATION_TTL)))
     }
     async fn presentation_at(
@@ -1086,7 +1088,7 @@ mod presentation_cache_tests {
     }
 
     #[tokio::test]
-    async fn curseforge_bodies_follow_project_revision_and_legacy_cache_is_still_readable() {
+    async fn curseforge_bodies_follow_project_revision_and_discard_unversioned_cache() {
         let temp = tempfile::tempdir().unwrap();
         let api = provider(temp.path());
         let cancel = CancellationToken::new();
@@ -1095,21 +1097,24 @@ mod presentation_cache_tests {
                 crate::test_http::serve(vec![(200, json!({"data":"new body"}).to_string())]).await;
             let url: reqwest::Url = url.parse().unwrap();
             let mut old = json!({"data":"old body"});
+            let versioned = previous.is_some();
             if let Some(previous) = previous {
                 old["_nekocrate_revision"] = previous;
             }
             let path = seed(&api, &url, &old, Duration::from_secs(60));
             let revision = json!(["2026-11-02", 101]);
-            assert_eq!(
-                api.presentation_at(url.clone(), false, Some(&revision), &cancel)
-                    .await
-                    .unwrap(),
-                (old, true)
-            );
-            let (fresh, stale) = api
-                .presentation_at(url.clone(), true, Some(&revision), &cancel)
+            let initial = api
+                .presentation_at(url.clone(), false, Some(&revision), &cancel)
                 .await
                 .unwrap();
+            let (fresh, stale) = if versioned {
+                assert_eq!(initial, (old, true));
+                api.presentation_at(url.clone(), true, Some(&revision), &cancel)
+                    .await
+                    .unwrap()
+            } else {
+                initial
+            };
             assert!(!stale);
             assert_eq!(fresh["data"], "new body");
             assert_eq!(

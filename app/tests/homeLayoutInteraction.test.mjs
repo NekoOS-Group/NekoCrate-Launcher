@@ -235,7 +235,8 @@ test("saved positions load before paint and viewport changes keep all controls r
   const value = JSON.stringify({
     version: 1,
     positions: {
-      account: { x: 1, y: 1 },
+      account: { x: (508 - 12) / (900 - 224 - 24), y: 1 },
+      tools: { x: 1, y: 1 },
       instances: { x: 0, y: 0 },
       themes: { x: 0, y: 1 },
       launch: { x: 1, y: 0 },

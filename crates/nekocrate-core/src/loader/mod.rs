@@ -190,7 +190,7 @@ impl Launcher {
         let sink = Event::scoped(sink, id, None);
         crate::download::check_cancel(cancel)?;
         if version::metadata_path(&game, selected)?.is_file() {
-            let resolved = version::resolve(self.root(), &game, selected)?;
+            let resolved = version::resolve(&game, selected)?;
             if resolved.loader.as_ref() != Some(&record.loader)
                 || resolved.minecraft_version != record.minecraft
             {
@@ -221,7 +221,7 @@ impl Launcher {
             record,
             instance,
             downloader,
-            auto_java: settings.auto_java,
+
             cancel,
             sink: &sink,
             profile: None,

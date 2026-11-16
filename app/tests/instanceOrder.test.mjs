@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  instanceDropTarget,
   instanceGridDropTarget,
   instanceZoneDropTarget,
   instanceVisibleLimit,
@@ -67,17 +66,19 @@ test("拖放以相邻实例中心为分界，忽略拖动来源，并使用滚�
     id: item.id,
     left: 100 + 60 * index,
     width: 56,
+    top: 0,
+    height: 56,
   }));
-  assert.equal(instanceDropTarget(positions, "b", 100), "a");
-  assert.equal(instanceDropTarget(positions, "b", 128), "c");
-  assert.equal(instanceDropTarget(positions, "b", 247), "c");
-  assert.equal(instanceDropTarget(positions, "b", 248), "d");
-  assert.equal(instanceDropTarget(positions, "b", 340), null);
+  assert.equal(instanceGridDropTarget(positions, "b", 100, 0), "a");
+  assert.equal(instanceGridDropTarget(positions, "b", 128, 0), "c");
+  assert.equal(instanceGridDropTarget(positions, "b", 247, 0), "c");
+  assert.equal(instanceGridDropTarget(positions, "b", 248, 0), "d");
+  assert.equal(instanceGridDropTarget(positions, "b", 340, 0), null);
   const scrolled = positions.map((position) => ({
     ...position,
     left: position.left - 120,
   }));
-  assert.equal(instanceDropTarget(scrolled, "b", 128), "d");
+  assert.equal(instanceGridDropTarget(scrolled, "b", 128, 0), "d");
 });
 
 test("相邻实例让位后，静止指针不会导致顺序来回抖动", () => {
@@ -86,12 +87,19 @@ test("相邻实例让位后，静止指针不会导致顺序来回抖动", () =>
       id: item.id,
       left: 100 + 60 * index,
       width: 56,
+      top: 0,
+      height: 56,
     }));
   for (const source of items) {
     for (let x = 85; x <= 355; x += 3) {
-      const before = instanceDropTarget(positions(items), source.id, x);
+      const before = instanceGridDropTarget(positions(items), source.id, x, 0);
       const preview = moveInstanceBefore(items, source.id, before);
-      const nextTarget = instanceDropTarget(positions(preview), source.id, x);
+      const nextTarget = instanceGridDropTarget(
+        positions(preview),
+        source.id,
+        x,
+        0,
+      );
       assert.deepEqual(
         ids(moveInstanceBefore(items, source.id, nextTarget)),
         ids(preview),
@@ -164,11 +172,11 @@ test("vertical dock sorting uses height, remains stable after reordering and acc
       height: 56,
     }));
   assert.equal(
-    instanceGridDropTarget(positions(items), "a", 100, 180, "vertical"),
+    instanceGridDropTarget(positions(items), "a", 100, 180, "vertical", 0),
     "c",
   );
   assert.equal(
-    instanceGridDropTarget(positions(items), "a", 156, 180, "vertical"),
+    instanceGridDropTarget(positions(items), "a", 156, 180, "vertical", 0),
     "c",
   );
   for (const source of items) {

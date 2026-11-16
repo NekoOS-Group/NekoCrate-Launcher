@@ -17,7 +17,6 @@ pub(crate) struct Payload<'a> {
     pub working: &'a Path,
     pub version: &'a Version,
     pub explicit_java: Option<&'a str>,
-    pub auto_java: bool,
     pub downloader: &'a Downloader,
     pub cancel: &'a CancellationToken,
     pub sink: &'a EventSink,
@@ -46,14 +45,9 @@ impl Payload<'_> {
             });
             crate::java::ensure(
                 self.root,
-                crate::java::JavaRequirement::for_working_directory(
-                    self.version,
-                    self.working,
-                    self.explicit_java,
-                )
-                .await?,
+                crate::java::JavaRequirement::for_working_directory(self.version, self.working)
+                    .await?,
                 self.explicit_java,
-                self.auto_java,
                 self.downloader,
                 self.cancel,
                 &sink,
